@@ -56,7 +56,43 @@ def batch(out_dir: str, paths: list[str]) -> int:
     return 1 if errors or any(j.error for j in jobs) else 0
 
 
+def _tell_user_about_crashes(app) -> None:
+    """A crash that nothing else caught: it is already in the log; say so instead of failing silently."""
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtCore import QUrl
+    from PySide6.QtWidgets import QMessageBox
+
+    from minute_filler import log
+
+    class Notifier(QObject):
+        crashed = Signal(str)  # may be raised from any thread; shown on the window's thread
+
+    notifier = Notifier()
+    showing = []
+
+    def show(what: str) -> None:
+        if showing:  # one box at a time, however many errors follow
+            return
+        showing.append(1)
+        box = QMessageBox(QMessageBox.Warning, "Something went wrong",
+                          "The program hit an unexpected problem. You can carry on, but if it keeps happening "
+                          "please send the log (Help \u2192 Copy details for a problem report).\n\n" + what)
+        folder = box.addButton("Open log folder", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if box.clickedButton() == folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(log.log_dir())))
+        showing.clear()
+
+    notifier.crashed.connect(show)
+    log.on_crash = notifier.crashed.emit
+    app._crash_notifier = notifier  # keep it alive
+
+
 def main() -> int:
+    from minute_filler import log
+    log.setup()
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         return selftest(sys.argv[2], sys.argv[3:])
     if len(sys.argv) > 3 and sys.argv[1] == "--batch":
@@ -77,6 +113,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("DjinnItAgreementForm")
+    _tell_user_about_crashes(app)
     app.setStyle("Fusion")
     icon = Path(__file__).with_name("assets") / "app.ico"
     if icon.exists():

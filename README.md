@@ -99,6 +99,15 @@ On a typical business laptop with no dedicated graphics card, the model runs on 
 If photos come out blank, Windows' OCR language pack is missing. Install it from an admin PowerShell:
 `Add-WindowsCapability -Online -Name "Language.OCR~~~en-US~0.0.1.0"`
 
+## If something goes wrong
+
+The program keeps a small log at `%APPDATA%\DjinnItAgreementForm\logs\app.log` (about 3 MB at most). It records the program and Windows versions, which kind of file was read or failed, each form filled, and any crash with where it happened.
+
+**It never records what the documents say.** File names, e-mail addresses, index numbers, phone numbers and case names are left out, and nothing is sent anywhere.
+
+- **Help → Copy details for a problem report** puts the versions, a few settings and the recent log on the clipboard, ready to paste into an e-mail or a [GitHub issue](../../issues).
+- **Help → Open the log folder** opens the folder, if you would rather attach the file.
+
 ## Building from source
 
 Requires Python 3.12 on Windows.

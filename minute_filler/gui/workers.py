@@ -1,10 +1,11 @@
 """Runs slow work (OCR, PDF parsing, Ollama) off the UI thread."""
 from __future__ import annotations
 
-import traceback
 from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+
+from ..log import error as log_error
 
 
 class _Signals(QObject):
@@ -23,7 +24,7 @@ class Task(QRunnable):
         try:
             result = self.fn(*self.args, **self.kwargs)
         except Exception as e:  # reported to the UI, never crashes the app
-            traceback.print_exc()
+            log_error("a background task failed", e)
             self.signals.failed.emit(f"{type(e).__name__}: {e}")
         else:
             self.signals.finished.emit(result)

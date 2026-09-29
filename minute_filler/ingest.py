@@ -20,6 +20,8 @@ from pathlib import Path
 import pymupdf
 from PIL import Image, ImageOps
 
+from .log import describe, log
+
 try:  # pillow-heif is optional
     from pillow_heif import register_heif_opener
     register_heif_opener()
@@ -205,6 +207,7 @@ def ingest_file(path: str | Path) -> Ingested:
     try:
         return _ingest_file(path, ext)
     except Exception as e:
+        log.warning("could not read a %s file: %s", ext or "text", describe(e))
         if type(e) is ValueError or isinstance(e, (FileNotFoundError, PermissionError)):
             raise  # already says what is wrong
         # PyMuPDF, Pillow and zipfile report damaged files in their own words

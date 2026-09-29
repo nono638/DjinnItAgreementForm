@@ -16,6 +16,7 @@ from typing import Callable
 from .extract_regex import RegexExtractor, dedupe_attorneys, find_dates
 from .fill import fill_all, short_caption
 from .ingest import IMAGE_EXT, Ingested, ingest_file
+from .log import error as log_error, log
 from .merge import merge, refresh_delivery_date, refresh_rate
 from .models import CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_REGEX, SRC_USER
 from .settings import Settings
@@ -296,4 +297,6 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             done += job.saved
         except Exception as e:
             job.error = f"{type(e).__name__}: {e}"
+            log_error("could not save the forms of a job", e)
+    log.info("saved %d form(s) for %d job(s)", len(done), len(jobs))
     return done

@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import __version__
+from .. import __version__, log as logfile
+from ..log import error as log_error, log
 from ..batch import Job, expand_paths, fill_jobs, group, make_doc, out_dir_for, remerge
 from ..extract_llm import OllamaExtractor
 from ..extract_regex import RegexExtractor
@@ -624,6 +625,8 @@ class MainWindow(QMainWindow):
         m.addAction("Set up the &AI helper (Ollama)…", self._ai_help)
         m.addAction("Send &feedback…", lambda: QDesktopServices.openUrl(
             QUrl(f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}")))
+        m.addAction("Open the &log folder", self._open_log_folder)
+        m.addAction("&Copy details for a problem report", self._copy_diagnostics)
         m.addSeparator()
         m.addAction("&About DjinnItAgreementForm", lambda: AboutDialog(self).exec())
 
@@ -748,6 +751,7 @@ class MainWindow(QMainWindow):
                     docs.append(make_doc(ing, extractor.extract(ing), s, path))
                 except Exception as e:  # one bad file must not stop the rest
                     errors.append(f"{name}: {e}")
+                    log.info("skipped a document that could not be read")
             return docs, errors
 
         def step(i, n, name):
@@ -787,6 +791,7 @@ class MainWindow(QMainWindow):
                                 f"{len(self.jobs)} in total.")
             else:
                 self._update_status()
+            log.info("read %d of %d document(s)%s", len(docs), len(loaders), " (batch)" if batch else "")
             if errors:
                 self._unreadable(errors, len(loaders))
 
@@ -1175,6 +1180,13 @@ class MainWindow(QMainWindow):
                 self.rows[k].set_state(self.case.fields[k])
         self._show_rate_info()
 
+    def _open_log_folder(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(logfile.log_dir())))
+
+    def _copy_diagnostics(self):
+        QApplication.clipboard().setText(logfile.diagnostics(self.s))
+        self._toast("Copied: paste it into your message. It has no case details.")
+
     def _open_sheets_folder(self):
         from ..rates import sheets_dir
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(sheets_dir(self.s.rate_sheets_dir))))
@@ -1265,8 +1277,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Could not save", f"{e}\n\nIs the PDF open in another program?")
             return
         except Exception as e:
+            log_error("could not fill the form", e)
             QMessageBox.critical(self, "Could not fill the form", f"{type(e).__name__}: {e}")
             return
+        log.info("filled %d form(s), form type %s", len(paths), self.s.form_choice)
         if self.s.open_after:
             for p in paths:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
