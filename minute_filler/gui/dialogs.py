@@ -14,6 +14,7 @@ from ..settings import Settings
 
 
 def _form(parent: QWidget) -> QFormLayout:
+    """A form layout with the label alignment, spacing and margins used by every settings tab."""
     f = QFormLayout(parent)
     f.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
     f.setHorizontalSpacing(14)
@@ -23,7 +24,16 @@ def _form(parent: QWidget) -> QFormLayout:
 
 
 class SettingsDialog(QDialog):
+    """The Settings window: tabs for My info, Defaults, Options and AI.
+
+    Nothing is stored until Save (accept), which copies every control back into the Settings object
+    and saves it to disk. Cancel leaves the settings, and a picked but unsaved signature image,
+    untouched.
+    """
     def __init__(self, settings: Settings, parent=None, first_run: bool = False):
+        """settings: the Settings object to edit in place.
+        first_run: show a welcome line above the tabs (first launch, before a name is entered).
+        """
         super().__init__(parent)
         self.s = settings
         self.setWindowTitle("Settings")
@@ -221,6 +231,7 @@ class SettingsDialog(QDialog):
 
     # --- signature picture
     def _show_signature(self, path: str):
+        """Shows the signature picture at `path` scaled to the row, or a hint if there is none, and enables Remove accordingly."""
         from pathlib import Path
         from PySide6.QtGui import QPixmap
         pix = QPixmap(path) if path and Path(path).is_file() else QPixmap()
@@ -233,6 +244,11 @@ class SettingsDialog(QDialog):
         self.p_sig_remove.setEnabled(not pix.isNull())
 
     def _pick_signature(self):
+        """Asks for a photo or scan of the signature and prepares it (transparent background, cropped).
+
+        The result waits in signature_new.png until Save. Choosing a signature also ticks the box to sign
+        every form. A picture that cannot be used (for instance a blank one) gives a message instead.
+        """
         from PySide6.QtWidgets import QMessageBox
         from ..signature import prepare, signature_path
         src, _ = QFileDialog.getOpenFileName(self, "Picture of your signature", "",
@@ -249,10 +265,14 @@ class SettingsDialog(QDialog):
         self.p_sign.setChecked(True)  # choosing a signature means wanting it on the forms
 
     def _remove_signature(self):
+        """Marks the signature for removal on Save and shows the empty state."""
         self._sig_new = ""
         self._show_signature("")
 
     def _store_signature(self):
+        """Applies a pick or removal made in this dialog: moves the prepared picture to signature.png (or
+        deletes it) and records it in the settings. Does nothing if the signature was not touched.
+        """
         from pathlib import Path
         from ..signature import signature_path
         if self._sig_new is None:
@@ -268,6 +288,7 @@ class SettingsDialog(QDialog):
 
     # --- rate sheet helpers
     def _load_sheet_names(self):
+        """Lists the rate sheets found in the sheets folder, keeps the current choice if it still exists, then reloads the speeds."""
         from ..rates import list_sheets, pick
         sheets, _ = list_sheets(self._sheet_dir)
         self._sheets = {s.name: s for s in sheets}
@@ -281,6 +302,7 @@ class SettingsDialog(QDialog):
         self._load_speeds()
 
     def _load_speeds(self):
+        """Fills the default-speed box with the chosen rate sheet's speeds, keeping the current speed if the sheet has it."""
         from ..rates import FALLBACK
         sheet = self._sheets.get(self.d_sheet.currentData(), FALLBACK)
         keep = self.d_delivery.currentData() or self.s.default_delivery
@@ -291,6 +313,7 @@ class SettingsDialog(QDialog):
         self.d_delivery.setCurrentIndex(max(0, self.d_delivery.findData(found.name if found else "")))
 
     def _pick_sheet_dir(self):
+        """Lets the user choose another rate sheets folder and reloads the sheet list from it."""
         d = QFileDialog.getExistingDirectory(self, "Rate sheets folder", self.d_dir.text() or self.d_dir.placeholderText())
         if d:
             self.d_dir.setText(d)
@@ -298,17 +321,20 @@ class SettingsDialog(QDialog):
             self._load_sheet_names()
 
     def _open_sheet_dir(self):
+        """Opens the rate sheets folder (the one typed in, or the default) in Explorer."""
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
         from ..rates import sheets_dir
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(sheets_dir(self.d_dir.text().strip()))))
 
     def _pick_dir(self):
+        """Lets the user choose the folder that filled forms are saved to."""
         d = QFileDialog.getExistingDirectory(self, "Save filled forms to", self.o_dir.text())
         if d:
             self.o_dir.setText(d)
 
     def _load_models(self):
+        """Fills the model box with the models Ollama has installed. Silent if Ollama is not running (waits at most 2 seconds)."""
         try:
             import ollama
             names = [m.model for m in ollama.Client(host=self.s.ollama_host, timeout=2).list().models]
@@ -320,6 +346,7 @@ class SettingsDialog(QDialog):
         self.a_model.setCurrentText(current)
 
     def _test_ai(self):
+        """Checks the typed model and URL with a throwaway Settings object, so nothing is saved, and shows the result."""
         from ..extract_llm import OllamaExtractor
         tmp = Settings()
         tmp.ollama_model, tmp.ollama_host = self.a_model.currentText().strip(), self.a_host.text().strip()
@@ -327,6 +354,7 @@ class SettingsDialog(QDialog):
         self.a_status.setText(("✓ " if ok else "✗ ") + msg)
 
     def accept(self):
+        """Copies every control into the Settings object, saves it to disk and closes."""
         s, p = self.s, self.s.profile
         p.name, p.title = self.p_name.text().strip(), self.p_title.text().strip()
         p.address1, p.address2 = self.p_addr1.text().strip(), self.p_addr2.text().strip()
@@ -360,6 +388,9 @@ class ClarifyDialog(QDialog):
     """Asks about blank or conflicting fields, and which attorney(s) ordered."""
 
     def __init__(self, questions: list[tuple[str, str, list[str]]], attorneys: list[Attorney] | None, parent=None):
+        """questions: (field key, current value, other candidates) for each field to confirm.
+        attorneys: shown as a checklist of who ordered, or None to skip that question.
+        """
         super().__init__(parent)
         self.setWindowTitle("A few details before filling")
         self.setMinimumWidth(560)
@@ -409,9 +440,11 @@ class ClarifyDialog(QDialog):
         lay.addWidget(buttons)
 
     def answers(self) -> dict[str, str]:
+        """The text of each question's box, by field key (blank means leave the field empty)."""
         return {k: cb.currentText().strip() for k, cb in self.combos.items()}
 
     def checked_attorneys(self) -> list[int] | None:
+        """Indexes of the ticked attorneys, or None if the attorney question was not asked."""
         if self.att_list is None:
             return None
         return [self.att_list.item(i).data(Qt.UserRole) for i in range(self.att_list.count())
@@ -453,14 +486,21 @@ A computer with an NVIDIA graphics card is several times faster.</p>
 
 
 class _PullThread(QThread):
+    """Downloads an Ollama model in the background (the model is several GB).
+
+    progress carries the status text and a percentage (-1 when unknown); finished_ok carries the
+    final message, a tick or a cross, whichever way it ended.
+    """
     progress = Signal(str, int)   # status text, percent (-1 = unknown)
     finished_ok = Signal(str)
 
     def __init__(self, model: str, host: str):
+        """model: the Ollama model name; host: the Ollama URL (empty for the default)."""
         super().__init__()
         self.model, self.host = model, host
 
     def run(self):
+        """Streams the download and reports progress. Any error, including Ollama not running, is turned into a message."""
         try:
             import ollama
             client = ollama.Client(host=self.host or None, timeout=None)
@@ -477,7 +517,12 @@ class _PullThread(QThread):
 
 
 class OllamaHelpDialog(QDialog):
+    """Step-by-step help for installing Ollama, with a button that downloads the model.
+
+    The download keeps going if the dialog is closed (see accept).
+    """
     def __init__(self, model: str, host: str, parent=None):
+        """model: the model the guide and download button refer to; host: the Ollama URL."""
         super().__init__(parent)
         self.model, self.host = model, host
         self.setWindowTitle("Setting up the AI helper")
@@ -509,6 +554,7 @@ class OllamaHelpDialog(QDialog):
         self.thread = None
 
     def _pull(self):
+        """Starts the model download on a background thread and shows the progress bar."""
         self.pull_btn.setEnabled(False)
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
@@ -519,6 +565,7 @@ class OllamaHelpDialog(QDialog):
         self.thread.start()
 
     def _progress(self, status: str, pct: int):
+        """Shows download progress: a percentage bar when the total is known, a busy bar otherwise."""
         if pct >= 0:
             self.bar.setRange(0, 100)
             self.bar.setValue(pct)
@@ -528,14 +575,17 @@ class OllamaHelpDialog(QDialog):
             self.status.setText(status)
 
     def _done(self, msg: str):
+        """Hides the progress bar, shows the final message and allows a new download."""
         self.bar.setVisible(False)
         self.status.setText(msg)
         self.pull_btn.setEnabled(True)
 
     def reject(self):
+        """Escape or the window's close button behaves like Close."""
         self.accept()
 
     def accept(self):
+        """Closes the dialog. A download still running is handed to _BACKGROUND so it is not cut off."""
         if self.thread and self.thread.isRunning():
             _BACKGROUND.append(self.thread)  # keep the download alive after the dialog closes
         super().accept()
@@ -559,7 +609,9 @@ COMPONENTS = [
 
 
 class AboutDialog(QDialog):
+    """The About window: version, author, licence, links, where settings are kept and the open-source credits."""
     def __init__(self, parent=None):
+        """Builds the window; the version and settings folder shown come from the running program."""
         super().__init__(parent)
         from pathlib import Path
         from .. import __version__
@@ -617,6 +669,7 @@ class AboutDialog(QDialog):
         lay.addLayout(row)
 
     def _credits(self):
+        """Shows the list of open-source components (COMPONENTS) and how the optional AI features are supplied."""
         box = QDialog(self)
         box.setWindowTitle("Open-source components")
         box.resize(520, 360)

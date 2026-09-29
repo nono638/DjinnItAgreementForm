@@ -103,11 +103,13 @@ def smart_title(s: str) -> str:
 
 
 def is_mostly_upper(s: str) -> bool:
+    """True when over 85% of the letters are capitals, as in an ALL-CAPS name on a transcript cover page."""
     letters = [c for c in s if c.isalpha()]
     return bool(letters) and sum(c.isupper() for c in letters) / len(letters) > 0.85
 
 
 def fmt_date(y: int, m: int, d: int) -> str | None:
+    """M/D/YYYY for a real calendar date in 1990-2100 (a two-digit year means 20xx); None otherwise."""
     if y < 100:
         y += 2000
     try:
@@ -120,6 +122,7 @@ def fmt_date(y: int, m: int, d: int) -> str | None:
 
 
 def fmt_phone(m: re.Match) -> str:
+    """Writes the three groups matched by PHONE_RE as (555) 555-0100."""
     return f"({m.group(1)}) {m.group(2)}-{m.group(3)}"
 
 
@@ -169,18 +172,36 @@ def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, 
 # --------------------------------------------------------------- extractor
 
 class RegexExtractor:
+    """Proposes values for the form fields from the text of one document, using patterns only.
+
+    Every finding is added with a confidence, so that a labelled index number outranks a stray one
+    and merge.py can offer the runners-up as alternatives. The reporter's own e-mail, phone and name
+    (the Profile) are never taken for the attorney's. extract() also keeps per-document facts on self
+    (kind, is_invoice, is_transcript, is_caption_doc) for the field methods, so call it once per
+    document, not from two threads at once.
+    """
     def __init__(self, profile: Profile | None = None, title_case: bool = True):
+        """profile: the reporter's own details, which are skipped when reading attorneys.
+        title_case: turn ALL-CAPS names into Title Case.
+        """
         self.profile = profile or Profile()
         self.title_case = title_case
         self.own_emails = {e.lower() for e in re.findall(EMAIL_RE, self.profile.email or "")}
         self.own_phones = {re.sub(r"\D", "", self.profile.phone or "")[-10:]} - {""}
 
     def tc(self, s: str) -> str:
+        """Collapses spaces and, if title_case is on and the text is ALL CAPS, makes it Title Case (see smart_title)."""
         s = " ".join(s.split())
         return smart_title(s) if self.title_case and is_mostly_upper(s) else s
 
     # ----- entry point
     def extract(self, ing: Ingested) -> Extraction:
+        """Runs every rule over one document and returns the candidates as an Extraction.
+
+        First decides what kind of document it is (invoice, transcript, a court caption or none), then
+        fills each field. The file name is searched too (index number, case, dates), at 90% of the
+        confidence, because names like '5-22-2026 Smith v Jones - 712345-2024' are common.
+        """
         ex = Extraction()
         text = self._clean(ing.text)
         self.kind = ing.kind
@@ -216,6 +237,7 @@ class RegexExtractor:
 
     @staticmethod
     def _clean(text: str) -> str:
+        """Straightens curly quotes and dashes, drops replacement characters and trailing blanks, keeps the page breaks (form feeds)."""
         text = text.replace("\xa0", " ").replace("’", "'").replace("‘", "'")
         text = text.replace("“", '"').replace("”", '"').replace("–", "-").replace("—", "-")
         text = text.replace("�", "")
@@ -224,7 +246,13 @@ class RegexExtractor:
 
     # ----- index number
     def _index(self, text: str, ex: Extraction, unlabeled_conf: float = 0.45) -> None:
+        """Index number written as N/YYYY (a two-digit year means 20xx).
+
+        Confidence: 0.95 when labelled ('Index No. 712345-2024', 'Docket ...'), 0.8 after a bare 'No.',
+        and unlabeled_conf for a lone number-year pair (ZIP+4 codes after a state are skipped).
+        """
         def norm(num, yr):
+            """'num/year' if the year is 1950-2100, else None."""
             yr = int(yr)
             yr = yr + 2000 if yr < 100 else yr
             return f"{int(num)}/{yr}" if 1950 <= yr <= 2100 else None
@@ -250,6 +278,10 @@ class RegexExtractor:
 
     # ----- court and county
     def _court_county(self, head: str, text: str, ex: Extraction) -> None:
+        """Court (Supreme, Civil, Family, ...) from COURTS, and county from 'County of X', 'X County',
+        'X Supreme Court' or a borough name (Brooklyn means Kings). The top of the first page counts
+        for more than the rest of the text.
+        """
         for scope, conf in ((head, 0.9), (text, 0.6)):
             for pat, name in COURTS:
                 if re.search(pat, scope, re.I):
@@ -271,6 +303,10 @@ class RegexExtractor:
 
     @staticmethod
     def _match_county(raw: str) -> str | None:
+        """The official spelling of a county for raw text such as 'QUEENS' or 'St Lawrence'.
+
+        Allows a small typo for words of four or more letters; returns None if it is not a New York county.
+        """
         words = raw.split()
         for cand in (" ".join(words[-2:]), words[-1] if words else ""):
             if not cand:
@@ -285,6 +321,10 @@ class RegexExtractor:
 
     # ----- part
     def _part(self, head: str, text: str, ex: Extraction) -> None:
+        """Part, either numbered ('PART 25', 'Part TR-3') or a letter code ('Part MDP').
+
+        Letter codes must be written in capitals so that 'part of the record' is not read as a part.
+        """
         # numbered parts ("PART 25", "Part: 53", "Part TR-3") - any capitalisation
         numbered = re.compile(r"\b(?:IAS\s+|TRIAL\s+|TAP\s+)?PART\s*(?:No\.?)?\s*[:#]?\s*"
                               r"((?:[A-Z]{1,4}[- ]?)?\d{1,3}[A-Z]?)\b", re.I)
@@ -301,6 +341,11 @@ class RegexExtractor:
 
     # ----- judge
     def _judge(self, head: str, text: str, ex: Extraction) -> None:
+        """Judge from 'HONORABLE X', 'Judge: X', 'X, J.S.C.' or 'before Justice X'.
+
+        Informal lowercase mentions ('justice smith', common in e-mails) are accepted at low confidence.
+        Filler words at either end are trimmed, and the top of the first page counts for more.
+        """
         stop = r"(?=\s*(?:,?\s*J\.?S\.?C\.?|,?\s*J\.?C\.?C\.?|\bis\s+presiding|\bpresiding|\n|$|,|;|\())"
         name = r"([A-Z][A-Za-z'\-]*\.?(?:[ \t]+(?:[A-Z]\.|[A-Z][A-Za-z'\-]+)){0,4})"
         pats = [
@@ -329,6 +374,9 @@ class RegexExtractor:
 
     # ----- case name
     def _case_name(self, text: str, ex: Extraction) -> None:
+        """Case name from a 'Title:', 'Caption:' or 'Re:' line, 'Matter of ...', a court caption, or
+        'X v. Y' anywhere in the text. Lowercase 'smith v jones' is only trusted, weakly, in e-mails.
+        """
         for m in re.finditer(r"(?im)^\s*(?:title|case(?:\s+name)?|caption|re)\s*:\s*(.+)$", text):
             val = m.group(1).strip()
             if re.search(r"\sv\.?s?\.?\s|\bmatter of\b|\bagainst\b", val, re.I):
@@ -348,6 +396,7 @@ class RegexExtractor:
                     ex.add("case_name", f"{smart_title(left.upper())} v. {smart_title(right.upper())}", SRC_REGEX, 0.4)
 
     def _norm_case(self, s: str) -> str:
+        """Writes 'X vs Y' and 'X -against- Y' as 'X v. Y', tidying each side with tc."""
         s = " ".join(s.split())
         s = re.sub(r"\s+(?:v|vs)\.?\s+", " v. ", s, flags=re.I)
         s = re.sub(r"\s+-?against-?\s+", " v. ", s, flags=re.I)
@@ -355,6 +404,11 @@ class RegexExtractor:
         return " v. ".join(self.tc(p.strip(" ,")) for p in parts)
 
     def _inline_case(self, text: str, ex: Extraction, conf: float) -> None:
+        """Finds 'Party v. Party' in running text or a file name and adds each hit at confidence conf.
+
+        Lead-in words ('Re:', 'Minutes for') and trailing ones ('Index 123', 'on 9/14') are cut off the
+        two parties.
+        """
         word = r"(?:[A-Z][A-Za-z.'&\-]*|&|and|of|the)"
         pat = rf"((?:[A-Z][A-Za-z.'&\-]*)(?:[ \t]+{word}){{0,6}})[ \t]+(?:v|vs|V|VS)\.?[ \t]+((?:[A-Z][A-Za-z.'&\-]*)(?:[ \t]+{word}){{0,6}})"
         lead = re.compile(r"^(?:(?:re|fw|fwd|subject|minutes|transcripts?|order(?:ing)?|for|in|the|of|from|case|"
@@ -367,6 +421,11 @@ class RegexExtractor:
                 ex.add("case_name", self._norm_case(f"{left} v. {right}"), SRC_REGEX, conf)
 
     def _caption(self, text: str, ex: Extraction) -> None:
+        """Reads the court caption: the lines above and below a line that says 'against' or 'v.'.
+
+        Takes up to eight lines each way and stops at the court heading, X rule lines or a party role
+        such as 'Plaintiff'. Adds the full caption (0.85) and a short form with 'et al.' (0.55).
+        """
         lines = text.splitlines()
         role = re.compile(r"^(?:[-\s]*)(plaintiffs?|defendants?|petitioners?|respondents?|claimants?|appellants?|"
                           r"appellees?|third[- ]party\s+\w+)[,.;:\s-]*(?:and\s*)?$", re.I)
@@ -403,6 +462,10 @@ class RegexExtractor:
 
     @staticmethod
     def _split_parties(s: str) -> list[str]:
+        """Splits a list of parties on commas, 'and' and semicolons.
+
+        Company suffixes and titles (Inc., LLC, Jr., 'as trustee') stay with the party they belong to.
+        """
         pieces = re.split(r",\s+(?=[A-Z])|\s+and\s+(?=[A-Z])|\s*;\s*", s)
         parties = []
         suffix = re.compile(r"^(Inc|LLC|L\.L\.C|Corp|Co|P\.C|LLP|Ltd|N\.A|Jr|Sr|II|III|as\b.*|et al)\.?$", re.I)
@@ -414,6 +477,7 @@ class RegexExtractor:
         return [p.strip(" ,") for p in parties if p.strip(" ,")]
 
     def _short_caption(self, left: str, right: str) -> str:
+        """The first party on each side with 'et al.' added when there are more, e.g. 'Smith, et al. v. Jones'."""
         lp, rp = self._split_parties(left), self._split_parties(right)
         l = lp[0] + (", et al." if len(lp) > 1 else "") if lp else left
         r = rp[0] + (", et al." if len(rp) > 1 else "") if rp else right
@@ -421,6 +485,14 @@ class RegexExtractor:
 
     # ----- dates
     def _dates(self, text: str, head: str, ex: Extraction) -> None:
+        """Dates of the minutes, each with a confidence that depends on its surroundings.
+
+        Highest: after a label such as 'Date of proceedings:' or 'held on'. Next: a date alone on one of
+        the first lines of a court document. Then a date after 'on', 'from' or 'for', then any other date.
+        E-mails skip their 'Sent:' and 'Date:' headers and allow dates without a year. Runs of dates
+        joined by 'and', commas or 'through' also become one multi-date candidate, and an e-mail naming
+        two to six different dates gets an 'all dates in the text' candidate.
+        """
         is_email = self.kind in ("email", "text")
         body = text
         if is_email:  # skip header lines like "Sent: ..." / "Date: ..."
@@ -483,6 +555,11 @@ class RegexExtractor:
     }
 
     def _proc_types(self, head: str, text: str, ex: Extraction) -> None:
+        """Ticks the types of proceeding (Trial, Hearing, Application, Sentence, Plea, Arraignment).
+
+        The top of a court document counts most; an e-mail's whole text is trusted. Invoices are skipped.
+        E-mails may also suggest a label for 'Other' (Jury selection, Verdict, ...).
+        """
         is_email = self.kind in ("email", "text")
         if self.is_invoice:
             return
@@ -498,6 +575,11 @@ class RegexExtractor:
 
     # ----- delivery, copies, rate
     def _order_terms(self, text: str, ex: Extraction) -> None:
+        """What was ordered, from the wording of an e-mail: delivery speed (expedited, daily, immediate,
+        regular), number of copies ('original and 2 copies') and a rate per page.
+
+        On an invoice it reads the Regular and Expedited rates the invoice lists.
+        """
         if self.kind in ("email", "text") and not self.is_invoice:
             if re.search(r"(?i)\b(expedit\w*|rush)\b", text):
                 ex.add("delivery", "Expedited", SRC_REGEX, 0.8)
@@ -525,6 +607,9 @@ class RegexExtractor:
 
     # ----- pages
     def _pages(self, ing: Ingested, text: str, ex: Extraction) -> None:
+        """Estimated pages: the page count of a transcript PDF (noting its page numbers, such as
+        'transcript pages 358-380', when it does not start at 1), or 'N pages' written in an e-mail.
+        """
         if ing.kind == "pdf" and self.is_transcript and ing.page_count:
             note = ""
             if ing.first_page_no and ing.first_page_no > 1:
@@ -536,6 +621,16 @@ class RegexExtractor:
 
     # ----- attorneys
     def _attorneys(self, text: str) -> list[Attorney]:
+        """Attorneys and firms found in the text, as Attorney entries.
+
+        Reads three things. An invoice's 'To: Firm, attn: e-mail' and an e-mail's 'From:' line become
+        the orderer, ticked. Then the text is cut into blocks at blank lines and headings such as
+        APPEARANCES; in each block names come from 'Name, Esq.' or 'BY:', the firm from FIRM_RE, and
+        address, phone, fax, e-mail and role ('Attorney for the Plaintiff') from the other lines.
+        Placeholders such as 'Unrepresented' become unticked entries. The reporter's own block, e-mail
+        and phone are skipped, and duplicates are merged by dedupe_attorneys. Block entries are not
+        ticked, because a transcript lists everyone who appeared, not who ordered.
+        """
         found: list[Attorney] = []
         if self.is_transcript:  # appearances are on the cover page; the body is dialogue
             text = text.split("")[0]
@@ -677,6 +772,12 @@ class RegexExtractor:
 
 
 def dedupe_attorneys(atts: list[Attorney], profile: Profile | None = None) -> list[Attorney]:
+    """Merges entries that are the same person or firm and drops the reporter's own entry.
+
+    Entries match on the same e-mail, the same name, the same firm when neither has a name, or the
+    same e-mail domain when a name or firm is missing on one of them. Blank fields of the first are
+    filled from the duplicate, and the merged entry stays ticked if either one was.
+    """
     out: list[Attorney] = []
     own_name = (profile.name.lower() if profile and profile.name else "\0")
     own_email = (profile.email.lower() if profile and profile.email else "\0")
@@ -704,5 +805,6 @@ def dedupe_attorneys(atts: list[Attorney], profile: Profile | None = None) -> li
 
 
 def _name_key(n: str) -> str:
+    """'first last' in lowercase, without punctuation or one-letter initials, so 'John Q. Smith' matches 'John Smith'."""
     words = [w for w in re.sub(r"[^a-z ]", "", n.lower()).split() if len(w) > 1]
     return f"{words[0]} {words[-1]}" if len(words) >= 2 else " ".join(words)
