@@ -9,12 +9,15 @@ if not exist "%ISCC%" (
   echo Inno Setup 6 not found. Install it from https://jrsoftware.org/isdl.php  ^(or: winget install JRSoftware.InnoSetup^)
   pause & exit /b 1
 )
+".venv\Scripts\python.exe" -m pytest -q || (echo Tests failed - not building. & pause & exit /b 1)
+rem Each new build gets the next version number (unless this version was never built yet).
+rem For a bigger step run first:  python bump_version.py minor   (or major, or an exact number)
+".venv\Scripts\python.exe" bump_version.py auto
 for /f "tokens=2 delims==" %%V in ('findstr /r "__version__" minute_filler\__init__.py') do set "VER=%%~V"
 set "VER=%VER: =%"
 set "VER=%VER:"=%"
 echo Building version %VER%
 
-".venv\Scripts\python.exe" -m pytest -q || (echo Tests failed - not building. & pause & exit /b 1)
 
 for %%D in (build dist) do (
   if not exist %%D mkdir %%D

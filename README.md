@@ -112,9 +112,9 @@ build_installer.bat     :: tests + exe + installer (needs Inno Setup 6) -> dist\
 ```
 
 **Release checklist:**
-1. Bump `__version__` in `minute_filler/__init__.py`.
-2. Run `build_installer.bat`.
-3. Upload `dist\installer\DjinnItAgreementForm-Setup-x.y.z.exe` to a GitHub release.
+1. Run `build_installer.bat`. It runs the tests, then raises the version by one patch step (1.0.1 → 1.0.2) if that version was already built. The number lives only in `minute_filler/__init__.py`.
+   - For a bigger step, run `python bump_version.py minor` (or `major`, or an exact number such as `1.4.0`) first. `python bump_version.py` alone shows the current version.
+2. Upload `dist\installer\DjinnItAgreementForm-Setup-x.y.z.exe` to a GitHub release.
 
 Never change the `AppId` in `installer/DjinnItAgreementForm.iss`; Windows uses it to recognise upgrades.
 
