@@ -1,4 +1,10 @@
-"""Writes a CaseInfo + Attorney + reporter profile into either PDF form."""
+"""Writes a CaseInfo + Attorney + reporter profile into one of the PDF forms.
+
+Forms (Settings.form_choice):
+  "ucs"      - the court's fillable UCS form (default)
+  "clean"    - the app's re-typeset form with named fields and extra lines
+  "original" - the 1999 scan with fields added on top
+"""
 from __future__ import annotations
 
 import re
@@ -8,7 +14,7 @@ from pathlib import Path
 
 import pymupdf
 
-from .forms import original_map
+from .forms import original_map, ucs_map
 from .models import CaseInfo, Attorney, PROC_TYPES
 from .rates import speed_key
 from .settings import Settings
@@ -23,9 +29,16 @@ def forms_dir() -> Path:
     return Path(__file__).resolve().with_name("forms")
 
 
+FORMS = {
+    "ucs": ("minute_agreement_ucs.pdf", "UCS form (fillable)"),
+    "clean": ("minute_agreement_clean.pdf", "Re-typeset form"),
+    "original": ("minute_agreement_original.pdf", "Original 1999 scan"),
+}
+DEFAULT_FORM = "ucs"
+
+
 def form_path(choice: str) -> Path:
-    name = "minute_agreement_original.pdf" if choice == "original" else "minute_agreement_clean.pdf"
-    return forms_dir() / name
+    return forms_dir() / FORMS.get(choice, FORMS[DEFAULT_FORM])[0]
 
 
 def text_width(s: str, fs: float) -> float:
@@ -146,13 +159,15 @@ def _fill_clean(doc: pymupdf.Document, v: dict) -> None:
             _set_text(w, "" if isinstance(val, bool) else str(val), fixed.get(name))
 
 
-def _fill_original(doc: pymupdf.Document, v: dict) -> None:
+def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
+    """Fills a form whose field names are mapped to our keys (forms/*_map.py): blank text
+    lines get "X" for checkmarks, and missing lines (signatures etc.) are printed as overlays."""
     page = doc[0]
-    widgets = {original_map.WIDGETS.get(w.field_name.removeprefix("Text-")): w for w in page.widgets()}
+    widgets = {fmap.WIDGETS.get(w.field_name.removeprefix("Text-")): w for w in page.widgets()}
     fixed: dict[str, float] = {}
     _spread(v, v.get("case_name_raw", ""), ["case_name_1", "case_name_2", "case_name_3"],
-            widgets["case_name_1"].rect.width, fixed, max_fs=9)
-    for src, dst in original_map.MERGE_INTO.items():
+            widgets["case_name_1"].rect.width, fixed, max_fs=case_fs)
+    for src, dst in fmap.MERGE_INTO.items():
         if v.get(src):
             v[dst] = ", ".join(x for x in (v.get(dst, ""), v[src]) if x)
     if v.get("rate"):
@@ -168,7 +183,7 @@ def _fill_original(doc: pymupdf.Document, v: dict) -> None:
         if key == "delivery_other" and v.get("delivery_other_check"):
             val = v.get("delivery_other") or "X"
         _set_text(w, str(val), fixed.get(key))
-    for key, rect in original_map.OVERLAYS.items():
+    for key, rect in fmap.OVERLAYS.items():
         text = str(v.get(key) or "")
         if not text:
             continue
@@ -224,9 +239,14 @@ def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path) -> P
                  else date.today().strftime("%#m/%#d/%Y"))
     v = build_values(case, atty, s)
     v["case_name_raw"] = " ".join(case.get("case_name").split())
-    doc = pymupdf.open(form_path(s.form_choice))
-    if s.form_choice == "original":
-        _fill_original(doc, v)
+    choice = s.form_choice if s.form_choice in FORMS else DEFAULT_FORM
+    doc = pymupdf.open(form_path(choice))
+    if choice == "original":
+        _fill_mapped(doc, v, original_map, case_fs=9)
+    elif choice == "ucs":
+        _fill_mapped(doc, v, ucs_map, case_fs=10)
+        if not s.include_instructions and doc.page_count > 1:
+            doc.delete_pages(1, doc.page_count - 1)
     else:
         _fill_clean(doc, v)
     if s.flatten:

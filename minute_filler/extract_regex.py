@@ -273,11 +273,19 @@ class RegexExtractor:
 
     # ----- part
     def _part(self, head: str, text: str, ex: Extraction) -> None:
-        pat = re.compile(r"\b(?:IAS\s+|TRIAL\s+|TAP\s+)?PART\s*(?:No\.?)?\s*[:#]?\s*((?:[A-Z]{1,3}[- ]?)?\d{1,3}[A-Z]?)\b", re.I)
+        # numbered parts ("PART 25", "Part: 53", "Part TR-3") - any capitalisation
+        numbered = re.compile(r"\b(?:IAS\s+|TRIAL\s+|TAP\s+)?PART\s*(?:No\.?)?\s*[:#]?\s*"
+                              r"((?:[A-Z]{1,4}[- ]?)?\d{1,3}[A-Z]?)\b", re.I)
+        # letter parts ("PART MDP", "Part: TAP-A") - the code itself must be in capitals, so
+        # "part of the record" is not mistaken for a part
+        lettered = re.compile(r"\b(?:PART|Part)(?:\s+No\.?)?[ \t]*[:#]?[ \t]*([A-Z]{1,6}(?:-[A-Z0-9]{1,3})?)\b(?![a-z])")
+        not_a_part = {"OF", "THE", "AND", "IN", "TO", "A", "AN", "IS", "IT", "ON", "FOR", "AS", "OR", "BY", "AT", "NO"}
         for scope, conf in ((head, 0.9), (text, 0.7)):
-            for m in pat.finditer(scope):
-                val = m.group(1).upper().replace(" ", "")
-                ex.add("part", val, SRC_REGEX, conf)
+            for m in numbered.finditer(scope):
+                ex.add("part", m.group(1).upper().replace(" ", ""), SRC_REGEX, conf)
+            for m in lettered.finditer(scope):
+                if m.group(1) not in not_a_part:
+                    ex.add("part", m.group(1), SRC_REGEX, conf - 0.05)
 
     # ----- judge
     def _judge(self, head: str, text: str, ex: Extraction) -> None:

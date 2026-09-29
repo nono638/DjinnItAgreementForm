@@ -64,7 +64,9 @@ class Settings:
     title_case_names: bool = True     # "HONORABLE MARIA T. ALVAREZ" -> "Maria T. Alvarez"
 
     # Output
-    form_choice: str = "clean"        # "clean" or "original"
+    form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
+    include_instructions: bool = False  # add the UCS form's instructions page (page 2)
+    settings_version: int = 2         # bumped when a default changes for existing users
     output_dir: str = ""              # blank = next to first input file, else Documents
     filename_pattern: str = "Minute Agreement - {case} - {index} - {attorney}"
 
@@ -133,4 +135,7 @@ class Settings:
                 s.profile = Profile(**{a: b for a, b in v.items() if a in pk})
             elif k in known:
                 setattr(s, k, v)
+        if data.get("settings_version", 1) < 2:  # v2: the court's fillable UCS form became the default
+            s.form_choice = "ucs"
+            s.settings_version = 2
         return s

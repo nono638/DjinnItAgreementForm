@@ -495,10 +495,11 @@ class MainWindow(QMainWindow):
         self.sign_rep = QCheckBox("Type my name as reporter signature")
         self.sign_rep.setChecked(self.s.sign_reporter)
         self.sign_rep.toggled.connect(lambda v: self._set_opt("sign_reporter", v))
+        from ..fill import FORMS
         self.form_choice = QComboBox()
-        self.form_choice.addItem("New clean form", "clean")
-        self.form_choice.addItem("Original UCS scan", "original")
-        self.form_choice.setCurrentIndex(0 if self.s.form_choice == "clean" else 1)
+        for key, (_, label) in FORMS.items():
+            self.form_choice.addItem(label, key)
+        self.form_choice.setCurrentIndex(max(0, self.form_choice.findData(self.s.form_choice)))
         self.form_choice.currentIndexChanged.connect(
             lambda _: self._set_opt("form_choice", self.form_choice.currentData()))
         fl.addWidget(self.per_email)
@@ -1028,7 +1029,7 @@ class MainWindow(QMainWindow):
             apply_theme(self.app, self.s.theme)
             self.per_email.setChecked(self.s.per_email)
             self.sign_rep.setChecked(self.s.sign_reporter)
-            self.form_choice.setCurrentIndex(0 if self.s.form_choice == "clean" else 1)
+            self.form_choice.setCurrentIndex(max(0, self.form_choice.findData(self.s.form_choice)))
             self.s.reload_rates()
             self._fill_sheet_box()
             self._check_ai()

@@ -108,3 +108,19 @@ def test_ai_answers_are_checked_against_the_text():
     assert "county" not in ex.fields and "court" not in ex.fields
     assert best(ex, "judge") == "Lopez" and best(ex, "index_no") == "700123/2025"
     assert ex.attorneys == []
+
+
+def test_part_letters_and_numbers():
+    from minute_filler.models import Extraction
+    x = RegexExtractor(PROFILE)
+    for text, want in [("COUNTY OF QUEENS:  CIVIL TERM:  PART MDP \n", "MDP"),
+                       ("COUNTY OF QUEENS: CIVIL TERM: PART 25\n", "25"),
+                       ("Part: TAP-A\n", "TAP-A"),
+                       ("Judge: Lopez\nPart: 53\n", "53"),
+                       ("SUPREME COURT, IAS PART 12\n", "12")]:
+        ex = Extraction()
+        x._part(text, text, ex)
+        assert best(ex, "part") == want, text
+    ex = Extraction()
+    x._part("that is part of the record. PART OF THE RECORD", "", ex)
+    assert "part" not in ex.fields

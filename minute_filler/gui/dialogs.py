@@ -130,11 +130,15 @@ class SettingsDialog(QDialog):
                         (self.o_djinn, settings.show_djinn)):
             cb.setChecked(val)
             f.addRow("", cb)
+        from ..fill import FORMS
         self.o_form = QComboBox()
-        self.o_form.addItem("New clean form", "clean")
-        self.o_form.addItem("Original UCS scan", "original")
-        self.o_form.setCurrentIndex(0 if settings.form_choice == "clean" else 1)
+        for key, (_, label) in FORMS.items():
+            self.o_form.addItem(label, key)
+        self.o_form.setCurrentIndex(max(0, self.o_form.findData(settings.form_choice)))
         f.addRow("Form", self.o_form)
+        self.o_instr = QCheckBox("Include the instructions page (UCS form page 2)")
+        self.o_instr.setChecked(settings.include_instructions)
+        f.addRow("", self.o_instr)
         row = QHBoxLayout()
         self.o_dir = QLineEdit(settings.output_dir)
         self.o_dir.setPlaceholderText("Same folder as the dropped file")
@@ -267,6 +271,7 @@ class SettingsDialog(QDialog):
         s.agreement_today, s.flatten = self.o_today.isChecked(), self.o_flat.isChecked()
         s.open_after, s.title_case_names = self.o_open.isChecked(), self.o_tc.isChecked()
         s.form_choice = self.o_form.currentData()
+        s.include_instructions = self.o_instr.isChecked()
         s.output_dir, s.filename_pattern = self.o_dir.text().strip(), self.o_pattern.text().strip() or s.filename_pattern
         s.theme = self.o_theme.currentText()
         s.show_djinn = self.o_djinn.isChecked()

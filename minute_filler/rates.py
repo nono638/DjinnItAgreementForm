@@ -120,6 +120,7 @@ def load_sheet(path: Path) -> RateSheet:
                             days, extras))
     if not speeds:
         raise ValueError("no rates found")
+    speeds.sort(key=lambda s: float(s.original))  # cheapest first, whatever order the file uses
     return RateSheet(path.stem, path, speeds, updated)
 
 

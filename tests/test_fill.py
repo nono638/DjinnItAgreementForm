@@ -71,8 +71,42 @@ def test_original_form(case, settings, tmp_path):
 
 def test_per_email_off(case, settings, tmp_path):
     settings.per_email = False
+    settings.form_choice = "clean"
     f, _ = fields(fill_all(case, settings, tmp_path)[0])
     assert f["sig_attorney"] == ""
+
+
+def test_ucs_form_is_default(case, settings, tmp_path):
+    from minute_filler.forms import ucs_map
+    assert Settings().form_choice == "ucs"
+    settings.sign_reporter = True
+    case.set("part", "MDP")
+    paths = fill_all(case, settings, tmp_path)
+    doc = pymupdf.open(paths[0])
+    assert doc.page_count == 1  # instructions page left out by default
+    by_key = {ucs_map.WIDGETS.get(w.field_name): w.field_value for w in doc[0].widgets()}
+    assert by_key["court"] == "Supreme" and by_key["county"] == "Queens"
+    assert by_key["part"] == "MDP"
+    assert by_key["index_no"] == "700001/2020"
+    assert by_key["proc_trial"] == "X" and by_key["proc_hearing"] == ""
+    assert by_key["delivery_regular"] == "X"
+    assert by_key["rate"] == "$3.30"
+    assert by_key["atty_name"] == "Alex B. Counsel"
+    assert by_key["atty_firm"] == "Counsel & Counsel"
+    assert by_key["atty_address_1"] == "100 Main Avenue, Anytown, New York 10000"
+    assert by_key["rep_name"] == "Pat Reporter"
+    text = doc[0].get_text()
+    assert "per email" in text  # printed on the attorney signature line
+    settings.include_instructions = True
+    assert pymupdf.open(fill_all(case, settings, tmp_path / "x")[0]).page_count == 2
+
+
+def test_old_settings_switch_to_ucs_form(tmp_path, monkeypatch):
+    import json
+    from minute_filler.settings import settings_dir
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    (settings_dir() / "settings.json").write_text(json.dumps({"form_choice": "clean"}))
+    assert Settings.load().form_choice == "ucs"
 
 
 def test_short_caption():

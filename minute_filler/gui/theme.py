@@ -4,21 +4,23 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QPalette, QColor
 
+# Contrast: the page background is clearly darker (light) / lighter (dark) than the section cards,
+# and card and input borders are strong enough to see where each section and field ends.
 LIGHT = {
-    "bg": "#f4f5f7", "card": "#ffffff", "border": "#e2e5ea", "text": "#1c2230", "muted": "#687082",
-    "input": "#ffffff", "input_border": "#cfd4dc", "accent": "#2563eb", "accent_hover": "#1d4ed8",
-    "accent_text": "#ffffff", "hover": "#eef1f5", "review": "#f59e0b", "review_bg": "#fff8eb",
-    "ok": "#15803d", "ok_bg": "#e8f6ed", "warn_bg": "#fff4de", "warn": "#9a5b00", "drop_bg": "#f8faff",
-    "regex": "#15803d", "ai": "#7c3aed", "default": "#6b7280", "derived": "#0369a1", "you": "#1c2230",
-    "sel": "#dbe7ff",
+    "bg": "#e3e7ee", "card": "#ffffff", "border": "#b9c0cc", "text": "#141a26", "muted": "#4d5566",
+    "input": "#ffffff", "input_border": "#9aa3b2", "accent": "#2563eb", "accent_hover": "#1d4ed8",
+    "accent_text": "#ffffff", "hover": "#e8ecf3", "review": "#d97706", "review_bg": "#fff6e5",
+    "ok": "#15803d", "ok_bg": "#dcf2e3", "warn_bg": "#fdeccc", "warn": "#8a4f00", "drop_bg": "#f3f6fc",
+    "regex": "#15803d", "ai": "#6d28d9", "default": "#4d5566", "derived": "#0369a1", "you": "#141a26",
+    "sel": "#d3e1fd", "header_bg": "#d5dbe5", "card_title": "#1e3a8a",
 }
 DARK = {
-    "bg": "#15171c", "card": "#1e2128", "border": "#2c313a", "text": "#e7e9ee", "muted": "#9aa2b1",
-    "input": "#171a20", "input_border": "#3a404b", "accent": "#3b82f6", "accent_hover": "#2563eb",
-    "accent_text": "#ffffff", "hover": "#262a33", "review": "#f5a524", "review_bg": "#2b2416",
-    "ok": "#4ade80", "ok_bg": "#15291d", "warn_bg": "#2e2513", "warn": "#f5c56b", "drop_bg": "#1a1e27",
-    "regex": "#4ade80", "ai": "#c4a5ff", "default": "#9aa2b1", "derived": "#7dd3fc", "you": "#e7e9ee",
-    "sel": "#23324d",
+    "bg": "#0c0e12", "card": "#1f232c", "border": "#4a5262", "text": "#eceef3", "muted": "#b2b9c6",
+    "input": "#12151b", "input_border": "#5b6477", "accent": "#4b8df8", "accent_hover": "#2f74e8",
+    "accent_text": "#ffffff", "hover": "#2c3240", "review": "#f5a524", "review_bg": "#33280f",
+    "ok": "#4ade80", "ok_bg": "#133021", "warn_bg": "#382c10", "warn": "#f7cb74", "drop_bg": "#171b23",
+    "regex": "#4ade80", "ai": "#c9adff", "default": "#b2b9c6", "derived": "#7dd3fc", "you": "#eceef3",
+    "sel": "#29406a", "header_bg": "#171a21", "card_title": "#9cc0ff",
 }
 
 QSS = """
@@ -28,7 +30,7 @@ QWidget#central, QScrollArea, QScrollArea > QWidget > QWidget { background: {bg}
 QFrame#card { background: {card}; border: 1px solid {border}; border-radius: 10px; }
 QLabel#title { font-size: 16pt; font-weight: 600; }
 QLabel#subtitle, QLabel#muted { color: {muted}; }
-QLabel#section { font-size: 11pt; font-weight: 600; }
+QLabel#section { font-size: 11pt; font-weight: 700; color: {card_title}; }
 QLabel#fieldLabel { color: {muted}; }
 
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
@@ -88,7 +90,7 @@ QListWidget, QTableWidget {
 }
 QListWidget::item { padding: 5px; }
 QListWidget::item:selected, QTableWidget::item:selected { background: {sel}; color: {text}; }
-QHeaderView::section { background: {bg}; border: none; border-bottom: 1px solid {border}; padding: 5px; color: {muted}; font-weight: 600; }
+QHeaderView::section { background: {header_bg}; border: none; border-bottom: 1px solid {border}; padding: 5px; color: {muted}; font-weight: 600; }
 QTabWidget::pane { border: 1px solid {border}; border-radius: 8px; background: {card}; top: -1px; }
 QTabBar::tab { padding: 7px 16px; border: none; color: {muted}; }
 QTabBar::tab:selected { color: {accent}; border-bottom: 2px solid {accent}; }

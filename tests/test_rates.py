@@ -11,7 +11,8 @@ def test_sample_sheet_is_default():
     s = Settings()
     sheet = s.sheet()
     assert sheet.name == SAMPLE
-    assert [sp.name for sp in sheet.speeds] == ["Immediate", "Daily", "Expedite", "Regular"]
+    # listed cheapest to most expensive, not in file order
+    assert [sp.name for sp in sheet.speeds] == ["Regular", "Expedite", "Daily", "Immediate"]
     assert s.rate_for("Regular") == "4.30"
     assert s.rate_for("Expedited") == "5.40"
     assert sheet.find("Immediate").copy == "1.45"
