@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
@@ -14,11 +15,12 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from ..batch import Job, expand_paths, fill_jobs, group, make_doc, out_dir_for, remerge
 from ..extract_llm import OllamaExtractor
 from ..extract_regex import RegexExtractor
 from ..fill import fill_all
-from ..ingest import Ingested, ingest_file, ingest_pil, ingest_text
-from ..merge import merge, refresh_delivery_date, refresh_rate
+from ..ingest import ingest_file, ingest_pil, ingest_text
+from ..merge import refresh_delivery_date, refresh_rate
 from ..models import (Attorney, CaseInfo, DELIVERY_TYPES, FIELD_LABELS, FieldState, PROC_TYPES, REQUIRED_KEYS,
                       SRC_AI, SRC_USER)
 from ..settings import Settings
@@ -159,14 +161,18 @@ class DropZone(QFrame):
         self.djinn.setAlignment(Qt.AlignCenter)
         self.djinn.setVisible(False)
         lay.addWidget(self.djinn)
-        self.mood = ""
-        t = QLabel("Drop a document here")
+        self.mood = None
+        self.wanted = None
+        self.compact = False
+        t = QLabel("Drop documents here")
         t.setObjectName("dropText")
         t.setAlignment(Qt.AlignCenter)
-        sub = QLabel("PDF, photo, or text file.\nPaste e-mails in the box below, or a screenshot with Ctrl+V.")
+        sub = QLabel("PDF, photo or text file - or many at once, or a whole folder: "
+                     "documents about the same case and date become one form.")
         sub.setObjectName("muted")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
+        self.sub = sub
         b = QPushButton("Browse...")
         b.clicked.connect(on_browse)
         b.setFixedWidth(120)
@@ -177,20 +183,29 @@ class DropZone(QFrame):
 
     def set_mood(self, mood: str | None) -> None:
         """Shows the djinn: 'working', 'done' or 'stumped' (None hides him)."""
+        self.wanted = mood
+        width, height = (150, 170) if self.compact else (300, 330)
+        self.sub.setVisible(not self.compact)
         if mood is None:
             self.djinn.setVisible(False)
-            self.icon.setVisible(True)
-            self.setMinimumHeight(215)
+            self.icon.setVisible(not self.compact)
+            self.setMinimumHeight(110 if self.compact else 215)
             return
         self.icon.setVisible(False)
         self.djinn.setVisible(True)
-        self.setMinimumHeight(330)
-        if mood == self.mood and self.djinn.pixmap() and not self.djinn.pixmap().isNull():
+        self.setMinimumHeight(height)
+        if (mood, width) == self.mood and self.djinn.pixmap() and not self.djinn.pixmap().isNull():
             return
-        self.mood = mood
-        self.djinn.setPixmap(_rounded(ASSETS / f"djinn_{mood}.jpg", 300, 12))
+        self.mood = (mood, width)
+        self.djinn.setPixmap(_rounded(ASSETS / f"djinn_{mood}.jpg", width, 12))
         self.djinn.setToolTip({"working": "The djinn is on it…", "done": "Ready to fill!",
                                "stumped": "Something needs your attention"}.get(mood, ""))
+
+    def set_compact(self, on: bool) -> None:
+        """A smaller picture leaves room for the list of jobs."""
+        if on != self.compact:
+            self.compact = on
+            self.set_mood(self.wanted)
 
     def _hover(self, on: bool):
         self.setProperty("hover", on)
@@ -249,14 +264,10 @@ class MainWindow(QMainWindow):
         self.runner = Runner()
         self.ai = OllamaExtractor(settings)
         self.ai_ok = False
-        self.job = 0
-        self.inputs: list[Ingested] = []
-        self.regex_ex: dict[int, object] = {}
-        self.ai_ex: dict[int, object] = {}
+        self.gen = 0  # bumped by "New job": results of work started before it are dropped
+        self.jobs: list[Job] = [Job()]  # more than one = a batch
+        self.cur = self.jobs[0]         # the job shown in the editor
         self.ai_pending = 0
-        self.case = CaseInfo()
-        self.proc_touched = False
-        self.att_touched = False
 
         self.setWindowTitle("DjinnItAgreementForm")
         self.setMinimumSize(1080, 720)
@@ -268,6 +279,31 @@ class MainWindow(QMainWindow):
         self._show_case()
         self._set_status("Drop a document to begin", "")
         QTimer.singleShot(50, self._startup)
+
+    # The editor always works on the current job.
+    @property
+    def case(self) -> CaseInfo:
+        return self.cur.case
+
+    @case.setter
+    def case(self, value: CaseInfo) -> None:
+        self.cur.case = value
+
+    @property
+    def proc_touched(self) -> bool:
+        return self.cur.proc_touched
+
+    @proc_touched.setter
+    def proc_touched(self, value: bool) -> None:
+        self.cur.proc_touched = value
+
+    @property
+    def att_touched(self) -> bool:
+        return self.cur.att_touched
+
+    @att_touched.setter
+    def att_touched(self, value: bool) -> None:
+        self.cur.att_touched = value
 
     # ---------------------------------------------------------- layout
     def _build(self):
@@ -318,6 +354,20 @@ class MainWindow(QMainWindow):
         ll.setSpacing(10)
         self.drop = DropZone(self.add_files, self.add_text, self.add_qimage, self.browse)
         ll.addWidget(self.drop)
+        self.jobs_label = QLabel("Jobs")
+        self.jobs_label.setObjectName("fieldLabel")
+        ll.addWidget(self.jobs_label)
+        self.job_list = QListWidget()
+        self.job_list.setToolTip("One job per case and date. Click a job to check or edit it;\n"
+                                 "untick the ones \"Fill all\" should leave out.")
+        self.job_list.currentRowChanged.connect(self._job_selected)
+        self.job_list.itemChanged.connect(self._job_ticked)
+        self.job_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.job_list.setTextElideMode(Qt.ElideRight)
+        self.job_list.setMinimumHeight(140)
+        self.job_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.job_list.customContextMenuRequested.connect(self._job_menu)
+        ll.addWidget(self.job_list, 3)
         lbl = QLabel("Inputs for this job")
         lbl.setObjectName("fieldLabel")
         ll.addWidget(lbl)
@@ -513,20 +563,28 @@ class MainWindow(QMainWindow):
         self.fill_btn.setObjectName("primary")
         self.fill_btn.clicked.connect(self.fill)
         fl.addWidget(self.fill_btn)
+        self.fill_all_btn = QPushButton("Fill all")
+        self.fill_all_btn.setObjectName("primary")
+        self.fill_all_btn.setToolTip("Fill the forms of every ticked job (Ctrl+Shift+Enter)")
+        self.fill_all_btn.clicked.connect(self.fill_all_jobs)
+        fl.addWidget(self.fill_all_btn)
         root.addWidget(foot)
+        self._refresh_jobs()
 
         self._build_menu()
         QShortcut(QKeySequence.Paste, self, activated=self._paste_shortcut)
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_job)
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.browse)
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.fill)
+        QShortcut(QKeySequence("Ctrl+Shift+Return"), self, activated=self.fill_all_jobs)
 
     def _build_menu(self):
         from .dialogs import AboutDialog, CONTACT_EMAIL
         mb = self.menuBar()
         m = mb.addMenu("&File")
         m.addAction("&New job", self.new_job)          # Ctrl+N handled by the window shortcut
-        m.addAction("&Open document…", self.browse)
+        m.addAction("&Open documents…", self.browse)
+        m.addAction("Open a &folder of documents (batch)…", self.browse_folder)
         m.addSeparator()
         m.addAction("Open &rate sheets folder", self._open_sheets_folder)
         m.addAction("&Settings…", self.open_settings)
@@ -563,9 +621,9 @@ class MainWindow(QMainWindow):
             link = "" if self.ai_ok else '  <a href="setup">How to set up</a>'
             self.ai_label.setText(("● " if self.ai_ok else "○ ") + msg + link)
             # inputs dropped while the check was still running
-            waiting = [i for i in range(len(self.inputs)) if i not in self.ai_ex]
-            if self.ai_ok and waiting and self.ai_pending == 0:
-                self._maybe_ai(waiting)
+            waiting = [d for d in self.cur.docs if d.ai is None]
+            if self.ai_ok and waiting and self.ai_pending == 0 and len(self.jobs) == 1:
+                self._maybe_ai(self.cur, waiting)
 
         self.runner.start(self.ai.status, on_done=done, on_error=lambda m: done((False, m)))
 
@@ -574,6 +632,11 @@ class MainWindow(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(self, "Choose document(s)", "", FILE_FILTER)
         if files:
             self.add_files(files)
+
+    def browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose a folder of documents")
+        if folder:
+            self.add_files([folder], batch=True)
 
     def _paste_shortcut(self):
         if self.focusWidget() in (self.paste,) or isinstance(self.focusWidget(), (QLineEdit, QPlainTextEdit)):
@@ -590,7 +653,7 @@ class MainWindow(QMainWindow):
             self.add_text(text)
 
     def add_text(self, text: str):
-        n = sum(1 for i in self.inputs if i.name.startswith("Pasted text")) + 1
+        n = sum(1 for j in self.jobs for d in j.docs if d.ing.name.startswith("Pasted text")) + 1
         self._ingest([lambda: ingest_text(text, f"Pasted text {n}")], [f"Pasted text {n}"])
         if self.paste.toPlainText().strip() != text.strip():
             self.paste.setPlainText(text)
@@ -605,141 +668,311 @@ class MainWindow(QMainWindow):
         pil = Image.open(io.BytesIO(bytes(buf.data())))
         self._ingest([lambda: ingest_pil(pil, "Pasted image")], ["Pasted image"])
 
-    def add_files(self, paths: list[str]):
-        paths = [p for p in paths if Path(p).is_file()]
-        if not paths:
-            return
-        if self.s.output_dir == "" and not hasattr(self, "_first_dir"):
-            self._first_dir = str(Path(paths[0]).parent)
-        self._ingest([(lambda p=p: ingest_file(p)) for p in paths], [Path(p).name for p in paths])
+    def add_files(self, paths: list[str], batch: bool = False):
+        """Files and folders. Several documents about different cases (or batch=True) start a batch."""
+        gen = self.gen
+        loaded = {str(Path(d.path).resolve()).lower() for j in self.jobs for d in j.docs if d.path}
 
-    def _ingest(self, loaders, names):
-        job = self.job
-        self._set_status(f"Reading {', '.join(names)}…", "busy")
-        self.busy.setVisible(True)
-        extractor = RegexExtractor(self.s.profile, self.s.title_case_names)
+        def find():  # off the UI thread: a big folder takes a while to go through
+            found = expand_paths(paths)
+            return found, [p for p in found if str(Path(p).resolve()).lower() not in loaded]
 
-        def work():
-            out = []
-            for load in loaders:
-                ing = load()
-                out.append((ing, extractor.extract(ing)))
-            return out
-
-        def done(results):
-            if job != self.job:
+        def found(result):
+            if gen != self.gen:
                 return
-            for ing, ex in results:
-                idx = len(self.inputs)
-                self.inputs.append(ing)
-                self.regex_ex[idx] = ex
-                label = f"{ing.name}   ·   {ing.kind}"
-                if ing.page_count:
-                    label += f", {ing.page_count} pp"
-                if ing.ocr_used:
-                    label += ", OCR"
-                item = QListWidgetItem(label)
-                item.setToolTip(ing.text[:1500] or "(no text)")
-                self.input_list.addItem(item)
-                for w in ing.warnings:
-                    self._toast(w)
-            self._remerge()
-            self._maybe_ai([len(self.inputs) - len(results) + i for i in range(len(results))])
-            self._update_status()
+            everything, fresh = result
+            if len(fresh) < len(everything):
+                self._toast(f"Skipped {len(everything) - len(fresh)} document(s) that are already loaded.")
+            if fresh:
+                self._ingest([(lambda p=p: ingest_file(p)) for p in fresh], [Path(p).name for p in fresh],
+                             fresh, batch)
+            else:
+                self.busy.setVisible(self.ai_pending > 0)
+                self._update_status()
+                if not everything:
+                    self._toast("No documents found there.")
 
         def failed(msg):
+            self.busy.setVisible(self.ai_pending > 0)
+            self._update_status()
+            QMessageBox.warning(self, "Could not open that", msg)
+
+        if any(Path(p).is_dir() for p in paths):
+            self._set_status("Looking for documents…", "busy")
+            self.busy.setVisible(True)
+        self.runner.start(find, on_done=found, on_error=failed)
+
+    def _ingest(self, loaders, names, paths=None, batch=False):
+        gen, target, s = self.gen, self.cur, self.s
+        paths = paths or [""] * len(loaders)
+        self._set_status(f"Reading {names[0]}…" if len(names) == 1 else f"Reading {len(names)} documents…", "busy")
+        self.busy.setVisible(True)
+        extractor = RegexExtractor(s.profile, s.title_case_names)
+
+        def work(progress):
+            docs, errors = [], []
+            for i, (load, name, path) in enumerate(zip(loaders, names, paths)):
+                progress(i, len(loaders), name)
+                try:
+                    ing = load()
+                    docs.append(make_doc(ing, extractor.extract(ing), s, path))
+                except Exception as e:  # one bad file must not stop the rest
+                    errors.append(f"{name}: {e}")
+            return docs, errors
+
+        def step(i, n, name):
+            if gen == self.gen and n > 1:
+                self.busy.setRange(0, n)
+                self.busy.setValue(i)
+                self._set_status(f"Reading {i + 1} of {n}:  {name[:40]}", "busy")
+
+        def done(result):
+            if gen != self.gen:
+                return
+            docs, errors = result
+            self.busy.setRange(0, 0)
+            self.busy.setVisible(self.ai_pending > 0)
+            for d in docs:
+                for w in d.ing.warnings:
+                    self._toast(w)
+            if docs:
+                self._sync_from_ui()
+                one_job = len(self.jobs) == 1 and target in self.jobs and not batch
+                if one_job and (len(docs) == 1 or len(group(docs, s)) == 1):
+                    # the usual way: everything dropped is about the job on screen
+                    target.docs += docs
+                    remerge(target, s)
+                    self._show_job()
+                    self._maybe_ai(target, docs)
+                else:
+                    before = [j for j in self.jobs if not j.is_empty()]
+                    count = len(before)
+                    self.jobs = group(docs, s, before) or [Job()]
+                    if self.cur not in self.jobs:
+                        self.cur = self.jobs[0]
+                    self._refresh_jobs()
+                    self._show_job()
+                    new = len(self.jobs) - count
+                    self._toast(f"{len(docs)} document(s) read:  {new} new job(s), "
+                                f"{len(self.jobs)} in total.")
+            else:
+                self._update_status()
+            if errors:
+                self._unreadable(errors, len(loaders))
+
+        def failed(msg):
+            self.busy.setRange(0, 0)
             self.busy.setVisible(self.ai_pending > 0)
             self._set_status("Could not read that input", "warn")
             QMessageBox.warning(self, "Could not read input", msg)
 
-        self.runner.start(work, on_done=done, on_error=failed)
+        self.runner.start(work, on_done=done, on_error=failed, on_progress=step)
 
-    def _maybe_ai(self, idxs: list[int]):
+    def _unreadable(self, errors: list[str], total: int):
+        if total == 1:
+            self._set_status("Could not read that input", "warn")
+            QMessageBox.warning(self, "Could not read input", errors[0])
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Some documents could not be read")
+        box.setText(f"{len(errors)} of {total} documents could not be read and were left out:\n\n"
+                    + "\n".join(e[:110] for e in errors[:8]) + ("\n…" if len(errors) > 8 else ""))
+        box.setDetailedText("\n".join(errors))
+        box.exec()
+
+    def _maybe_ai(self, job: Job, docs: list):
+        """Asks the model about documents added to the job on screen (batches use the rules only)."""
         if not (self.s.use_ai and self.ai_ok):
             return
         todo = []
-        for i in idxs:
-            ing = self.inputs[i]
-            if ing.kind == "image":
-                todo.append(i)
-            elif ing.kind in ("email", "text") and self.s.ai_for_text:
-                todo.append(i)
-            elif ing.kind == "pdf" and self.case.missing_required():
-                todo.append(i)
+        for d in docs:
+            if d.ing.kind == "image":
+                todo.append(d)
+            elif d.ing.kind in ("email", "text") and self.s.ai_for_text:
+                todo.append(d)
+            elif d.ing.kind == "pdf" and job.case.missing_required():
+                todo.append(d)
         if not todo:
             return
-        job = self.job
+        gen = self.gen
         self.ai_pending += len(todo)
         self.busy.setVisible(True)
         self._update_status()
-        for i in todo:
-            ing = self.inputs[i]
-
-            def done(ex, i=i):
-                if job != self.job:
+        for d in todo:
+            def done(ex, d=d):
+                if gen != self.gen:
                     return
                 self.ai_pending -= 1
-                self.ai_ex[i] = ex
-                self._remerge()
+                if job in self.jobs and d in job.docs:
+                    d.ai = ex
+                    self._remerge(job)
                 self._update_status()
 
-            def failed(msg, i=i):
-                if job != self.job:
+            def failed(msg, d=d):
+                if gen != self.gen:
                     return
                 self.ai_pending -= 1
-                self.ai_label.setText(f"○ AI failed on {self.inputs[i].name}: {msg[:120]}")
+                self.ai_label.setText(f"○ AI failed on {d.ing.name}: {msg[:120]}")
                 self._update_status()
 
-            self.runner.start(self.ai.extract, ing, on_done=done, on_error=failed)
+            self.runner.start(self.ai.extract, d.ing, on_done=done, on_error=failed)
 
     def _input_menu(self, pos):
         item = self.input_list.itemAt(pos)
         if not item:
             return
         idx = self.input_list.row(item)
+        doc = self.cur.docs[idx]
         m = QMenu(self)
         view = m.addAction("Show extracted text")
+        split = m.addAction("Move to a job of its own") if len(self.cur.docs) > 1 else None
         rem = m.addAction("Remove from job")
         act = m.exec(self.input_list.mapToGlobal(pos))
+        if act is None:
+            return
         if act == view:
             box = QMessageBox(self)
-            box.setWindowTitle(self.inputs[idx].name)
+            box.setWindowTitle(doc.ing.name)
             box.setText("Text read from this input:")
-            box.setDetailedText(self.inputs[idx].text or "(no text)")
+            box.setDetailedText(doc.ing.text or "(no text)")
             box.exec()
-        elif act == rem:
+        elif act in (rem, split):
             self._sync_from_ui()
-            del self.inputs[idx]
-            self.regex_ex = {(k if k < idx else k - 1): v for k, v in self.regex_ex.items() if k != idx}
-            self.ai_ex = {(k if k < idx else k - 1): v for k, v in self.ai_ex.items() if k != idx}
-            self.input_list.takeItem(idx)
-            self._remerge()
-            self._update_status()
+            del self.cur.docs[idx]
+            remerge(self.cur, self.s)
+            if act == split:
+                job = Job(docs=[doc], batch=True)
+                remerge(job, self.s)
+                self.jobs.insert(self.jobs.index(self.cur) + 1, job)
+            self._refresh_jobs()
+            self._show_job()
+
+    # ------------------------------------------------------------ jobs
+    def _job_text(self, job: Job) -> str:
+        mark = "✓ " if job.saved and not job.error else "⚠ " if job.error or job.problems() else ""
+        title = job.title()  # kept short so the date, which tells a case's jobs apart, stays in view
+        bits = [title if len(title) <= 30 else title[:29].rstrip() + "…"]
+        bits += [v for v in (job.case.get("dates"), job.case.get("index_no")) if v]
+        if len(job.docs) > 1:
+            bits.append(f"{len(job.docs)} documents")
+        return mark + "  ·  ".join(dict.fromkeys(bits))
+
+    def _job_tip(self, job: Job) -> str:
+        tip = [d.ing.name for d in job.docs] or ["(no documents)"]
+        tip += ["⚠ " + p for p in job.problems()]
+        who = [a.name or a.firm for a in job.case.attorneys if a.checked]
+        tip.append("Form for: " + ("; ".join(who) if who else "(blank attorney block)"))
+        if job.error:
+            tip.append("Not saved - " + job.error)
+        tip += [f"Saved: {p.name}" for p in job.saved]
+        return "\n".join(tip)
+
+    def _refresh_jobs(self):
+        """Rebuilds the list of jobs; it is only shown for a batch (more than one job)."""
+        multi = len(self.jobs) > 1
+        for w in (self.jobs_label, self.job_list, self.fill_all_btn):
+            w.setVisible(multi)
+        self.drop.set_compact(multi)
+        self.input_list.setMaximumHeight(72 if multi else 110)
+        self.paste.setMaximumHeight(64 if multi else 16777215)
+        self.fill_btn.setText("Fill this form" if multi else "Fill Form")
+        self.fill_btn.setObjectName("" if multi else "primary")
+        repolish(self.fill_btn)
+        self.job_list.blockSignals(True)
+        self.job_list.clear()
+        for job in self.jobs:
+            item = QListWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            self.job_list.addItem(item)
+        self.job_list.setCurrentRow(self.jobs.index(self.cur))
+        self.job_list.blockSignals(False)
+        self._refresh_job_labels()
+
+    def _refresh_job_labels(self):
+        self.job_list.blockSignals(True)
+        for row, job in enumerate(self.jobs):
+            item = self.job_list.item(row)
+            if item is None:
+                continue
+            item.setText(self._job_text(job))
+            item.setToolTip(self._job_tip(job))
+            item.setCheckState(Qt.Checked if job.include else Qt.Unchecked)
+        self.job_list.blockSignals(False)
+        chosen = [j for j in self.jobs if j.include and not j.is_empty()]
+        need = sum(1 for j in self.jobs if j.problems() and not j.saved)
+        saved = sum(1 for j in self.jobs if j.saved)
+        text = f"Jobs: {len(self.jobs)}"
+        if need:
+            text += f"  ·  {need} to check (⚠)"
+        if saved:
+            text += f"  ·  {saved} saved (✓)"
+        self.jobs_label.setText(text)
+        forms = sum(j.form_count() for j in chosen)
+        self.fill_all_btn.setText(f"Fill all  ({forms} form{'s' if forms != 1 else ''})")
+        self.fill_all_btn.setEnabled(bool(chosen))
+
+    def _show_job(self):
+        """Puts the current job in the editor."""
+        self.input_list.clear()
+        for d in self.cur.docs:
+            ing = d.ing
+            label = f"{ing.name}   ·   {ing.kind}"
+            if ing.page_count:
+                label += f", {ing.page_count} pp"
+            if ing.ocr_used:
+                label += ", OCR"
+            item = QListWidgetItem(label)
+            item.setToolTip(ing.text[:1500] or "(no text)")
+            self.input_list.addItem(item)
+        self._show_case()
+        self._update_status()
+
+    def _job_selected(self, row: int):
+        if not 0 <= row < len(self.jobs) or self.jobs[row] is self.cur:
+            return
+        self._sync_from_ui()
+        self.cur = self.jobs[row]
+        self._show_job()
+
+    def _job_ticked(self, item):
+        row = self.job_list.row(item)
+        if 0 <= row < len(self.jobs):
+            self.jobs[row].include = item.checkState() == Qt.Checked
+            self._refresh_job_labels()
+
+    def _job_menu(self, pos):
+        item = self.job_list.itemAt(pos)
+        m = QMenu(self)
+        rem = m.addAction("Remove this job") if item else None
+        m.addSeparator()
+        tick = m.addAction("Tick all")
+        untick = m.addAction("Untick all")
+        act = m.exec(self.job_list.mapToGlobal(pos))
+        if act is None:
+            return
+        if act in (tick, untick):
+            for j in self.jobs:
+                j.include = act == tick
+            self._refresh_job_labels()
+            return
+        self._sync_from_ui()
+        del self.jobs[self.job_list.row(item)]
+        if not self.jobs:
+            self.jobs = [Job()]
+        if self.cur not in self.jobs:
+            self.cur = self.jobs[0]
+        self._refresh_jobs()
+        self._show_job()
 
     # ----------------------------------------------------- merge/show
-    def _extractions(self):
-        out = []
-        for i in range(len(self.inputs)):
-            if i in self.regex_ex:
-                out.append(self.regex_ex[i])
-            if i in self.ai_ex:
-                out.append(self.ai_ex[i])
-        return out
-
-    def _remerge(self):
-        self._sync_from_ui()
-        prev = self.case
-        new = merge(self._extractions(), self.s, previous=prev)
-        if self.proc_touched:
-            new.proc_types = prev.proc_types
-        if self.att_touched:
-            from ..extract_regex import dedupe_attorneys
-            known = prev.attorneys
-            new.attorneys = dedupe_attorneys(known + [a for a in new.attorneys], self.s.profile)
-            for a in new.attorneys[len(known):]:
-                a.checked = False
-        self.case = new
-        self._show_case()
+    def _remerge(self, job: Job | None = None):
+        job = job or self.cur
+        if job is self.cur:
+            self._sync_from_ui()
+        remerge(job, self.s)
+        if job is self.cur:
+            self._show_case()
 
     def _show_case(self):
         for key, r in self.rows.items():
@@ -784,7 +1017,9 @@ class MainWindow(QMainWindow):
             for c, f in enumerate(ATT_FIELDS[1:], 1):
                 it = self.att.item(r, c)
                 vals[f] = it.text().strip() if it else ""
-            vals["address"] = "\n".join(p.strip() for p in vals["address"].split("/") if p.strip())
+            # " / " separates lines; "c/o" and "12-1/2" are left alone
+            vals["address"] = "\n".join(p.strip() for p in re.split(r"\s+/\s*|\s*/\s+", vals["address"])
+                                        if p.strip())
             a = Attorney(**vals)
             a.checked = self.att.item(r, 0).checkState() == Qt.Checked if self.att.item(r, 0) else False
             out.append(a)
@@ -884,6 +1119,13 @@ class MainWindow(QMainWindow):
         self.s.save()
         self._fill_speeds()
         self._apply_speed()
+        self._remerge_others()
+
+    def _remerge_others(self):
+        """New rates or settings also apply to the batch's other jobs."""
+        for job in self.jobs:
+            if job is not self.cur and job.docs:
+                remerge(job, self.s)
 
     def _delivery_changed(self, _idx):
         name = self.delivery.currentData() or ""
@@ -911,6 +1153,7 @@ class MainWindow(QMainWindow):
         self.s.reload_rates()
         self._fill_sheet_box()
         self._apply_speed()
+        self._remerge_others()
         self._toast(f"Loaded {len(self.s.sheets()[0])} rate sheet(s).")
 
     def _set_opt(self, name, value):
@@ -928,9 +1171,14 @@ class MainWindow(QMainWindow):
             self.drop.set_mood(None)
 
     def _update_status(self):
+        self._job_status()
+        if len(self.jobs) > 1:
+            self._refresh_job_labels()
+
+    def _job_status(self):
         busy = self.ai_pending > 0
         self.busy.setVisible(busy)
-        if not self.inputs:
+        if not self.cur.docs:
             self._set_status("Drop a document to begin", "")
             return
         self._sync_from_ui()
@@ -980,8 +1228,7 @@ class MainWindow(QMainWindow):
                     a.checked = i in chosen
                 self._show_attorneys()
 
-        out_dir = Path(self.s.output_dir) if self.s.output_dir else Path(
-            getattr(self, "_first_dir", "") or Path.home() / "Documents" / "Minute Agreements")
+        out_dir = out_dir_for(self.cur, self.s)
         try:
             paths = fill_all(case, self.s, out_dir)
         except PermissionError as e:
@@ -1003,22 +1250,98 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() == open_folder:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(out_dir)))
+        self.cur.saved, self.cur.error = paths, ""
+        self._update_status()
         self._set_status(f"✓  Saved {len(paths)} form(s)", "ok")
+
+    def fill_all_jobs(self):
+        """Fills the forms of every ticked job without asking questions."""
+        if len(self.jobs) < 2:
+            return self.fill()
+        self._sync_from_ui()
+        chosen = [j for j in self.jobs if j.include and not j.is_empty()]
+        if not chosen:
+            return
+        gaps = [j for j in chosen if j.problems()]
+        if gaps:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Question)
+            box.setWindowTitle("Some jobs are incomplete")
+            box.setText(f"{len(gaps)} of {len(chosen)} jobs (marked ⚠) would have blanks on the form:\n\n"
+                        + "\n".join(f"•  {j.title()}:  {', '.join(j.problems())}" for j in gaps[:8])
+                        + ("\n…" if len(gaps) > 8 else ""))
+            ready = box.addButton(f"Fill the {len(chosen) - len(gaps)} complete ones", QMessageBox.AcceptRole)
+            everything = box.addButton("Fill all, leave blanks", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Cancel)
+            ready.setEnabled(len(chosen) > len(gaps))
+            box.exec()
+            if box.clickedButton() == ready:
+                chosen = [j for j in chosen if not j.problems()]
+            elif box.clickedButton() != everything:
+                return
+        gen = self.gen
+        self.fill_all_btn.setEnabled(False)
+        self.fill_btn.setEnabled(False)
+        self.busy.setVisible(True)
+
+        def step(i, n, name):
+            self.busy.setRange(0, n)
+            self.busy.setValue(i)
+            self._set_status(f"Filling {i + 1} of {n}…", "busy")
+
+        def done(paths):
+            self.busy.setRange(0, 0)
+            self.fill_btn.setEnabled(True)
+            if gen != self.gen:
+                return
+            failed = [j for j in chosen if j.error]
+            for j in chosen:
+                if j.saved and not j.error:
+                    j.include = False  # "Fill all" again only does what is left
+            self._update_status()
+            folders = list(dict.fromkeys(str(p.parent) for p in paths))
+            text = f"Saved {len(paths)} form{'s' if len(paths) != 1 else ''} for " \
+                   f"{len(chosen) - len(failed)} job{'s' if len(chosen) - len(failed) != 1 else ''}"
+            text += f" in\n{folders[0]}" if len(folders) == 1 else f" in {len(folders)} folders." if folders else "."
+            if failed:
+                text += f"\n\n{len(failed)} could not be saved (is a PDF open in another program?):\n" + \
+                        "\n".join(f"•  {j.title()}: {j.error[:90]}" for j in failed[:6])
+            box = QMessageBox(self)
+            box.setWindowTitle("Batch finished")
+            box.setIcon(QMessageBox.Warning if failed else QMessageBox.Information)
+            box.setText(text)
+            box.setDetailedText("\n".join(str(p) for p in paths))
+            open_folder = box.addButton("Open folder", QMessageBox.ActionRole) if folders else None
+            box.addButton(QMessageBox.Ok)
+            box.exec()
+            if open_folder is not None and box.clickedButton() == open_folder:
+                for f in folders[:3]:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(f))
+            self._set_status(f"✓  Saved {len(paths)} form(s)", "warn" if failed else "ok")
+
+        def crashed(msg):
+            self.busy.setRange(0, 0)
+            self.fill_btn.setEnabled(True)
+            self._update_status()
+            QMessageBox.critical(self, "Could not fill the forms", msg)
+
+        self.runner.start(fill_jobs, chosen, self.s, batch=list(self.jobs),
+                          on_done=done, on_error=crashed, on_progress=step)
 
     # ------------------------------------------------------- misc
     def new_job(self):
-        self.job += 1
-        self.inputs.clear()
-        self.regex_ex.clear()
-        self.ai_ex.clear()
+        if len(self.jobs) > 1 and QMessageBox.question(
+                self, "New job", f"Clear all {len(self.jobs)} jobs of this batch and start over?"
+        ) != QMessageBox.Yes:
+            return
+        self.gen += 1
+        self.jobs = [Job()]
+        self.cur = self.jobs[0]
         self.ai_pending = 0
-        self.proc_touched = self.att_touched = False
-        if hasattr(self, "_first_dir"):
-            del self._first_dir
+        self.busy.setRange(0, 0)
+        self._refresh_jobs()
         self.input_list.clear()
         self.paste.clear()
-
-        self.case = CaseInfo()
         self._show_case()
         self.busy.setVisible(False)
         self._set_status("Drop a document to begin", "")
@@ -1033,9 +1356,10 @@ class MainWindow(QMainWindow):
             self.s.reload_rates()
             self._fill_sheet_box()
             self._check_ai()
-            if self.inputs:
+            if self.cur.docs:
                 self._remerge()
             self._apply_speed()
+            self._remerge_others()
             self._update_status()
 
     def closeEvent(self, e):

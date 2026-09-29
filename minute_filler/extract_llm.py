@@ -147,21 +147,33 @@ class OllamaExtractor:
             data = parse_json(self.client.chat(think=False, **base).message.content)
         except Exception:
             data = parse_json(self.client.chat(format=SCHEMA, **base).message.content)
-        return self._to_extraction(data, text)
+        # a model that read the picture itself can't be checked against any text
+        return self._to_extraction(data, None if images else text)
 
     # ------------------------------------------------------------ validate
-    def _to_extraction(self, d: dict, source_text: str) -> Extraction:
+    def _to_extraction(self, d: dict, source_text: str | None) -> Extraction:
+        """Validates the model's reply. Small models don't always keep to the template, so any
+        value may have the wrong type. With source_text=None nothing can be checked against it."""
         ex = Extraction()
-        src_lower = source_text.lower()
+        if not isinstance(d, dict):
+            return ex
+        check = source_text is not None
+        src_lower = (source_text or "").lower()
+        src_digits = re.sub(r"\D", "", src_lower)
 
         def seen(v: str) -> bool:
             """Loose check that a value really appears in the source (guards against inventions)."""
             toks = [t for t in re.findall(r"[a-z0-9]{3,}", v.lower())]
-            return not toks or sum(t in src_lower for t in toks) / len(toks) >= 0.6
+            return not check or not toks or sum(t in src_lower for t in toks) / len(toks) >= 0.6
+
+        def items(v) -> list:
+            return v if isinstance(v, list) else [v] if v else []
 
         def tidy(v) -> str:
             if isinstance(v, list):
-                v = ", ".join(str(x) for x in v if x)
+                v = ", ".join(x for x in v if isinstance(x, str) and x)
+            if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+                return ""
             v = " ".join(str(v or "").split()).strip(" ,;")
             if v.islower() and len(v) > 2:
                 v = smart_title(v.upper())
@@ -182,42 +194,51 @@ class OllamaExtractor:
                 v = re.sub(r"(?i)\s+-?\s*against\s*-?\s+|\s+vs?\.?\s+", " v. ", v)
             if v and seen(v):  # small models invent counties/courts - only keep what the text says
                 ex.add(field, v, SRC_AI, AI_CONF)
-        part = re.sub(r"(?i)^part\s*", "", str(d.get("part") or "")).strip()
-        if re.fullmatch(r"[A-Z]{0,3}-?\d{1,3}[A-Z]?", part, re.I):
-            ex.add("part", part.upper(), SRC_AI, AI_CONF)
-        m = re.search(r"(\d{3,7})\s*[-/]\s*(\d{4}|\d{2})", str(d.get("index_number") or ""))
-        if m:
+        part = re.sub(r"(?i)^part\s*", "", tidy(d.get("part"))).strip().upper()
+        # numbers ("25", "TR-3") or letters ("MDP"), and only a part that the text names
+        if re.fullmatch(r"[A-Z]{0,4}-?\d{1,3}[A-Z]?|[A-Z]{1,6}(?:-[A-Z0-9]{1,3})?", part) and \
+                (not check or re.search(rf"(?<![a-z0-9]){re.escape(part.lower())}(?![a-z0-9])", src_lower)):
+            ex.add("part", part, SRC_AI, AI_CONF)
+        m = re.search(r"(\d{3,7})\s*[-/]\s*(\d{4}|\d{2})", tidy(d.get("index_number")))
+        if m and (not check or m.group(1).lstrip("0") in src_digits):
             yr = int(m.group(2))
             ex.add("index_no", f"{int(m.group(1))}/{yr + 2000 if yr < 100 else yr}", SRC_AI, AI_CONF)
         dates = []
-        for raw in d.get("proceeding_dates") or []:
+        for raw in items(d.get("proceeding_dates")):
             dates += [v for _, _, v in find_dates(str(raw))]
         dates = list(dict.fromkeys(dates))
         if dates:
             ex.add("dates", ", ".join(dates), SRC_AI, AI_CONF)
-        for t in d.get("proceeding_types") or []:
-            if t in PROC_TYPES:
+        for t in items(d.get("proceeding_types")):
+            if isinstance(t, str) and t in PROC_TYPES:
                 ex.add_proc(t, 0.55)
         # Only trust delivery/copies when the text actually talks about them.
         delivery_words = {"Regular": r"regular|standard|normal", "Expedited": r"expedit|rush|asap|urgent",
                           "Daily": r"daily|overnight|next[- ]day|same[- ]day"}
         dv = d.get("delivery")
-        if dv in delivery_words and re.search(delivery_words[dv], src_lower):
+        if isinstance(dv, str) and dv in delivery_words and re.search(delivery_words[dv], src_lower):
             ex.add("delivery", dv, SRC_AI, 0.45)
-        if str(d.get("copies") or "").strip().isdigit() and "cop" in src_lower:
-            ex.add("copies", str(d["copies"]).strip(), SRC_AI, 0.45)
+        if tidy(d.get("copies")).isdigit() and "cop" in src_lower:
+            ex.add("copies", tidy(d["copies"]), SRC_AI, 0.45)
 
         own = (self.s.profile.name or "\0").lower()
-        for a in d.get("attorneys") or []:
+        for a in items(d.get("attorneys")):
+            if isinstance(a, str):
+                a = {"name": a}
+            if not isinstance(a, dict):
+                continue
             name, firm = tidy(a.get("name")), tidy(a.get("firm"))
             if not (name or firm) or PLACEHOLDER_RE.match(name or firm) or own in name.lower():
                 continue
             if not seen(f"{name} {firm}"):
                 continue
             phone = ""
-            pm = PHONE_RE.search(str(a.get("phone") or ""))
-            if pm:
+            pm = PHONE_RE.search(tidy(a.get("phone")))
+            if pm and (not check or "".join(pm.groups()) in src_digits):
                 phone = fmt_phone(pm)
+            mail = a.get("email").strip() if isinstance(a.get("email"), str) else ""
+            if "@" not in mail or (check and mail.lower() not in src_lower):
+                mail = ""
             addr = tidy(a.get("address"))
             if PHONE_RE.search(addr) and len(re.sub(r"[\d\W]", "", addr)) < 3 or "@" in addr or not seen(addr):
                 addr = ""  # a phone/e-mail in the wrong slot, or an invented address
@@ -226,6 +247,6 @@ class OllamaExtractor:
                 addr = f"{m.group(1)}\n{m.group(2)}"
             ex.attorneys.append(Attorney(
                 name=re.sub(r",?\s*Esq\.?$", "", name), firm=firm, address=addr, phone=phone,
-                email=str(a.get("email") or "").strip(), party=tidy(a.get("party")),
+                email=mail, party=tidy(a.get("party")),
                 source=SRC_AI, checked=bool(a.get("is_requester"))))
         return ex

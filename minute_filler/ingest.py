@@ -185,9 +185,36 @@ def ingest_docx(path: Path) -> Ingested:
     return Ingested(path.name, "text", text=re.sub(r"<[^>]+>", "", xml))
 
 
+def decode_text(raw: bytes) -> str:
+    """Text files as Notepad and Outlook save them: UTF-8, UTF-16 ("Unicode") or the Windows code page."""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", "ignore")
+    if raw[:3] == b"\xef\xbb\xbf":
+        return raw[3:].decode("utf-8", "ignore")
+    if raw[1:2] == b"\x00" and raw[3:4] == b"\x00":  # UTF-16 without a byte order mark
+        return raw.decode("utf-16-le", "ignore")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", "replace")
+
+
 def ingest_file(path: str | Path) -> Ingested:
     path = Path(path)
     ext = path.suffix.lower()
+    try:
+        return _ingest_file(path, ext)
+    except Exception as e:
+        if type(e) is ValueError or isinstance(e, (FileNotFoundError, PermissionError)):
+            raise  # already says what is wrong
+        # PyMuPDF, Pillow and zipfile report damaged files in their own words
+        if path.stat().st_size == 0:
+            raise ValueError("the file is empty") from e
+        why = str(e).replace(repr(str(path)), path.name).replace(str(path), path.name)
+        raise ValueError(f"this doesn't look like a valid {ext or 'text'} file ({why[:120]})") from e
+
+
+def _ingest_file(path: Path, ext: str) -> Ingested:
     if ext == ".pdf":
         ing = ingest_pdf(path)
     elif ext in IMAGE_EXT:
@@ -200,8 +227,7 @@ def ingest_file(path: str | Path) -> Ingested:
     elif ext == ".docx":
         ing = ingest_docx(path)
     else:
-        raw = path.read_bytes()
-        text = raw.decode("utf-8", "ignore") if raw[:3] != b"\xef\xbb\xbf" else raw[3:].decode("utf-8", "ignore")
+        text = decode_text(path.read_bytes())
         if ext in (".htm", ".html"):
             text = _html_to_text(text)
         ing = Ingested(path.name, "text", text=text)

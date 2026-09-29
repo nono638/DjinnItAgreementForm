@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -122,6 +123,23 @@ def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str
     return v
 
 
+_NO_ACCENT_FORM = str.maketrans("ŁłĐđØøıİ", "LlDdOoiI")
+
+
+def form_text(s: str) -> str:
+    """The fields of the court's form are set in Helvetica, which has the Western European
+    letters only; others (Š, ł, ễ...) come out cut off, so they are written without their accent."""
+    out = []
+    for ch in s:
+        try:
+            ch.encode("cp1252")
+        except UnicodeEncodeError:
+            ch = (unicodedata.normalize("NFKD", ch.translate(_NO_ACCENT_FORM)).encode("ascii", "ignore").decode()
+                  or ch)
+        out.append(ch)
+    return "".join(out)
+
+
 def _set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
     w.field_value = text
     w.text_font = "Helv"
@@ -165,6 +183,9 @@ def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
     page = doc[0]
     widgets = {fmap.WIDGETS.get(w.field_name.removeprefix("Text-")): w for w in page.widgets()}
     fixed: dict[str, float] = {}
+    for k, val in v.items():
+        if isinstance(val, str):
+            v[k] = form_text(val)
     _spread(v, v.get("case_name_raw", ""), ["case_name_1", "case_name_2", "case_name_3"],
             widgets["case_name_1"].rect.width, fixed, max_fs=case_fs)
     for src, dst in fmap.MERGE_INTO.items():
@@ -209,7 +230,9 @@ def short_caption(name: str, limit: int = 60) -> str:
     return short if len(short) <= limit else short[:limit].rsplit(" ", 1)[0]
 
 
-def output_name(case: CaseInfo, atty: Attorney | None, s: Settings) -> str:
+def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool = False) -> str:
+    """dated: add the date of the minutes, to tell apart the forms for several days of one case."""
+    day = case.get("dates").split(",")[0].strip().replace("/", "-")
     try:
         name = s.filename_pattern.format(
             case=short_caption(case.get("case_name")) or "Case",
@@ -219,6 +242,8 @@ def output_name(case: CaseInfo, atty: Attorney | None, s: Settings) -> str:
         )
     except (KeyError, IndexError, ValueError):  # a bad custom pattern
         name = f"Minute Agreement - {case.get('index_no').replace('/', '-')}"
+    if dated and day and day not in name:
+        name += f" - {day}"
     name = re.sub(r"(\s-\s*)+$", "", re.sub(r"\s-\s+-\s", " - ", name)).strip()
     return safe_filename(name) + ".pdf"
 
@@ -233,7 +258,7 @@ def unique_path(p: Path) -> Path:
     return p
 
 
-def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path) -> Path:
+def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, dated: bool = False) -> Path:
     if s.agreement_today and not case.get("agreement_date"):
         case.set("agreement_date", date.today().strftime("%-m/%-d/%Y") if sys.platform != "win32"
                  else date.today().strftime("%#m/%#d/%Y"))
@@ -252,13 +277,13 @@ def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path) -> P
     if s.flatten:
         doc.bake()
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = unique_path(out_dir / output_name(case, atty, s))
+    out = unique_path(out_dir / output_name(case, atty, s, dated))
     doc.save(out, garbage=3, deflate=True)
     doc.close()
     return out
 
 
-def fill_all(case: CaseInfo, s: Settings, out_dir: Path) -> list[Path]:
+def fill_all(case: CaseInfo, s: Settings, out_dir: Path, dated: bool = False) -> list[Path]:
     """One PDF per checked attorney (or a single form with a blank attorney block)."""
     chosen = [a for a in case.attorneys if a.checked]
-    return [fill(case, a, s, out_dir) for a in chosen] if chosen else [fill(case, None, s, out_dir)]
+    return [fill(case, a, s, out_dir, dated) for a in chosen or [None]]

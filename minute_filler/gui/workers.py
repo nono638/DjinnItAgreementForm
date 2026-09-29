@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 class _Signals(QObject):
     finished = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, int, str)  # done, total, what is being worked on
 
 
 class Task(QRunnable):
@@ -36,8 +37,12 @@ class Runner:
         self._live: set[Task] = set()
 
     def start(self, fn: Callable, *args, on_done: Callable | None = None,
-              on_error: Callable | None = None, **kwargs) -> Task:
+              on_error: Callable | None = None, on_progress: Callable | None = None, **kwargs) -> Task:
+        """With on_progress, fn is called with progress=<function(done, total, name)>."""
         task = Task(fn, *args, **kwargs)
+        if on_progress:
+            task.kwargs["progress"] = task.signals.progress.emit
+            task.signals.progress.connect(on_progress)
         task.setAutoDelete(False)
         self._live.add(task)
 

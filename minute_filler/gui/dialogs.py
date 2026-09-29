@@ -139,6 +139,10 @@ class SettingsDialog(QDialog):
         self.o_instr = QCheckBox("Include the instructions page (UCS form page 2)")
         self.o_instr.setChecked(settings.include_instructions)
         f.addRow("", self.o_instr)
+        self.o_combine = QCheckBox("Batches: put all days of the same case on one form")
+        self.o_combine.setToolTip("Off: documents about the same case make one form per day of proceedings.")
+        self.o_combine.setChecked(settings.batch_combine_dates)
+        f.addRow("", self.o_combine)
         row = QHBoxLayout()
         self.o_dir = QLineEdit(settings.output_dir)
         self.o_dir.setPlaceholderText("Same folder as the dropped file")
@@ -272,6 +276,7 @@ class SettingsDialog(QDialog):
         s.open_after, s.title_case_names = self.o_open.isChecked(), self.o_tc.isChecked()
         s.form_choice = self.o_form.currentData()
         s.include_instructions = self.o_instr.isChecked()
+        s.batch_combine_dates = self.o_combine.isChecked()
         s.output_dir, s.filename_pattern = self.o_dir.text().strip(), self.o_pattern.text().strip() or s.filename_pattern
         s.theme = self.o_theme.currentText()
         s.show_djinn = self.o_djinn.isChecked()

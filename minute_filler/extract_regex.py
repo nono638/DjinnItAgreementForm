@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from datetime import date
+from datetime import date, timedelta
 
 from .ingest import Ingested
 from .models import Attorney, Extraction, SRC_REGEX
@@ -51,7 +51,8 @@ FIRM_RE = re.compile(
     r"\bLaw\s+(?:Office|Firm|Group)|\bLaw\s+Offices?\b|Attorneys?\s+at\s+Law|\bCorporation\s+Counsel\b|"
     r"\bLegal\s+Aid\b|\bLegal\s+Services?\b|\s&\s)", re.I)
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?\(?(\d{3})\)?[\s.-]*(\d{3})[\s.-](\d{4})(?!\d)")
-EMAIL_RE = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
+# (the lookbehind keeps matching linear on long unbroken runs such as encoded attachments)
+EMAIL_RE = re.compile(r"(?<![\w.+'-])[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
 ESQ_RE = re.compile(r"(?:\bBY\s*:?\s*)?([A-Z][A-Za-z.'\-]*(?:\s+[A-Z][A-Za-z.'\-]*){0,4}),?\s+Esq\b\.?", re.I)
 ROLE_RE = re.compile(r"^(?:attorneys?|counsel)\s+(?:for|to)\s+(?:the\s+)?(.+?)[.:,]?$", re.I)
 SPECIAL_ROLE_RE = re.compile(
@@ -122,6 +123,19 @@ def fmt_phone(m: re.Match) -> str:
     return f"({m.group(1)}) {m.group(2)}-{m.group(3)}"
 
 
+def guess_year(month: int, day: int, today: date | None = None) -> int | None:
+    """Year of a date written without one: the most recent such day, since minutes are ordered
+    after the proceeding - unless the day is coming up within the next two months."""
+    today = today or date.today()
+    for y in (today.year, today.year - 1):
+        try:
+            if date(y, month, day) <= today + timedelta(days=60):
+                return y
+        except ValueError:  # 2/29
+            continue
+    return None
+
+
 def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, str]]:
     """Returns (start, end, M/D/YYYY) for every date in text."""
     found = []
@@ -134,22 +148,20 @@ def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, 
         if v:
             found.append((m.start(), m.end(), v))
     if allow_yearless:
-        today = date.today()
-        for m in re.finditer(r"(?<![\d/.$-])(\d{1,2})/(\d{1,2})(?![\d/%-])", text):
-            mo, d = int(m.group(1)), int(m.group(2))
-            y = today.year
-            try:
-                if date(y, mo, d) > today.replace(month=12, day=31):
-                    y -= 1
-            except ValueError:
-                continue
-            v = fmt_date(y, mo, d)
+        bare = [(m.start(), m.end(), int(m.group(1)), int(m.group(2)))
+                for m in re.finditer(r"(?<![\d/.$-])(\d{1,2})/(\d{1,2})(?![\d/%-])", text)]
+        bare += [(m.start(), m.end(), MONTHS[m.group(1)[:3].lower()], int(m.group(2))) for m in re.finditer(
+            MONTH_RE + r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!,?\s+\d{4})", text, re.I)]
+        # From the last to the first, so that in "9/14, 9/15 and 9/16/2025" every day gets the year 2025.
+        for start, end, mo, d in sorted(bare, reverse=True):
+            after = min((f for f in found if f[0] >= end), default=None)
+            if after and re.fullmatch(r"\s*(,|and|&|-|through|thru|to)\s*(and\s*)?", text[end:after[0]], re.I):
+                y = int(after[2].rsplit("/", 1)[1])
+            else:
+                y = guess_year(mo, d) if 1 <= mo <= 12 and 1 <= d <= 31 else None
+            v = fmt_date(y, mo, d) if y else None
             if v:
-                found.append((m.start(), m.end(), v))
-        for m in re.finditer(MONTH_RE + r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!,?\s+\d{4})", text, re.I):
-            v = fmt_date(date.today().year, MONTHS[m.group(1)[:3].lower()], int(m.group(2)))
-            if v:
-                found.append((m.start(), m.end(), v))
+                found.append((start, end, v))
     found.sort()
     return found
 

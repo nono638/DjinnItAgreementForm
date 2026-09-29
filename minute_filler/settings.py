@@ -69,6 +69,7 @@ class Settings:
     settings_version: int = 2         # bumped when a default changes for existing users
     output_dir: str = ""              # blank = next to first input file, else Documents
     filename_pattern: str = "Minute Agreement - {case} - {index} - {attorney}"
+    batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
 
     # AI
     use_ai: bool = True
@@ -128,12 +129,15 @@ class Settings:
             data = json.loads(s.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return s
+        if not isinstance(data, dict):  # a damaged file must not keep the app from starting
+            return s
         known = {f.name for f in fields(cls)}
         for k, v in data.items():
-            if k == "profile" and isinstance(v, dict):
-                pk = {f.name for f in fields(Profile)}
-                s.profile = Profile(**{a: b for a, b in v.items() if a in pk})
-            elif k in known:
+            if k == "profile":
+                if isinstance(v, dict):
+                    pk = {f.name for f in fields(Profile)}
+                    s.profile = Profile(**{a: b for a, b in v.items() if a in pk and isinstance(b, str)})
+            elif k in known and type(v) is type(getattr(s, k)):  # a value of the wrong kind keeps its default
                 setattr(s, k, v)
         if data.get("settings_version", 1) < 2:  # v2: the court's fillable UCS form became the default
             s.form_choice = "ucs"

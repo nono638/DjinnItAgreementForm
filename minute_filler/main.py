@@ -34,9 +34,33 @@ def selftest(out_dir: str, files: list[str]) -> int:
     return 0
 
 
+def batch(out_dir: str, paths: list[str]) -> int:
+    """Headless batch: --batch OUTDIR files/folders... fills one set of forms per case and date
+    with the saved settings, and writes batch.json (what was grouped, saved or unreadable)."""
+    import json
+    from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
+    from minute_filler.settings import Settings
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    s = Settings.load()
+    s.output_dir = str(out)
+    docs, errors = read_docs(expand_paths(paths), s)
+    jobs = group(docs, s)
+    fill_jobs([j for j in jobs if j.include], s)  # not the documents that name no case
+    report = {"documents": len(docs), "unreadable": errors, "jobs": [
+        {"case": j.case.get("case_name"), "index": j.case.get("index_no"), "dates": j.case.get("dates"),
+         "documents": [d.path for d in j.docs], "problems": j.problems(),
+         "forms": [p.name for p in j.saved], "error": j.error} for j in jobs]}
+    (out / "batch.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return 1 if errors or any(j.error for j in jobs) else 0
+
+
 def main() -> int:
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         return selftest(sys.argv[2], sys.argv[3:])
+    if len(sys.argv) > 3 and sys.argv[1] == "--batch":
+        return batch(sys.argv[2], sys.argv[3:])
 
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
@@ -61,10 +85,17 @@ def main() -> int:
     apply_theme(app, settings.theme)
     win = MainWindow(settings, app)
     win.show()
-    files = [a for a in sys.argv[1:] if Path(a).is_file()]  # "Open with" / drag onto the exe
+    files = [a for a in sys.argv[1:] if Path(a).exists()]  # "Open with" / files or a folder dragged onto the exe
     if files:
         win.add_files(files)
-    return app.exec()
+    code = app.exec()
+    from PySide6.QtCore import QThreadPool
+    from minute_filler.gui.dialogs import _BACKGROUND
+    if QThreadPool.globalInstance().activeThreadCount() or any(t.isRunning() for t in _BACKGROUND):
+        # Settings are saved. Don't linger (unseen, for minutes) until the AI model answers.
+        import os
+        os._exit(code)
+    return code
 
 
 if __name__ == "__main__":

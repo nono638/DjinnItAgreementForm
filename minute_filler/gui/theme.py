@@ -89,6 +89,8 @@ QListWidget, QTableWidget {
   alternate-background-color: {bg};
 }
 QListWidget::item { padding: 5px; }
+QListWidget::indicator { width: 15px; height: 15px; border: 1px solid {input_border}; border-radius: 4px; background: {input}; }
+QListWidget::indicator:checked { background: {accent}; border: 1px solid {accent}; image: url(CHECK_ICON); }
 QListWidget::item:selected, QTableWidget::item:selected { background: {sel}; color: {text}; }
 QHeaderView::section { background: {header_bg}; border: none; border-bottom: 1px solid {border}; padding: 5px; color: {muted}; font-weight: 600; }
 QTabWidget::pane { border: 1px solid {border}; border-radius: 8px; background: {card}; top: -1px; }
