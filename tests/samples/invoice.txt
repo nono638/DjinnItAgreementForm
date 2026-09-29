@@ -1,0 +1,20 @@
+Invoice
+Pat Reporter
+9/21/2026
+Senior Court Reporter
+Anytown Supreme Court
+123 Courthouse Plaza, Room 100
+Anytown, New York 10000
+preporter@example.com
+To: Example Firm LLP, attn: billing@examplefirm.com
+Title: Smith v Jones
+Index No. 712222-2024
+Date of proceedings: 5-22-2026
+Judge: Lopez
+Part: 53
+Total due:
+Regular Rate:
+$94.50
+2-4 week turnaround from receipt of payment.
+Expedited Rate:
+$114.00

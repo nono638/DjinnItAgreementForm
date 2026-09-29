@@ -1,0 +1,10 @@
+* text=auto
+*.bat text eol=crlf
+*.iss text eol=crlf
+# rate sheets are edited in Excel - keep them byte-for-byte
+*.csv -text
+*.pdf binary
+*.jpg binary
+*.png binary
+*.bmp binary
+*.ico binary

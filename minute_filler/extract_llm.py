@@ -1,0 +1,231 @@
+"""Optional second opinion from a local Ollama model (default gemma4:e2b).
+
+The model gets the text (e-mail body, OCR of a photo, transcript cover page)
+and returns JSON constrained by a schema. Its answers are validated and given
+a lower confidence than labelled regex hits, so they mostly fill gaps.
+If there is no text at all (OCR unavailable), the image itself is sent.
+"""
+from __future__ import annotations
+
+import json
+import re
+
+from .extract_regex import (COURTS, PHONE_RE, PLACEHOLDER_RE, RegexExtractor, find_dates, fmt_phone,
+                            is_mostly_upper, smart_title)
+from .ingest import Ingested
+from .models import Attorney, Extraction, PROC_TYPES, SRC_AI
+from .settings import Settings
+
+MAX_CHARS = 6000
+AI_CONF = 0.5
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "court": {"type": "string", "description": "Court type, e.g. Supreme, Civil, Family"},
+        "county": {"type": "string"},
+        "part": {"type": "string", "description": "Courtroom part number, digits only"},
+        "judge": {"type": "string", "description": "Judge or justice name without titles"},
+        "case_name": {"type": "string", "description": "Caption, e.g. 'Smith v. Jones'"},
+        "index_number": {"type": "string", "description": "Index/docket number like 123456/2024"},
+        "proceeding_dates": {"type": "array", "items": {"type": "string"},
+                             "description": "Dates of the proceedings whose minutes are wanted, M/D/YYYY"},
+        "proceeding_types": {"type": "array", "items": {"type": "string", "enum": PROC_TYPES + ["Other"]}},
+        "other_proceeding": {"type": "string"},
+        "delivery": {"type": "string", "enum": ["", "Regular", "Expedited", "Daily"]},
+        "copies": {"type": "string"},
+        "attorneys": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}, "firm": {"type": "string"}, "address": {"type": "string"},
+                    "phone": {"type": "string"}, "email": {"type": "string"},
+                    "party": {"type": "string", "description": "Who they represent"},
+                    "is_requester": {"type": "boolean", "description": "True if this person is asking for the minutes"},
+                },
+                "required": ["name", "firm", "address", "phone", "email", "party", "is_requester"],
+            },
+        },
+    },
+    "required": ["court", "county", "part", "judge", "case_name", "index_number", "proceeding_dates",
+                 "proceeding_types", "other_proceeding", "delivery", "copies", "attorneys"],
+}
+
+PROMPT = """You extract details for a New York court reporter's "Minute Agreement Form" (an order for a transcript).
+The input is {kind}. Read it and fill the JSON fields.
+Rules:
+- Only use facts stated in the input. Use "" or [] when something is not given. Never invent values.
+- The court reporter {reporter} is NOT an attorney; do not list them.
+- proceeding_dates are the dates of the court proceedings (not the date an e-mail was sent), formatted M/D/YYYY.
+  Today is {today}; resolve relative dates like "last Tuesday" against it.
+- Attorneys: people or law firms representing parties. Mark is_requester true for whoever is ordering the minutes.
+- Skip entries like "Unrepresented" or "No one appeared".
+
+Answer with ONLY a JSON object shaped exactly like this template:
+{template}
+
+INPUT:
+\"\"\"
+{text}
+\"\"\"
+"""
+
+TEMPLATE = json.dumps({
+    "court": "", "county": "", "part": "", "judge": "", "case_name": "", "index_number": "",
+    "proceeding_dates": ["M/D/YYYY"], "proceeding_types": ["one of " + "/".join(PROC_TYPES) + "/Other"],
+    "other_proceeding": "", "delivery": "Regular/Expedited/Daily or empty", "copies": "",
+    "attorneys": [{"name": "", "firm": "", "address": "", "phone": "", "email": "", "party": "",
+                   "is_requester": False}],
+})
+
+
+def parse_json(text: str) -> dict:
+    """Lenient: strips ``` fences and prose around the first {...} object."""
+    text = re.sub(r"```(?:json)?", "", text or "")
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError("no JSON object in model reply")
+    data = json.loads(text[start:end + 1])
+    return _blank_na(data)
+
+
+def _blank_na(v):
+    if isinstance(v, dict):
+        return {k: _blank_na(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_blank_na(x) for x in v if _blank_na(x) not in ("", None)]
+    if isinstance(v, str) and v.strip().lower() in ("n/a", "na", "none", "unknown", "null", "not given", "m/d/yyyy"):
+        return ""
+    return v
+
+
+class OllamaExtractor:
+    def __init__(self, settings: Settings):
+        self.s = settings
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            import ollama
+            self._client = ollama.Client(host=self.s.ollama_host, timeout=self.s.ai_timeout)
+        return self._client
+
+    def status(self) -> tuple[bool, str]:
+        """(ok, message) - checks that Ollama runs and the model is installed."""
+        try:
+            import ollama
+            quick = ollama.Client(host=self.s.ollama_host, timeout=3)
+            models = [m.model for m in quick.list().models]
+        except Exception:
+            return False, "Ollama is not running - using rules only."
+        want = self.s.ollama_model
+        if not any(m == want or m.split(":")[0] == want or m == f"{want}:latest" for m in models):
+            return False, f"Ollama model '{want}' is not installed (ollama pull {want})."
+        return True, f"AI ready ({want})"
+
+    def extract(self, ing: Ingested) -> Extraction:
+        from datetime import date
+        text = ing.text.strip()
+        if ing.kind == "pdf":  # a transcript's cover page carries everything
+            text = text.split("\f")[0]
+        kind = {"email": "an e-mail", "image": "OCR text of a photographed court document",
+                "pdf": "text of a court document"}.get(ing.kind, "free text")
+        images = None
+        if not text and ing.images:
+            kind, images, text = "an image of a court document", ing.images[:1], "(see image)"
+        prompt = PROMPT.format(kind=kind, reporter=self.s.profile.name or "(unknown)", template=TEMPLATE,
+                               today=date.today().strftime("%A %m/%d/%Y"), text=text[:MAX_CHARS])
+        msg = {"role": "user", "content": prompt}
+        if images:
+            msg["images"] = images
+        base = dict(model=self.s.ollama_model, messages=[msg], options={"temperature": 0}, keep_alive="15m")
+        # gemma4 ignores `format` when thinking is off, so ask for JSON in the prompt (fast) and
+        # fall back to a schema-constrained call with thinking (slow, but always valid JSON).
+        try:
+            data = parse_json(self.client.chat(think=False, **base).message.content)
+        except Exception:
+            data = parse_json(self.client.chat(format=SCHEMA, **base).message.content)
+        return self._to_extraction(data, text)
+
+    # ------------------------------------------------------------ validate
+    def _to_extraction(self, d: dict, source_text: str) -> Extraction:
+        ex = Extraction()
+        src_lower = source_text.lower()
+
+        def seen(v: str) -> bool:
+            """Loose check that a value really appears in the source (guards against inventions)."""
+            toks = [t for t in re.findall(r"[a-z0-9]{3,}", v.lower())]
+            return not toks or sum(t in src_lower for t in toks) / len(toks) >= 0.6
+
+        def tidy(v) -> str:
+            if isinstance(v, list):
+                v = ", ".join(str(x) for x in v if x)
+            v = " ".join(str(v or "").split()).strip(" ,;")
+            if v.islower() and len(v) > 2:
+                v = smart_title(v.upper())
+            return smart_title(v) if is_mostly_upper(v) else v
+
+        courts = {name.lower(): name for _, name in COURTS}
+        for key, field in (("court", "court"), ("county", "county"), ("judge", "judge"), ("case_name", "case_name"),
+                           ("other_proceeding", "proc_other")):
+            v = tidy(d.get(key))
+            if key == "court":
+                v = re.sub(r"(?i)\s*court\b.*$", "", v).strip()
+                v = courts.get(v.lower(), "")
+            if key == "county":
+                v = RegexExtractor._match_county(re.sub(r"(?i)\s*county\b|\bcounty of\s*", "", v).strip()) or ""
+            if key == "judge":
+                v = re.sub(r"(?i)^(hon\.?|honorable|justice|judge)\s+|,?\s*j\.?s\.?c\.?$", "", v).strip()
+            if key == "case_name":
+                v = re.sub(r"(?i)\s+-?\s*against\s*-?\s+|\s+vs?\.?\s+", " v. ", v)
+            if v and seen(v):  # small models invent counties/courts - only keep what the text says
+                ex.add(field, v, SRC_AI, AI_CONF)
+        part = re.sub(r"(?i)^part\s*", "", str(d.get("part") or "")).strip()
+        if re.fullmatch(r"[A-Z]{0,3}-?\d{1,3}[A-Z]?", part, re.I):
+            ex.add("part", part.upper(), SRC_AI, AI_CONF)
+        m = re.search(r"(\d{3,7})\s*[-/]\s*(\d{4}|\d{2})", str(d.get("index_number") or ""))
+        if m:
+            yr = int(m.group(2))
+            ex.add("index_no", f"{int(m.group(1))}/{yr + 2000 if yr < 100 else yr}", SRC_AI, AI_CONF)
+        dates = []
+        for raw in d.get("proceeding_dates") or []:
+            dates += [v for _, _, v in find_dates(str(raw))]
+        dates = list(dict.fromkeys(dates))
+        if dates:
+            ex.add("dates", ", ".join(dates), SRC_AI, AI_CONF)
+        for t in d.get("proceeding_types") or []:
+            if t in PROC_TYPES:
+                ex.add_proc(t, 0.55)
+        # Only trust delivery/copies when the text actually talks about them.
+        delivery_words = {"Regular": r"regular|standard|normal", "Expedited": r"expedit|rush|asap|urgent",
+                          "Daily": r"daily|overnight|next[- ]day|same[- ]day"}
+        dv = d.get("delivery")
+        if dv in delivery_words and re.search(delivery_words[dv], src_lower):
+            ex.add("delivery", dv, SRC_AI, 0.45)
+        if str(d.get("copies") or "").strip().isdigit() and "cop" in src_lower:
+            ex.add("copies", str(d["copies"]).strip(), SRC_AI, 0.45)
+
+        own = (self.s.profile.name or "\0").lower()
+        for a in d.get("attorneys") or []:
+            name, firm = tidy(a.get("name")), tidy(a.get("firm"))
+            if not (name or firm) or PLACEHOLDER_RE.match(name or firm) or own in name.lower():
+                continue
+            if not seen(f"{name} {firm}"):
+                continue
+            phone = ""
+            pm = PHONE_RE.search(str(a.get("phone") or ""))
+            if pm:
+                phone = fmt_phone(pm)
+            addr = tidy(a.get("address"))
+            if PHONE_RE.search(addr) and len(re.sub(r"[\d\W]", "", addr)) < 3 or "@" in addr or not seen(addr):
+                addr = ""  # a phone/e-mail in the wrong slot, or an invented address
+            m = re.match(r"^(.*),\s*([^,]+,\s*(?:[A-Z]{2}|New York|New Jersey)\.?\s+\d{5}.*)$", addr)
+            if m:  # "123 Main St, Suite 4, New York, NY 10001" -> street / city line
+                addr = f"{m.group(1)}\n{m.group(2)}"
+            ex.attorneys.append(Attorney(
+                name=re.sub(r",?\s*Esq\.?$", "", name), firm=firm, address=addr, phone=phone,
+                email=str(a.get("email") or "").strip(), party=tidy(a.get("party")),
+                source=SRC_AI, checked=bool(a.get("is_requester"))))
+        return ex

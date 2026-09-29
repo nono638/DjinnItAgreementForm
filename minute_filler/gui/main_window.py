@@ -1,0 +1,1043 @@
+"""Main window: drop zone + paste box on the left, editable extracted fields on the right."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
+)
+
+from .. import __version__
+from ..extract_llm import OllamaExtractor
+from ..extract_regex import RegexExtractor
+from ..fill import fill_all
+from ..ingest import Ingested, ingest_file, ingest_pil, ingest_text
+from ..merge import merge, refresh_delivery_date, refresh_rate
+from ..models import (Attorney, CaseInfo, DELIVERY_TYPES, FIELD_LABELS, FieldState, PROC_TYPES, REQUIRED_KEYS,
+                      SRC_AI, SRC_USER)
+from ..settings import Settings
+from .dialogs import ClarifyDialog, SettingsDialog
+from .theme import apply_theme
+from .workers import Runner
+
+FILE_FILTER = ("Documents (*.pdf *.jpg *.jpeg *.png *.heic *.tif *.tiff *.bmp *.webp *.eml *.txt *.docx);;"
+               "All files (*.*)")
+ATT_COLS = ["", "Name", "Firm", "Address", "Phone", "Fax", "Email", "Party / role", "Source"]
+ATT_FIELDS = [None, "name", "firm", "address", "phone", "fax", "email", "party", "source"]
+
+
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
+
+
+def repolish(w: QWidget) -> None:
+    w.style().unpolish(w)
+    w.style().polish(w)
+
+
+def _rounded(path: Path, width: int, radius: int):
+    """Scaled pixmap with rounded corners (HiDPI aware)."""
+    from PySide6.QtGui import QPainter, QPainterPath, QPixmap
+    src = QPixmap(str(path))
+    if src.isNull():
+        return src
+    dpr = QApplication.instance().devicePixelRatio() if QApplication.instance() else 1.0
+    src = src.scaledToWidth(int(width * dpr), Qt.SmoothTransformation)
+    out = QPixmap(src.size())
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.Antialiasing)
+    clip = QPainterPath()
+    clip.addRoundedRect(0, 0, src.width(), src.height(), radius * dpr, radius * dpr)
+    p.setClipPath(clip)
+    p.drawPixmap(0, 0, src)
+    p.end()
+    out.setDevicePixelRatio(dpr)
+    return out
+
+
+# ------------------------------------------------------------------ widgets
+
+class FieldRow(QWidget):
+    """Editor + suggestions menu + source badge for one form field."""
+
+    def __init__(self, key: str, on_edit, multiline: bool = False):
+        super().__init__()
+        self.key, self.on_edit, self.multiline = key, on_edit, multiline
+        self.state = FieldState()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        if multiline:
+            self.edit = QPlainTextEdit()
+            self.edit.setFixedHeight(58)
+            self.edit.textChanged.connect(self._changed)
+        else:
+            self.edit = QLineEdit()
+            self.edit.textEdited.connect(self._changed)
+        self._loading = False
+        lay.addWidget(self.edit, 1)
+        self.alts = QToolButton()
+        self.alts.setText("▾")
+        self.alts.setPopupMode(QToolButton.InstantPopup)
+        self.alts.setMenu(QMenu(self.alts))
+        self.alts.setFixedWidth(28)
+        lay.addWidget(self.alts)
+        self.badge = QLabel("")
+        self.badge.setObjectName("badge")
+        self.badge.setFixedSize(58, 20)
+        self.badge.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.badge, 0, Qt.AlignTop if multiline else Qt.AlignVCenter)
+
+    def text(self) -> str:
+        return self.edit.toPlainText().strip() if self.multiline else self.edit.text().strip()
+
+    def set_text(self, t: str) -> None:
+        self._loading = True
+        if self.multiline:
+            self.edit.setPlainText(t)
+        else:
+            self.edit.setText(t)
+        self._loading = False
+
+    def set_state(self, st: FieldState) -> None:
+        self.state = st
+        self.set_text(st.value)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        st = self.state
+        self.badge.setText(st.source if st.value else "")
+        self.badge.setProperty("src", st.source if st.value else "")
+        tip = {"regex": "Found in the document", "AI": "Suggested by the AI model - please check",
+               "default": "Your default setting", "derived": "Calculated", "you": "Entered by you"}
+        self.badge.setToolTip(tip.get(st.source, ""))
+        review = st.value and st.source != SRC_USER and (st.confidence < 0.6 or st.source == SRC_AI)
+        self.edit.setProperty("review", bool(review))
+        self.edit.setProperty("missing", self.key in REQUIRED_KEYS and not st.value)
+        others = [a for a in st.alternatives if a != st.value]
+        menu = self.alts.menu()
+        menu.clear()
+        for alt in st.alternatives:
+            act = menu.addAction(alt if len(alt) < 110 else alt[:107] + "...")
+            act.triggered.connect(lambda _=False, v=alt: self.choose(v))
+        self.alts.setVisible(bool(others))
+        self.alts.setToolTip(f"{len(others)} other suggestion(s)")
+        for w in (self.badge, self.edit):
+            repolish(w)
+
+    def choose(self, value: str) -> None:
+        self.set_text(value)
+        self._changed()
+
+    def _changed(self) -> None:
+        if self._loading:
+            return
+        self.state = FieldState(self.text(), SRC_USER, 1.0, self.state.alternatives)
+        self._refresh()
+        self.on_edit(self.key)
+
+
+class DropZone(QFrame):
+    def __init__(self, on_files, on_text, on_image, on_browse):
+        super().__init__()
+        self.setObjectName("drop")
+        self.setAcceptDrops(True)
+        self.on_files, self.on_text, self.on_image = on_files, on_text, on_image
+        self.setMinimumHeight(215)
+        lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignCenter)
+        self.icon = icon = QLabel("⭳")
+        icon.setObjectName("dropIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        self.djinn = QLabel()
+        self.djinn.setAlignment(Qt.AlignCenter)
+        self.djinn.setVisible(False)
+        lay.addWidget(self.djinn)
+        self.mood = ""
+        t = QLabel("Drop a document here")
+        t.setObjectName("dropText")
+        t.setAlignment(Qt.AlignCenter)
+        sub = QLabel("PDF, photo, or text file.\nPaste e-mails in the box below, or a screenshot with Ctrl+V.")
+        sub.setObjectName("muted")
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setWordWrap(True)
+        b = QPushButton("Browse...")
+        b.clicked.connect(on_browse)
+        b.setFixedWidth(120)
+        for w in (icon, t, sub):
+            lay.addWidget(w)
+        lay.addSpacing(6)
+        lay.addWidget(b, 0, Qt.AlignCenter)
+
+    def set_mood(self, mood: str | None) -> None:
+        """Shows the djinn: 'working', 'done' or 'stumped' (None hides him)."""
+        if mood is None:
+            self.djinn.setVisible(False)
+            self.icon.setVisible(True)
+            self.setMinimumHeight(215)
+            return
+        self.icon.setVisible(False)
+        self.djinn.setVisible(True)
+        self.setMinimumHeight(330)
+        if mood == self.mood and self.djinn.pixmap() and not self.djinn.pixmap().isNull():
+            return
+        self.mood = mood
+        self.djinn.setPixmap(_rounded(ASSETS / f"djinn_{mood}.jpg", 300, 12))
+        self.djinn.setToolTip({"working": "The djinn is on it…", "done": "Ready to fill!",
+                               "stumped": "Something needs your attention"}.get(mood, ""))
+
+    def _hover(self, on: bool):
+        self.setProperty("hover", on)
+        repolish(self)
+
+    def dragEnterEvent(self, e):
+        md = e.mimeData()
+        if md.hasUrls() or md.hasText() or md.hasImage():
+            e.acceptProposedAction()
+            self._hover(True)
+
+    def dragLeaveEvent(self, e):
+        self._hover(False)
+
+    def dropEvent(self, e):
+        self._hover(False)
+        handle_mime(e.mimeData(), self.on_files, self.on_text, self.on_image)
+        e.acceptProposedAction()
+
+
+def handle_mime(md, on_files, on_text, on_image) -> bool:
+    files = [u.toLocalFile() for u in md.urls() if u.isLocalFile()] if md.hasUrls() else []
+    if files:
+        on_files(files)
+        return True
+    if md.hasImage():
+        img = md.imageData()
+        if img is not None and not img.isNull():
+            on_image(img)
+            return True
+    if md.hasText() and md.text().strip():
+        on_text(md.text())
+        return True
+    return False
+
+
+def card(title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
+    fr = QFrame()
+    fr.setObjectName("card")
+    lay = QVBoxLayout(fr)
+    lay.setContentsMargins(16, 14, 16, 16)
+    lay.setSpacing(10)
+    if title:
+        lbl = QLabel(title)
+        lbl.setObjectName("section")
+        lay.addWidget(lbl)
+    return fr, lay
+
+
+# -------------------------------------------------------------- main window
+
+class MainWindow(QMainWindow):
+    def __init__(self, settings: Settings, app: QApplication):
+        super().__init__()
+        self.s, self.app = settings, app
+        self.runner = Runner()
+        self.ai = OllamaExtractor(settings)
+        self.ai_ok = False
+        self.job = 0
+        self.inputs: list[Ingested] = []
+        self.regex_ex: dict[int, object] = {}
+        self.ai_ex: dict[int, object] = {}
+        self.ai_pending = 0
+        self.case = CaseInfo()
+        self.proc_touched = False
+        self.att_touched = False
+
+        self.setWindowTitle("DjinnItAgreementForm")
+        self.setMinimumSize(1080, 720)
+        self._build()
+        if settings.window_geometry:
+            self.restoreGeometry(QByteArray.fromBase64(settings.window_geometry.encode()))
+        else:
+            self.resize(1320, 860)
+        self._show_case()
+        self._set_status("Drop a document to begin", "")
+        QTimer.singleShot(50, self._startup)
+
+    # ---------------------------------------------------------- layout
+    def _build(self):
+        central = QWidget()
+        central.setObjectName("central")
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(18, 14, 18, 14)
+        root.setSpacing(10)
+
+        # header
+        head = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(0)
+        t = QLabel("DjinnItAgreementForm")
+        t.setObjectName("title")
+        sub = QLabel("Drop a document, check the details, fill the form.")
+        sub.setObjectName("subtitle")
+        title_box.addWidget(t)
+        title_box.addWidget(sub)
+        head.addLayout(title_box)
+        head.addStretch(1)
+        self.status = QLabel("")
+        self.status.setObjectName("status")
+        head.addWidget(self.status)
+        new_btn = QPushButton("New job")
+        new_btn.setToolTip("Clear everything and start over (Ctrl+N)")
+        new_btn.clicked.connect(self.new_job)
+        set_btn = QPushButton("⚙  Settings")
+        set_btn.clicked.connect(self.open_settings)
+        head.addWidget(new_btn)
+        head.addWidget(set_btn)
+        root.addLayout(head)
+        self.busy = QProgressBar()
+        self.busy.setRange(0, 0)
+        self.busy.setTextVisible(False)
+        self.busy.setVisible(False)
+        root.addWidget(self.busy)
+
+        split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+        root.addWidget(split, 1)
+
+        # left column
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 8, 0)
+        ll.setSpacing(10)
+        self.drop = DropZone(self.add_files, self.add_text, self.add_qimage, self.browse)
+        ll.addWidget(self.drop)
+        lbl = QLabel("Inputs for this job")
+        lbl.setObjectName("fieldLabel")
+        ll.addWidget(lbl)
+        self.input_list = QListWidget()
+        self.input_list.setMaximumHeight(110)
+        self.input_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.input_list.customContextMenuRequested.connect(self._input_menu)
+        ll.addWidget(self.input_list)
+        lbl = QLabel("…or paste an e-mail or notes")
+        lbl.setObjectName("fieldLabel")
+        ll.addWidget(lbl)
+        self.paste = QPlainTextEdit()
+        self.paste.setPlaceholderText("e.g. \"Please send the minutes for Smith v. Jones, Index 712345/2024, "
+                                      "before Justice Lopez on 9/14/2026, expedited…\"")
+        ll.addWidget(self.paste, 1)
+        pb = QPushButton("Extract from text")
+        pb.clicked.connect(self._extract_paste)
+        ll.addWidget(pb)
+        self.ai_label = QLabel("Checking AI…")
+        self.ai_label.setObjectName("muted")
+        self.ai_label.setWordWrap(True)
+        self.ai_label.setTextFormat(Qt.RichText)
+        self.ai_label.linkActivated.connect(self._ai_help)
+        ll.addWidget(self.ai_label)
+        split.addWidget(left)
+
+        # right column (scrollable form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        rl = QVBoxLayout(inner)
+        rl.setContentsMargins(8, 0, 8, 0)
+        rl.setSpacing(12)
+        scroll.setWidget(inner)
+        split.addWidget(scroll)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([360, 940])
+
+        self.rows: dict[str, FieldRow] = {}
+
+        def row(form: QFormLayout, key: str, multiline=False):
+            r = FieldRow(key, self._field_edited, multiline)
+            self.rows[key] = r
+            lab = QLabel(FIELD_LABELS[key])
+            lab.setObjectName("fieldLabel")
+            form.addRow(lab, r)
+            return r
+
+        def form_in(lay: QVBoxLayout) -> QFormLayout:
+            f = QFormLayout()
+            f.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            f.setHorizontalSpacing(12)
+            f.setVerticalSpacing(8)
+            lay.addLayout(f)
+            return f
+
+        # Case card: two columns
+        c, cl = card("Case")
+        grid = QHBoxLayout()
+        grid.setSpacing(18)
+        colA, colB = QVBoxLayout(), QVBoxLayout()
+        grid.addLayout(colA, 1)
+        grid.addLayout(colB, 1)
+        cl.addLayout(grid)
+        fa, fb = form_in(colA), form_in(colB)
+        for k in ("court", "county", "part"):
+            row(fa, k)
+        for k in ("index_no", "judge", "dates"):
+            row(fb, k)
+        fc = form_in(cl)
+        row(fc, "case_name", multiline=True)
+        rl.addWidget(c)
+
+        # Proceeding card
+        c, cl = card("Type of proceeding")
+        pr = QHBoxLayout()
+        self.proc_boxes: dict[str, QCheckBox] = {}
+        for p in PROC_TYPES:
+            cb = QCheckBox(p)
+            cb.toggled.connect(self._proc_toggled)
+            self.proc_boxes[p] = cb
+            pr.addWidget(cb)
+        pr.addStretch(1)
+        cl.addLayout(pr)
+        f = form_in(cl)
+        row(f, "proc_other")
+        rl.addWidget(c)
+
+        # Order card
+        c, cl = card("Order")
+        grid = QHBoxLayout()
+        grid.setSpacing(18)
+        colA, colB = QVBoxLayout(), QVBoxLayout()
+        grid.addLayout(colA, 1)
+        grid.addLayout(colB, 1)
+        cl.addLayout(grid)
+        fa, fb = form_in(colA), form_in(colB)
+        # Rate sheet + speed pickers
+        sheet_row = QHBoxLayout()
+        self.sheet_box = QComboBox()
+        self.sheet_box.setMinimumContentsLength(18)
+        self.sheet_box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.sheet_box.currentIndexChanged.connect(self._sheet_changed)
+        folder = QToolButton()
+        folder.setText("📂")
+        folder.setToolTip("Open the rate sheets folder (add or edit CSV files, then click ⟳)")
+        folder.clicked.connect(self._open_sheets_folder)
+        reload_btn = QToolButton()
+        reload_btn.setText("⟳")
+        reload_btn.setToolTip("Reload rate sheets")
+        reload_btn.clicked.connect(self._reload_sheets)
+        sheet_row.addWidget(self.sheet_box, 1)
+        sheet_row.addWidget(folder)
+        sheet_row.addWidget(reload_btn)
+        lab = QLabel("Rate sheet")
+        lab.setObjectName("fieldLabel")
+        fa.addRow(lab, sheet_row)
+        self.delivery = QComboBox()
+        self.delivery.currentIndexChanged.connect(self._delivery_changed)
+        lab = QLabel("Speed")
+        lab.setObjectName("fieldLabel")
+        fa.addRow(lab, self.delivery)
+        for k in ("rate", "copies", "est_pages"):
+            row(fa, k)
+        for k in ("delivery_date", "agreement_date"):
+            row(fb, k)
+        self.rate_info = QLabel("")
+        self.rate_info.setObjectName("muted")
+        self.rate_info.setWordWrap(True)
+        fb.addRow("", self.rate_info)
+        rl.addWidget(c)
+        self._fill_sheet_box()
+
+        # Attorneys card
+        c, cl = card("Attorneys  —  one form is made for each checked row")
+        self.att = QTableWidget(0, len(ATT_COLS))
+        self.att.setHorizontalHeaderLabels(ATT_COLS)
+        self.att.verticalHeader().setVisible(False)
+        self.att.setAlternatingRowColors(True)
+        self.att.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.att.setWordWrap(True)
+        hh = self.att.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.Interactive)
+        hh.setStretchLastSection(False)
+        for i, w in enumerate([30, 140, 190, 230, 115, 105, 190, 170, 60]):
+            self.att.setColumnWidth(i, w)
+        self.att.setMinimumHeight(240)
+        self.att.itemChanged.connect(self._att_changed)
+        cl.addWidget(self.att)
+        br = QHBoxLayout()
+        add = QPushButton("+ Add attorney")
+        add.clicked.connect(self._add_att_row)
+        rem = QPushButton("Remove selected")
+        rem.clicked.connect(self._remove_att_rows)
+        hint = QLabel("Double-click a cell to edit. Separate address lines with  /")
+        hint.setObjectName("muted")
+        br.addWidget(add)
+        br.addWidget(rem)
+        br.addStretch(1)
+        br.addWidget(hint)
+        cl.addLayout(br)
+        rl.addWidget(c)
+        rl.addStretch(1)
+
+        # footer / fill bar
+        foot = QFrame()
+        foot.setObjectName("card")
+        fl = QHBoxLayout(foot)
+        fl.setContentsMargins(16, 10, 16, 10)
+        self.per_email = QCheckBox("Write \"per email\" in attorney signature spot")
+        self.per_email.setChecked(self.s.per_email)
+        self.per_email.toggled.connect(lambda v: self._set_opt("per_email", v))
+        self.sign_rep = QCheckBox("Type my name as reporter signature")
+        self.sign_rep.setChecked(self.s.sign_reporter)
+        self.sign_rep.toggled.connect(lambda v: self._set_opt("sign_reporter", v))
+        self.form_choice = QComboBox()
+        self.form_choice.addItem("New clean form", "clean")
+        self.form_choice.addItem("Original UCS scan", "original")
+        self.form_choice.setCurrentIndex(0 if self.s.form_choice == "clean" else 1)
+        self.form_choice.currentIndexChanged.connect(
+            lambda _: self._set_opt("form_choice", self.form_choice.currentData()))
+        fl.addWidget(self.per_email)
+        fl.addSpacing(12)
+        fl.addWidget(self.sign_rep)
+        fl.addStretch(1)
+        fl.addWidget(QLabel("Form:"))
+        fl.addWidget(self.form_choice)
+        fl.addSpacing(12)
+        self.fill_btn = QPushButton("Fill Form")
+        self.fill_btn.setObjectName("primary")
+        self.fill_btn.clicked.connect(self.fill)
+        fl.addWidget(self.fill_btn)
+        root.addWidget(foot)
+
+        self._build_menu()
+        QShortcut(QKeySequence.Paste, self, activated=self._paste_shortcut)
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_job)
+        QShortcut(QKeySequence("Ctrl+O"), self, activated=self.browse)
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.fill)
+
+    def _build_menu(self):
+        from .dialogs import AboutDialog, CONTACT_EMAIL
+        mb = self.menuBar()
+        m = mb.addMenu("&File")
+        m.addAction("&New job", self.new_job)          # Ctrl+N handled by the window shortcut
+        m.addAction("&Open document…", self.browse)
+        m.addSeparator()
+        m.addAction("Open &rate sheets folder", self._open_sheets_folder)
+        m.addAction("&Settings…", self.open_settings)
+        m.addSeparator()
+        m.addAction("E&xit", self.close)
+        m = mb.addMenu("&Help")
+        m.addAction("Set up the &AI helper (Ollama)…", self._ai_help)
+        m.addAction("Send &feedback…", lambda: QDesktopServices.openUrl(
+            QUrl(f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}")))
+        m.addSeparator()
+        m.addAction("&About DjinnItAgreementForm", lambda: AboutDialog(self).exec())
+
+    # --------------------------------------------------------- startup
+    def _startup(self):
+        if not self.s.profile.name:
+            self.open_settings(first_run=True)
+        self._check_ai()
+
+    def _ai_help(self, _link=""):
+        from .dialogs import OllamaHelpDialog
+        OllamaHelpDialog(self.s.ollama_model, self.s.ollama_host, self).exec()
+        self._check_ai()
+
+    def _check_ai(self):
+        if not self.s.use_ai:
+            self.ai_ok = False
+            self.ai_label.setText("AI is off (Settings → AI). Using rules only.")
+            return
+        self.ai_label.setText("Checking AI…")
+        self.ai = OllamaExtractor(self.s)
+
+        def done(res):
+            self.ai_ok, msg = res
+            link = "" if self.ai_ok else '  <a href="setup">How to set up</a>'
+            self.ai_label.setText(("● " if self.ai_ok else "○ ") + msg + link)
+            # inputs dropped while the check was still running
+            waiting = [i for i in range(len(self.inputs)) if i not in self.ai_ex]
+            if self.ai_ok and waiting and self.ai_pending == 0:
+                self._maybe_ai(waiting)
+
+        self.runner.start(self.ai.status, on_done=done, on_error=lambda m: done((False, m)))
+
+    # ------------------------------------------------------ inputs
+    def browse(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Choose document(s)", "", FILE_FILTER)
+        if files:
+            self.add_files(files)
+
+    def _paste_shortcut(self):
+        if self.focusWidget() in (self.paste,) or isinstance(self.focusWidget(), (QLineEdit, QPlainTextEdit)):
+            fw = self.focusWidget()
+            fw.paste()
+            return
+        md = QApplication.clipboard().mimeData()
+        if not handle_mime(md, self.add_files, self.add_text, self.add_qimage):
+            self._toast("Nothing to paste.")
+
+    def _extract_paste(self):
+        text = self.paste.toPlainText().strip()
+        if text:
+            self.add_text(text)
+
+    def add_text(self, text: str):
+        n = sum(1 for i in self.inputs if i.name.startswith("Pasted text")) + 1
+        self._ingest([lambda: ingest_text(text, f"Pasted text {n}")], [f"Pasted text {n}"])
+        if self.paste.toPlainText().strip() != text.strip():
+            self.paste.setPlainText(text)
+
+    def add_qimage(self, qimg):
+        from PIL import Image
+        from PySide6.QtCore import QBuffer, QIODevice
+        buf = QBuffer()
+        buf.open(QIODevice.WriteOnly)
+        qimg.save(buf, "PNG")
+        import io
+        pil = Image.open(io.BytesIO(bytes(buf.data())))
+        self._ingest([lambda: ingest_pil(pil, "Pasted image")], ["Pasted image"])
+
+    def add_files(self, paths: list[str]):
+        paths = [p for p in paths if Path(p).is_file()]
+        if not paths:
+            return
+        if self.s.output_dir == "" and not hasattr(self, "_first_dir"):
+            self._first_dir = str(Path(paths[0]).parent)
+        self._ingest([(lambda p=p: ingest_file(p)) for p in paths], [Path(p).name for p in paths])
+
+    def _ingest(self, loaders, names):
+        job = self.job
+        self._set_status(f"Reading {', '.join(names)}…", "busy")
+        self.busy.setVisible(True)
+        extractor = RegexExtractor(self.s.profile, self.s.title_case_names)
+
+        def work():
+            out = []
+            for load in loaders:
+                ing = load()
+                out.append((ing, extractor.extract(ing)))
+            return out
+
+        def done(results):
+            if job != self.job:
+                return
+            for ing, ex in results:
+                idx = len(self.inputs)
+                self.inputs.append(ing)
+                self.regex_ex[idx] = ex
+                label = f"{ing.name}   ·   {ing.kind}"
+                if ing.page_count:
+                    label += f", {ing.page_count} pp"
+                if ing.ocr_used:
+                    label += ", OCR"
+                item = QListWidgetItem(label)
+                item.setToolTip(ing.text[:1500] or "(no text)")
+                self.input_list.addItem(item)
+                for w in ing.warnings:
+                    self._toast(w)
+            self._remerge()
+            self._maybe_ai([len(self.inputs) - len(results) + i for i in range(len(results))])
+            self._update_status()
+
+        def failed(msg):
+            self.busy.setVisible(self.ai_pending > 0)
+            self._set_status("Could not read that input", "warn")
+            QMessageBox.warning(self, "Could not read input", msg)
+
+        self.runner.start(work, on_done=done, on_error=failed)
+
+    def _maybe_ai(self, idxs: list[int]):
+        if not (self.s.use_ai and self.ai_ok):
+            return
+        todo = []
+        for i in idxs:
+            ing = self.inputs[i]
+            if ing.kind == "image":
+                todo.append(i)
+            elif ing.kind in ("email", "text") and self.s.ai_for_text:
+                todo.append(i)
+            elif ing.kind == "pdf" and self.case.missing_required():
+                todo.append(i)
+        if not todo:
+            return
+        job = self.job
+        self.ai_pending += len(todo)
+        self.busy.setVisible(True)
+        self._update_status()
+        for i in todo:
+            ing = self.inputs[i]
+
+            def done(ex, i=i):
+                if job != self.job:
+                    return
+                self.ai_pending -= 1
+                self.ai_ex[i] = ex
+                self._remerge()
+                self._update_status()
+
+            def failed(msg, i=i):
+                if job != self.job:
+                    return
+                self.ai_pending -= 1
+                self.ai_label.setText(f"○ AI failed on {self.inputs[i].name}: {msg[:120]}")
+                self._update_status()
+
+            self.runner.start(self.ai.extract, ing, on_done=done, on_error=failed)
+
+    def _input_menu(self, pos):
+        item = self.input_list.itemAt(pos)
+        if not item:
+            return
+        idx = self.input_list.row(item)
+        m = QMenu(self)
+        view = m.addAction("Show extracted text")
+        rem = m.addAction("Remove from job")
+        act = m.exec(self.input_list.mapToGlobal(pos))
+        if act == view:
+            box = QMessageBox(self)
+            box.setWindowTitle(self.inputs[idx].name)
+            box.setText("Text read from this input:")
+            box.setDetailedText(self.inputs[idx].text or "(no text)")
+            box.exec()
+        elif act == rem:
+            self._sync_from_ui()
+            del self.inputs[idx]
+            self.regex_ex = {(k if k < idx else k - 1): v for k, v in self.regex_ex.items() if k != idx}
+            self.ai_ex = {(k if k < idx else k - 1): v for k, v in self.ai_ex.items() if k != idx}
+            self.input_list.takeItem(idx)
+            self._remerge()
+            self._update_status()
+
+    # ----------------------------------------------------- merge/show
+    def _extractions(self):
+        out = []
+        for i in range(len(self.inputs)):
+            if i in self.regex_ex:
+                out.append(self.regex_ex[i])
+            if i in self.ai_ex:
+                out.append(self.ai_ex[i])
+        return out
+
+    def _remerge(self):
+        self._sync_from_ui()
+        prev = self.case
+        new = merge(self._extractions(), self.s, previous=prev)
+        if self.proc_touched:
+            new.proc_types = prev.proc_types
+        if self.att_touched:
+            from ..extract_regex import dedupe_attorneys
+            known = prev.attorneys
+            new.attorneys = dedupe_attorneys(known + [a for a in new.attorneys], self.s.profile)
+            for a in new.attorneys[len(known):]:
+                a.checked = False
+        self.case = new
+        self._show_case()
+
+    def _show_case(self):
+        for key, r in self.rows.items():
+            r.set_state(self.case.fields[key])
+        self._select_speed(self.case.get("delivery") or self.s.delivery_name(self.s.default_delivery))
+        for p, cb in self.proc_boxes.items():
+            cb.blockSignals(True)
+            cb.setChecked(p in self.case.proc_types)
+            cb.blockSignals(False)
+        self._show_attorneys()
+
+    def _show_attorneys(self):
+        self.att.blockSignals(True)
+        self.att.setRowCount(0)
+        for a in self.case.attorneys:
+            self._append_att(a)
+        self.att.resizeRowsToContents()
+        self.att.blockSignals(False)
+
+    def _append_att(self, a: Attorney):
+        r = self.att.rowCount()
+        self.att.insertRow(r)
+        chk = QTableWidgetItem()
+        chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+        chk.setCheckState(Qt.Checked if a.checked else Qt.Unchecked)
+        self.att.setItem(r, 0, chk)
+        for c, f in enumerate(ATT_FIELDS[1:], 1):
+            val = getattr(a, f) or ""
+            if f == "address":
+                val = " / ".join(l for l in val.splitlines() if l.strip())
+            it = QTableWidgetItem(val)
+            if f == "source":
+                it.setFlags(Qt.ItemIsEnabled)
+            if a.is_placeholder():
+                it.setForeground(self.palette().placeholderText())
+            self.att.setItem(r, c, it)
+
+    def _read_attorneys(self) -> list[Attorney]:
+        out = []
+        for r in range(self.att.rowCount()):
+            vals = {}
+            for c, f in enumerate(ATT_FIELDS[1:], 1):
+                it = self.att.item(r, c)
+                vals[f] = it.text().strip() if it else ""
+            vals["address"] = "\n".join(p.strip() for p in vals["address"].split("/") if p.strip())
+            a = Attorney(**vals)
+            a.checked = self.att.item(r, 0).checkState() == Qt.Checked if self.att.item(r, 0) else False
+            out.append(a)
+        return out
+
+    def _sync_from_ui(self):
+        for key, r in self.rows.items():
+            if r.state.source == SRC_USER:
+                self.case.fields[key] = FieldState(r.text(), SRC_USER, 1.0, r.state.alternatives)
+        # (delivery edits are recorded directly by _delivery_changed)
+        self.case.proc_types = {p for p, cb in self.proc_boxes.items() if cb.isChecked()}
+        self.case.attorneys = self._read_attorneys()
+
+    # ---------------------------------------------------- UI events
+    def _field_edited(self, key: str):
+        self.case.fields[key] = self.rows[key].state
+        self._update_status()
+
+    def _proc_toggled(self, _):
+        self.proc_touched = True
+
+    def _att_changed(self, _item):
+        self.att_touched = True
+
+    def _add_att_row(self):
+        self.att.blockSignals(True)
+        self._append_att(Attorney(source=SRC_USER, checked=True))
+        self.att.blockSignals(False)
+        self.att_touched = True
+        self.att.editItem(self.att.item(self.att.rowCount() - 1, 1))
+
+    def _remove_att_rows(self):
+        rows = sorted({i.row() for i in self.att.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.att.removeRow(r)
+        if rows:
+            self.att_touched = True
+
+    # ------------------------------------------------ rate sheets / speed
+    def _fill_sheet_box(self):
+        sheets, problems = self.s.sheets()
+        current = self.s.sheet()
+        self.sheet_box.blockSignals(True)
+        self.sheet_box.clear()
+        for sh in sheets or [current]:
+            self.sheet_box.addItem(sh.name, sh.name)
+            tip = "\n".join(sp.label() + (f"  ·  {sp.days} days" if sp.days is not None else "")
+                            for sp in sh.speeds)
+            if sh.updated:
+                tip += f"\nRates last updated {sh.updated}"
+            self.sheet_box.setItemData(self.sheet_box.count() - 1, tip, Qt.ToolTipRole)
+        self.sheet_box.setCurrentIndex(max(0, self.sheet_box.findData(current.name)))
+        self.sheet_box.blockSignals(False)
+        for p in problems:
+            self._toast(f"Rate sheet skipped - {p}")
+        self._fill_speeds()
+
+    def _fill_speeds(self):
+        keep = self.delivery.currentData() or self.case.get("delivery")
+        sheet = self.s.sheet()
+        self.delivery.blockSignals(True)
+        self.delivery.clear()
+        for sp in sheet.speeds:
+            days = self.s.days_for(sp.name)
+            label = sp.label() + (f"  ·  {days} day{'s' if days != 1 else ''}" if days is not None else "")
+            self.delivery.addItem(label, sp.name)
+        self.delivery.addItem("Other (type the rate yourself)", "Other")
+        self.delivery.blockSignals(False)
+        self._select_speed(keep or self.s.delivery_name(self.s.default_delivery))
+
+    def _select_speed(self, name: str):
+        """Selects `name` (matched loosely, e.g. 'Expedited' -> 'Expedite') without firing change events."""
+        sp = self.s.sheet().find(name)
+        target = sp.name if sp else ("Other" if name else self.delivery.itemData(0))
+        self.delivery.blockSignals(True)
+        self.delivery.setCurrentIndex(max(0, self.delivery.findData(target)))
+        self.delivery.blockSignals(False)
+        self._show_rate_info()
+
+    def _show_rate_info(self):
+        sheet = self.s.sheet()
+        sp = sheet.find(self.delivery.currentData() or "")
+        bits = []
+        if sp and sp.copy:
+            bits.append(f"Copies ${sp.copy}/pg")
+        if sp:
+            bits += [f"{k} ${v.lstrip('$')}" for k, v in sp.extras.items()]
+        if sheet.updated:
+            bits.append(f"rates updated {sheet.updated}")
+        self.rate_info.setText("  ·  ".join(bits))
+
+    def _sheet_changed(self, _idx):
+        name = self.sheet_box.currentData()
+        if not name or name == self.s.rate_sheet:
+            return
+        self.s.rate_sheet = name
+        self.s.save()
+        self._fill_speeds()
+        self._apply_speed()
+
+    def _delivery_changed(self, _idx):
+        name = self.delivery.currentData() or ""
+        self.case.fields["delivery"] = FieldState(name, SRC_USER, 1.0, [name])
+        self._apply_speed()
+
+    def _apply_speed(self):
+        """Re-derives rate and delivery date from the chosen sheet/speed (unless typed by the user)."""
+        self.case.fields["delivery"].value = self.delivery.currentData() or ""
+        if self.case.fields["delivery"].value == "Other" and self.rows["rate"].state.source != SRC_USER:
+            self.case.fields["rate"] = FieldState()
+        refresh_rate(self.case, self.s)
+        if self.s.fill_delivery_date:
+            refresh_delivery_date(self.case, self.s)
+        for k in ("rate", "delivery_date"):
+            if self.rows[k].state.source != SRC_USER:
+                self.rows[k].set_state(self.case.fields[k])
+        self._show_rate_info()
+
+    def _open_sheets_folder(self):
+        from ..rates import sheets_dir
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(sheets_dir(self.s.rate_sheets_dir))))
+
+    def _reload_sheets(self):
+        self.s.reload_rates()
+        self._fill_sheet_box()
+        self._apply_speed()
+        self._toast(f"Loaded {len(self.s.sheets()[0])} rate sheet(s).")
+
+    def _set_opt(self, name, value):
+        setattr(self.s, name, value)
+        self.s.save()
+
+    # ------------------------------------------------------- status
+    def _set_status(self, text: str, state: str, mood: str | None = None):
+        self.status.setText(text)
+        self.status.setProperty("state", state)
+        repolish(self.status)
+        if self.s.show_djinn:
+            self.drop.set_mood(mood or {"busy": "working", "ok": "done", "warn": "stumped"}.get(state, "working"))
+        else:
+            self.drop.set_mood(None)
+
+    def _update_status(self):
+        busy = self.ai_pending > 0
+        self.busy.setVisible(busy)
+        if not self.inputs:
+            self._set_status("Drop a document to begin", "")
+            return
+        self._sync_from_ui()
+        missing = [FIELD_LABELS[k] for k in self.case.missing_required()]
+        review = [k for k, r in self.rows.items() if r.edit.property("review")]
+        if busy:
+            self._set_status(f"Asking {self.s.ollama_model}…  (you can keep editing)", "busy")
+        elif missing or review:
+            parts = []
+            if missing:
+                parts.append(f"{len(missing)} missing")
+            if review:
+                parts.append(f"{len(review)} to review")
+            # the djinn is only stumped when something required is missing
+            self._set_status("Ready to fill  ·  " + ", ".join(parts), "warn", "stumped" if missing else "done")
+            self.status.setToolTip("Missing: " + ", ".join(missing) if missing else "Highlighted fields are guesses")
+        else:
+            self._set_status("✓  Ready to fill", "ok")
+            self.status.setToolTip("")
+
+    def _toast(self, msg: str):
+        self.statusBar().showMessage(msg, 8000)
+
+    # --------------------------------------------------------- fill
+    def fill(self):
+        self._sync_from_ui()
+        case = self.case
+        # Ask about required fields that are blank, and fields with competing values
+        questions = []
+        for key in REQUIRED_KEYS:
+            fs = case.fields[key]
+            if not fs.value or (fs.source != SRC_USER and len([a for a in fs.alternatives if a != fs.value]) > 0
+                                and fs.confidence < 0.8):
+                questions.append((key, fs.value, fs.alternatives))
+        real = [a for a in case.attorneys if not a.is_placeholder() and (a.name or a.firm)]
+        ask_att = real and not any(a.checked for a in case.attorneys)
+        if questions or ask_att:
+            dlg = ClarifyDialog(questions, case.attorneys if ask_att else None, self)
+            if dlg.exec() != ClarifyDialog.Accepted:
+                return
+            for key, val in dlg.answers().items():
+                case.fields[key] = FieldState(val, SRC_USER, 1.0, case.fields[key].alternatives)
+                self.rows[key].set_state(case.fields[key])
+            chosen = dlg.checked_attorneys()
+            if chosen is not None:
+                for i, a in enumerate(case.attorneys):
+                    a.checked = i in chosen
+                self._show_attorneys()
+
+        out_dir = Path(self.s.output_dir) if self.s.output_dir else Path(
+            getattr(self, "_first_dir", "") or Path.home() / "Documents" / "Minute Agreements")
+        try:
+            paths = fill_all(case, self.s, out_dir)
+        except PermissionError as e:
+            QMessageBox.warning(self, "Could not save", f"{e}\n\nIs the PDF open in another program?")
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Could not fill the form", f"{type(e).__name__}: {e}")
+            return
+        if self.s.open_after:
+            for p in paths:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+        box = QMessageBox(self)
+        box.setWindowTitle("Saved")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"Saved {len(paths)} form{'s' if len(paths) != 1 else ''}:\n\n" +
+                    "\n".join(p.name for p in paths) + f"\n\nin {out_dir}")
+        open_folder = box.addButton("Open folder", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if box.clickedButton() == open_folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out_dir)))
+        self._set_status(f"✓  Saved {len(paths)} form(s)", "ok")
+
+    # ------------------------------------------------------- misc
+    def new_job(self):
+        self.job += 1
+        self.inputs.clear()
+        self.regex_ex.clear()
+        self.ai_ex.clear()
+        self.ai_pending = 0
+        self.proc_touched = self.att_touched = False
+        if hasattr(self, "_first_dir"):
+            del self._first_dir
+        self.input_list.clear()
+        self.paste.clear()
+
+        self.case = CaseInfo()
+        self._show_case()
+        self.busy.setVisible(False)
+        self._set_status("Drop a document to begin", "")
+
+    def open_settings(self, first_run: bool = False):
+        dlg = SettingsDialog(self.s, self, first_run=first_run)
+        if dlg.exec():
+            apply_theme(self.app, self.s.theme)
+            self.per_email.setChecked(self.s.per_email)
+            self.sign_rep.setChecked(self.s.sign_reporter)
+            self.form_choice.setCurrentIndex(0 if self.s.form_choice == "clean" else 1)
+            self.s.reload_rates()
+            self._fill_sheet_box()
+            self._check_ai()
+            if self.inputs:
+                self._remerge()
+            self._apply_speed()
+            self._update_status()
+
+    def closeEvent(self, e):
+        self.s.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
+        self.s.save()
+        super().closeEvent(e)

@@ -1,0 +1,23 @@
+# Private test documents (real transcripts, invoices, photos) - never commit
+samples_internal/
+
+# Original full-size artwork (resized copies live in minute_filler/assets)
+sillyImages/
+
+# Python / tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build output (exe + installer)
+build/
+dist/
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.log
