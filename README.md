@@ -4,6 +4,8 @@ A Windows app for New York court reporters. It fills in the UCS **Court Reporter
 
 Drop in a transcript, invoice, or photo of a court document, or paste an e-mail. The app finds the court, part, judge, case name, index number, dates, proceeding type and attorneys, shows everything for review, and saves a filled PDF.
 
+**[Website](https://nono638.github.io/DjinnItAgreementForm/)  ·  [Download the installer](../../releases/latest)**
+
 ![DjinnItAgreementForm](docs/screenshot.png)
 
 - **Works offline, and nothing leaves your computer.** Photos are read by the text recognition built into Windows. An AI helper is optional and runs locally too.
