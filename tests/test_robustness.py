@@ -148,6 +148,7 @@ def test_caption_matching_is_not_too_loose():
 def test_days_of_one_case_get_the_date_in_the_file_name(tmp_path):
     s = Settings()
     s.output_dir = str(tmp_path)
+    s.filename_pattern = "Minute Agreement - {case} - {index}"
     jobs = group([doc(s, "Smith v Jones", "712222-2024", "5-22-2026", "a"),
                   doc(s, "Smith v Jones", "712222-2024", "5-26-2026", "b"),
                   doc(s, "Roe v Doe", "700001-2025", "6-1-2026", "c")], s)
@@ -155,8 +156,8 @@ def test_days_of_one_case_get_the_date_in_the_file_name(tmp_path):
     fill_jobs(jobs[:1], s, batch=jobs)
     assert sorted(p.name for p in tmp_path.glob("*.pdf")) == [
         "Minute Agreement - Roe v. Doe - 700001-2025.pdf",
-        "Minute Agreement - Smith v. Jones - 712222-2024 - 5-22-2026.pdf",
-        "Minute Agreement - Smith v. Jones - 712222-2024 - 5-26-2026.pdf",
+        "Minute Agreement - Smith v. Jones (5-22-2026) - 712222-2024.pdf",
+        "Minute Agreement - Smith v. Jones (5-26-2026) - 712222-2024.pdf",
     ]
 
 

@@ -58,6 +58,8 @@ QPushButton#primary:disabled { background: {border}; color: {muted}; }
 QToolButton { border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; background: transparent; }
 QToolButton:hover { background: {hover}; border: 1px solid {border}; }
 QToolButton::menu-indicator { image: none; }
+QToolButton#quick { border: 1px solid {input_border}; background: {card}; padding: 2px 8px; font-size: 9pt; }
+QToolButton#quick:hover { background: {sel}; border: 1px solid {accent}; }
 
 QCheckBox { spacing: 7px; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid {input_border}; border-radius: 4px; background: {input}; }

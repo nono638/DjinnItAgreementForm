@@ -54,6 +54,26 @@ class SettingsDialog(QDialog):
                            ("", self.p_addr2), ("Telephone", self.p_phone), ("Fax", self.p_fax),
                            ("Email", self.p_email)):
             f.addRow(label, wid)
+        # Signature picture: shown as it will appear on the form; stored on Save
+        self._sig_new: str | None = None  # None = unchanged, "" = removed, else a prepared file
+        self.p_sig = QLabel()
+        self.p_sig.setObjectName("muted")
+        self.p_sig.setMinimumHeight(56)
+        self.p_sig.setWordWrap(True)
+        pick = QPushButton("Choose image...")
+        pick.clicked.connect(self._pick_signature)
+        self.p_sig_remove = QPushButton("Remove")
+        self.p_sig_remove.clicked.connect(self._remove_signature)
+        row = QHBoxLayout()
+        row.addWidget(self.p_sig, 1)
+        row.addWidget(pick)
+        row.addWidget(self.p_sig_remove)
+        f.addRow("Signature", row)
+        self.p_sign = QCheckBox("Sign the court reporter line on every form")
+        self.p_sign.setToolTip("With your signature picture if you chose one, otherwise your name is typed.")
+        self.p_sign.setChecked(settings.sign_reporter)
+        f.addRow("", self.p_sign)
+        self._show_signature(settings.signature_image)
         self.tabs.addTab(w, "My info")
 
         # --- Defaults
@@ -118,13 +138,12 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = _form(w)
         self.o_per_email = QCheckBox("Write \"per email\" in the attorney signature spot")
-        self.o_sign = QCheckBox("Type my name on the court reporter signature line")
         self.o_today = QCheckBox("Use today as the date of agreement")
         self.o_flat = QCheckBox("Flatten the PDF (fields no longer editable)")
         self.o_open = QCheckBox("Open the PDF after saving")
         self.o_tc = QCheckBox("Convert ALL-CAPS names to Title Case")
         self.o_djinn = QCheckBox("Show the Djinn (working / done / stumped pictures)")
-        for cb, val in ((self.o_per_email, settings.per_email), (self.o_sign, settings.sign_reporter),
+        for cb, val in ((self.o_per_email, settings.per_email),
                         (self.o_today, settings.agreement_today), (self.o_flat, settings.flatten),
                         (self.o_open, settings.open_after), (self.o_tc, settings.title_case_names),
                         (self.o_djinn, settings.show_djinn)):
@@ -137,6 +156,7 @@ class SettingsDialog(QDialog):
         self.o_form.setCurrentIndex(max(0, self.o_form.findData(settings.form_choice)))
         f.addRow("Form", self.o_form)
         self.o_instr = QCheckBox("Include the instructions page (UCS form page 2)")
+        self.o_instr.setToolTip("Unticked: the saved PDF has the form page only.")
         self.o_instr.setChecked(settings.include_instructions)
         f.addRow("", self.o_instr)
         self.o_combine = QCheckBox("Batches: put all days of the same case on one form")
@@ -152,7 +172,8 @@ class SettingsDialog(QDialog):
         row.addWidget(browse)
         f.addRow("Save to", row)
         self.o_pattern = QLineEdit(settings.filename_pattern)
-        self.o_pattern.setToolTip("Placeholders: {case} {index} {attorney} {date}")
+        self.o_pattern.setToolTip("Placeholders:\n{case}  {index}  {attorney}\n"
+                                  "{date} - date of the minutes\n{today} - the day the form is filled")
         f.addRow("File name", self.o_pattern)
         self.o_theme = QComboBox()
         self.o_theme.addItems(["system", "light", "dark"])
@@ -197,6 +218,53 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+
+    # --- signature picture
+    def _show_signature(self, path: str):
+        from pathlib import Path
+        from PySide6.QtGui import QPixmap
+        pix = QPixmap(path) if path and Path(path).is_file() else QPixmap()
+        if pix.isNull():
+            self.p_sig.setPixmap(QPixmap())
+            self.p_sig.setText("None - your name is typed instead.\nA photo or scan of your signature on white paper works.")
+        else:
+            self.p_sig.setText("")
+            self.p_sig.setPixmap(pix.scaled(230, 56, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.p_sig_remove.setEnabled(not pix.isNull())
+
+    def _pick_signature(self):
+        from PySide6.QtWidgets import QMessageBox
+        from ..signature import prepare, signature_path
+        src, _ = QFileDialog.getOpenFileName(self, "Picture of your signature", "",
+                                             "Pictures (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.heic)")
+        if not src:
+            return
+        try:
+            new = prepare(src, signature_path().with_name("signature_new.png"))
+        except Exception as e:
+            QMessageBox.warning(self, "Could not use that picture", str(e))
+            return
+        self._sig_new = str(new)
+        self._show_signature(self._sig_new)
+        self.p_sign.setChecked(True)  # choosing a signature means wanting it on the forms
+
+    def _remove_signature(self):
+        self._sig_new = ""
+        self._show_signature("")
+
+    def _store_signature(self):
+        from pathlib import Path
+        from ..signature import signature_path
+        if self._sig_new is None:
+            return
+        final = signature_path()
+        try:
+            final.unlink(missing_ok=True)
+            if self._sig_new:
+                Path(self._sig_new).replace(final)
+        except OSError:
+            return
+        self.s.signature_image = str(final) if self._sig_new else ""
 
     # --- rate sheet helpers
     def _load_sheet_names(self):
@@ -271,7 +339,8 @@ class SettingsDialog(QDialog):
         for attr, spin in self.days.items():
             setattr(s, attr, spin.value())
         s.fill_delivery_date = self.o_deldate.isChecked()
-        s.per_email, s.sign_reporter = self.o_per_email.isChecked(), self.o_sign.isChecked()
+        s.per_email, s.sign_reporter = self.o_per_email.isChecked(), self.p_sign.isChecked()
+        self._store_signature()
         s.agreement_today, s.flatten = self.o_today.isChecked(), self.o_flat.isChecked()
         s.open_after, s.title_case_names = self.o_open.isChecked(), self.o_tc.isChecked()
         s.form_choice = self.o_form.currentData()

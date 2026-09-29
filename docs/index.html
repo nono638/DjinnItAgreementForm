@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DjinnItAgreementForm - fills the UCS Minute Agreement Form for you</title>
+<meta name="description" content="A free Windows app for New York court reporters. Drop in a transcript, invoice, photo or e-mail and get the UCS Court Reporter Minute Agreement Form filled in.">
+<style>
+  :root { --bg:#f6f7fb; --card:#fff; --text:#1d2433; --muted:#5b6478; --accent:#2563eb; --accent-d:#1d4ed8; --line:#dfe3ee; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151d; --card:#1b1f2b; --text:#e8ebf3; --muted:#9aa3b8; --accent:#5b8cff; --accent-d:#7aa0ff; --line:#2b3142; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:17px/1.6 "Segoe UI", system-ui, sans-serif; }
+  a { color:var(--accent); }
+  .wrap { max-width:960px; margin:0 auto; padding:0 20px; }
+  header.hero { padding:56px 0 32px; text-align:center; }
+  header.hero h1 { font-size:2.4rem; margin:0 0 8px; letter-spacing:-.5px; }
+  header.hero p.lead { font-size:1.2rem; color:var(--muted); max-width:640px; margin:0 auto 26px; }
+  .btn { display:inline-block; background:var(--accent); color:#fff; text-decoration:none; padding:13px 26px; border-radius:10px; font-weight:600; }
+  .btn:hover { background:var(--accent-d); }
+  .btn.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); margin-left:8px; }
+  .note { color:var(--muted); font-size:.9rem; margin-top:12px; }
+  img.shot { width:100%; height:auto; border-radius:12px; border:1px solid var(--line); box-shadow:0 10px 30px rgba(0,0,0,.12); }
+  section { padding:34px 0; }
+  h2 { font-size:1.6rem; margin:0 0 16px; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; counter-reset:s; padding:0; list-style:none; }
+  .steps li { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; counter-increment:s; }
+  .steps li::before { content:counter(s); display:inline-flex; width:30px; height:30px; align-items:center; justify-content:center;
+    background:var(--accent); color:#fff; border-radius:50%; font-weight:700; margin-bottom:8px; }
+  .steps b { display:block; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(270px, 1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; }
+  .card h3 { margin:0 0 6px; font-size:1.05rem; }
+  .card p { margin:0; color:var(--muted); font-size:.95rem; }
+  .two { display:grid; grid-template-columns:1.4fr 1fr; gap:24px; align-items:center; }
+  @media (max-width:760px) { .two { grid-template-columns:1fr; } header.hero h1 { font-size:1.9rem; } .btn.ghost { margin:10px 0 0; } }
+  ol.install li { margin-bottom:6px; }
+  footer { padding:30px 0 50px; color:var(--muted); font-size:.9rem; text-align:center; border-top:1px solid var(--line); margin-top:20px; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>DjinnItAgreementForm</h1>
+    <p class="lead">Fills in the UCS <b>Court Reporter Minute Agreement Form</b> for you. Drop in what the attorney sent, check the details, and get a finished PDF.</p>
+    <a class="btn" href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Download for Windows</a>
+    <a class="btn ghost" href="https://github.com/nono638/DjinnItAgreementForm">View on GitHub</a>
+    <p class="note">Free and open source (AGPL). Windows 10 or 11. No administrator rights needed.</p>
+  </div>
+</header>
+
+<div class="wrap">
+  <img class="shot" src="app.png" alt="The app with a case filled in from a pasted e-mail">
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>What it's for</h2>
+    <p>Every private minute order starts with the same form: court, part, judge, case name, index number, dates, type of proceeding, rate, attorney and your own details. All of that is already sitting in the transcript, the invoice, the calendar photo or the e-mail. This app reads it and types it in, so you only check it.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>How to use it</h2>
+    <ol class="steps">
+      <li><b>Drop it in</b>A PDF (transcript, invoice), a photo, or paste the e-mail text or a screenshot with Ctrl+V.</li>
+      <li><b>Check the details</b>Every field shows where it came from. Guesses are highlighted, and a list offers other candidates.</li>
+      <li><b>Pick speed and attorney</b>Rates and the estimated delivery date follow your rate sheet. Buttons fill today, tomorrow, 1 to 3 weeks or 1 month.</li>
+      <li><b>Fill Form</b>The PDF is saved and opened, one per attorney you tick. Ctrl+Enter does it from the keyboard.</li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap two">
+    <div>
+      <h2>A hundred orders? Drop the whole folder.</h2>
+      <p>Batch mode reads any number of documents and sorts them into one job per case and date. A transcript and its invoice make one form, not two. Two days of the same case make two forms (or one, if you prefer). Tick the jobs you want and press <b>Fill all</b>.</p>
+    </div>
+    <img class="shot" src="batch.png" alt="Batch mode with five jobs listed on the left">
+  </div>
+</section>
+
+<section>
+  <div class="wrap two">
+    <img class="shot" src="form.png" alt="The filled form">
+    <div>
+      <h2>The result</h2>
+      <p>The court's own fillable form, filled in, with "per email" on the attorney line if you like, and your signature picture on the court reporter line. A clean re-typeset version and the original scan are available too. Sample shown uses made-up names.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Good to know</h2>
+    <div class="grid">
+      <div class="card"><h3>Private</h3><p>Everything runs on your computer. Photos are read with Windows' built-in text recognition. Nothing is uploaded.</p></div>
+      <div class="card"><h3>Asks when unsure</h3><p>Missing or conflicting items (index number, dates, judge) are raised before filling, never silently guessed.</p></div>
+      <div class="card"><h3>Remembers you</h3><p>Your name, address, phone, e-mail, default speed, copies and signature are set once in Settings.</p></div>
+      <div class="card"><h3>Your rate sheets</h3><p>Rates live in small spreadsheets (CSV) you can edit in Excel: private, city, whatever you charge.</p></div>
+      <div class="card"><h3>Optional local AI</h3><p>If you use Ollama, an AI helper can read messy photos and e-mails. It is off by default and stays on your machine.</p></div>
+      <div class="card"><h3>Open source</h3><p>Read the code, report a problem, or suggest a change on GitHub.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Download and install</h2>
+    <ol class="install">
+      <li>Go to the <a href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Releases page</a> and download <code>DjinnItAgreementForm-Setup-x.y.z.exe</code>.</li>
+      <li>Double-click it and follow the usual installer steps. It installs just for you, with a Start menu entry and an optional desktop icon.</li>
+      <li>Windows may say "Windows protected your PC" because the installer isn't code-signed yet. Click <b>More info</b>, then <b>Run anyway</b>.</li>
+      <li>On first launch, enter your name, address, phone and e-mail. Then drop in a document.</li>
+    </ol>
+    <p><a class="btn" href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Download the installer</a></p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    DjinnItAgreementForm is not affiliated with or endorsed by the New York State Unified Court System.<br>
+    Always review the filled form before you send it.
+    · <a href="https://github.com/nono638/DjinnItAgreementForm">Source</a>
+    · <a href="https://github.com/nono638/DjinnItAgreementForm/issues">Report a problem</a>
+  </div>
+</footer>
+
+</body>
+</html>

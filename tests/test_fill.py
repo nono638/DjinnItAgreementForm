@@ -83,7 +83,7 @@ def test_ucs_form_is_default(case, settings, tmp_path):
     case.set("part", "MDP")
     paths = fill_all(case, settings, tmp_path)
     doc = pymupdf.open(paths[0])
-    assert doc.page_count == 1  # instructions page left out by default
+    assert doc.page_count == 2  # the form and its instructions page
     by_key = {ucs_map.WIDGETS.get(w.field_name): w.field_value for w in doc[0].widgets()}
     assert by_key["court"] == "Supreme" and by_key["county"] == "Queens"
     assert by_key["part"] == "MDP"
@@ -97,8 +97,29 @@ def test_ucs_form_is_default(case, settings, tmp_path):
     assert by_key["rep_name"] == "Pat Reporter"
     text = doc[0].get_text()
     assert "per email" in text  # printed on the attorney signature line
-    settings.include_instructions = True
-    assert pymupdf.open(fill_all(case, settings, tmp_path / "x")[0]).page_count == 2
+    settings.include_instructions = False
+    assert pymupdf.open(fill_all(case, settings, tmp_path / "x")[0]).page_count == 1
+
+
+def test_file_name(case, settings):
+    from datetime import date
+    from minute_filler.fill import output_name
+    t = date.today()
+    today = f"{t.month}-{t.day}-{t.year}"
+    atty = case.attorneys[0]
+    assert output_name(case, atty, settings) == \
+        f"Minute Agreement - Jane Roe v. X.Y. Holding Corporation - 700001-2020 - Alex B. Counsel - {today}.pdf"
+    assert output_name(case, None, settings) == \
+        f"Minute Agreement - Jane Roe v. X.Y. Holding Corporation - 700001-2020 - {today}.pdf"
+    # several days of one case in a batch: the day of the minutes goes with the case
+    assert output_name(case, None, settings, dated=True) == \
+        f"Minute Agreement - Jane Roe v. X.Y. Holding Corporation (8-25-2026) - 700001-2020 - {today}.pdf"
+    settings.filename_pattern = "{date} {case}"
+    assert output_name(case, atty, settings, dated=True) == "8-25-2026 Jane Roe v. X.Y. Holding Corporation.pdf"
+    settings.filename_pattern = "{index}"
+    assert output_name(case, atty, settings, dated=True) == "700001-2020 - 8-25-2026.pdf"
+    settings.filename_pattern = "{oops}"
+    assert output_name(case, atty, settings) == "Minute Agreement - 700001-2020.pdf"
 
 
 def test_old_settings_switch_to_ucs_form(tmp_path, monkeypatch):
@@ -107,6 +128,24 @@ def test_old_settings_switch_to_ucs_form(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     (settings_dir() / "settings.json").write_text(json.dumps({"form_choice": "clean"}))
     assert Settings.load().form_choice == "ucs"
+
+
+def test_settings_v2_get_the_new_defaults(tmp_path, monkeypatch):
+    import json
+    from minute_filler.settings import FILENAME_PATTERN, OLD_FILENAME_PATTERN, settings_dir
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    old = {"settings_version": 2, "form_choice": "clean", "include_instructions": False,
+           "filename_pattern": OLD_FILENAME_PATTERN}
+    (settings_dir() / "settings.json").write_text(json.dumps(old))
+    s = Settings.load()
+    assert s.include_instructions and s.filename_pattern == FILENAME_PATTERN and s.form_choice == "clean"
+    # a choice made after the change, and a file name of the user's own, are kept
+    s.include_instructions, s.filename_pattern = False, "{case}"
+    s.save()
+    s = Settings.load()
+    assert not s.include_instructions and s.filename_pattern == "{case}"
+    (settings_dir() / "settings.json").write_text(json.dumps(dict(old, filename_pattern="{index} {case}")))
+    assert Settings.load().filename_pattern == "{index} {case}"
 
 
 def test_short_caption():

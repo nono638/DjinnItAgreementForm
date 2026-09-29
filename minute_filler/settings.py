@@ -7,6 +7,8 @@ from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 
 APP_NAME = "DjinnItAgreementForm"
+FILENAME_PATTERN = "Minute Agreement - {case} - {index} - {attorney} - {today}"
+OLD_FILENAME_PATTERN = "Minute Agreement - {case} - {index} - {attorney}"  # the default before settings v3
 OLD_APP_NAME = "MinuteAgreementFiller"  # folder used before the rename
 
 
@@ -57,7 +59,8 @@ class Settings:
 
     # Checkboxes
     per_email: bool = True            # write "per email" on the attorney signature line
-    sign_reporter: bool = False       # type reporter name on the reporter signature line
+    sign_reporter: bool = False       # sign the reporter signature line: with the image below, else the typed name
+    signature_image: str = ""         # prepared signature picture (see signature.py); blank = type the name
     agreement_today: bool = True
     flatten: bool = False
     open_after: bool = True
@@ -65,10 +68,10 @@ class Settings:
 
     # Output
     form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
-    include_instructions: bool = False  # add the UCS form's instructions page (page 2)
-    settings_version: int = 2         # bumped when a default changes for existing users
+    include_instructions: bool = True  # keep the UCS form's instructions page (page 2)
+    settings_version: int = 3         # bumped when a default changes for existing users
     output_dir: str = ""              # blank = next to first input file, else Documents
-    filename_pattern: str = "Minute Agreement - {case} - {index} - {attorney}"
+    filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
     batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
 
     # AI
@@ -117,6 +120,11 @@ class Settings:
         sp = self.sheet().find(delivery)
         return sp.name if sp else delivery
 
+    def signature(self) -> str:
+        """The signature picture to put on the forms, or "" (not signing, none chosen, or the file is gone)."""
+        ok = self.sign_reporter and self.signature_image and Path(self.signature_image).is_file()
+        return self.signature_image if ok else ""
+
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
@@ -141,5 +149,9 @@ class Settings:
                 setattr(s, k, v)
         if data.get("settings_version", 1) < 2:  # v2: the court's fillable UCS form became the default
             s.form_choice = "ucs"
-            s.settings_version = 2
+        if data.get("settings_version", 1) < 3:  # v3: instructions page included, today's date in the file name
+            s.include_instructions = True
+            if s.filename_pattern == OLD_FILENAME_PATTERN:
+                s.filename_pattern = FILENAME_PATTERN
+        s.settings_version = cls.settings_version
         return s

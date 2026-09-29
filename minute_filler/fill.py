@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pymupdf
 
+from . import signature
 from .forms import original_map, ucs_map
 from .models import CaseInfo, Attorney, PROC_TYPES
 from .rates import speed_key
@@ -111,7 +112,7 @@ def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str
     v.update({
         "rep_name": p.name, "rep_address_1": p.address1, "rep_address_2": p.address2,
         "rep_phone": p.phone, "rep_fax": p.fax, "rep_email": p.email,
-        "sig_reporter": p.name if s.sign_reporter else "",
+        "sig_reporter": p.name if s.sign_reporter and not s.signature() else "",
     })
     if atty is not None:
         a1, a2 = split_address(atty.address)
@@ -233,16 +234,20 @@ def short_caption(name: str, limit: int = 60) -> str:
 def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool = False) -> str:
     """dated: add the date of the minutes, to tell apart the forms for several days of one case."""
     day = case.get("dates").split(",")[0].strip().replace("/", "-")
+    today = date.today()
+    caption = short_caption(case.get("case_name")) or "Case"
+    if dated and day and "{case}" in s.filename_pattern and "{date}" not in s.filename_pattern:
+        caption, dated = f"{caption} ({day})", False
     try:
         name = s.filename_pattern.format(
-            case=short_caption(case.get("case_name")) or "Case",
+            case=caption, today=f"{today.month}-{today.day}-{today.year}",
             index=case.get("index_no").replace("/", "-") or "no index",
             attorney=(atty.name or atty.firm) if atty else "",
-            date=case.get("dates").split(",")[0].replace("/", "-"),
+            date=day,
         )
     except (KeyError, IndexError, ValueError):  # a bad custom pattern
         name = f"Minute Agreement - {case.get('index_no').replace('/', '-')}"
-    if dated and day and day not in name:
+    if dated and day and "{date}" not in s.filename_pattern:
         name += f" - {day}"
     name = re.sub(r"(\s-\s*)+$", "", re.sub(r"\s-\s+-\s", " - ", name)).strip()
     return safe_filename(name) + ".pdf"
@@ -274,6 +279,12 @@ def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, date
             doc.delete_pages(1, doc.page_count - 1)
     else:
         _fill_clean(doc, v)
+    if s.signature():
+        if choice == "clean":
+            line = next(w.rect for w in doc[0].widgets() if w.field_name == "sig_reporter")
+        else:
+            line = pymupdf.Rect((original_map if choice == "original" else ucs_map).OVERLAYS["sig_reporter"])
+        signature.place(doc[0], line, s.signature())
     if s.flatten:
         doc.bake()
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,8 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 - **Asks when unsure.** Guesses are highlighted. When there are several candidates (two dates, several attorneys), you pick from a list. It asks about anything important that's missing before filling.
 - **Remembers you.** Your name, address, phone and email are filled in on every form.
 - **"Per email" option.** It can write "per email" on the attorney signature line, since minutes are often ordered by email.
+- **Your signature.** Choose a photo or scan of your signature once (Settings → My info) and it is placed on the court reporter line of every form. The paper background is removed, so the form's line shows through.
+- **Fewer keystrokes.** Default rate sheet, speed and number of copies are set once in Settings → Defaults. Buttons under the estimated delivery date fill in today, tomorrow, 1–3 weeks or 1 month from today.
 - **Rate sheets.** Pick your price list (private, city, …) and delivery speed from dropdowns. The rate, delivery checkbox and estimated delivery date follow automatically.
 - **One form per attorney.** Tick several attorneys to get a separate PDF for each.
 - **Batches.** Drop many documents, or a whole folder, at once. Documents about the same case and date are combined, so each order gets one form.

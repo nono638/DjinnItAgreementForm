@@ -1,8 +1,10 @@
 """Main window: drop zone + paste box on the left, editable extracted fields on the right."""
 from __future__ import annotations
 
+import calendar
 import os
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
@@ -35,6 +37,18 @@ ATT_FIELDS = [None, "name", "firm", "address", "phone", "fax", "email", "party",
 
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
+
+
+def quick_date(days: int = 0, months: int = 0, today: date | None = None) -> str:
+    """Today plus days/months as M/D/YYYY; a day on the weekend becomes the Monday after."""
+    d = today or date.today()
+    if months:
+        y, m = divmod(d.month - 1 + months, 12)
+        d = d.replace(year=d.year + y, month=m + 1, day=min(d.day, calendar.monthrange(d.year + y, m + 1)[1]))
+    d += timedelta(days=days)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return f"{d.month}/{d.day}/{d.year}"
 
 
 def repolish(w: QWidget) -> None:
@@ -494,8 +508,22 @@ class MainWindow(QMainWindow):
         fa.addRow(lab, self.delivery)
         for k in ("rate", "copies", "est_pages"):
             row(fa, k)
-        for k in ("delivery_date", "agreement_date"):
-            row(fb, k)
+        row(fb, "delivery_date")
+        quick = QHBoxLayout()
+        quick.setSpacing(4)
+        for label, days, months in (("Today", 0, 0), ("Tomorrow", 1, 0), ("1 week", 7, 0), ("2 weeks", 14, 0),
+                                    ("3 weeks", 21, 0), ("1 month", 0, 1)):
+            b = QToolButton()
+            b.setText(label)
+            b.setObjectName("quick")
+            when = quick_date(days, months)
+            b.setToolTip(f"Estimated delivery {when}" + ("" if label in ("Today", "Tomorrow") else " - from today")
+                         + "\n(a Saturday or Sunday becomes the Monday after)")
+            b.clicked.connect(lambda _=False, d=days, m=months: self.rows["delivery_date"].choose(quick_date(d, m)))
+            quick.addWidget(b)
+        quick.addStretch(1)
+        fb.addRow("", quick)
+        row(fb, "agreement_date")
         self.rate_info = QLabel("")
         self.rate_info.setObjectName("muted")
         self.rate_info.setWordWrap(True)
@@ -542,7 +570,9 @@ class MainWindow(QMainWindow):
         self.per_email = QCheckBox("Write \"per email\" in attorney signature spot")
         self.per_email.setChecked(self.s.per_email)
         self.per_email.toggled.connect(lambda v: self._set_opt("per_email", v))
-        self.sign_rep = QCheckBox("Type my name as reporter signature")
+        self.sign_rep = QCheckBox("Sign as court reporter")
+        self.sign_rep.setToolTip("Puts your signature picture on the court reporter line - or types your name,\n"
+                                 "if no picture is chosen in Settings → My info.")
         self.sign_rep.setChecked(self.s.sign_reporter)
         self.sign_rep.toggled.connect(lambda v: self._set_opt("sign_reporter", v))
         from ..fill import FORMS
