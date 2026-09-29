@@ -24,7 +24,7 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
    - The installer isn't code-signed yet, so Windows may show "Windows protected your PC". Click **More info → Run anyway**.
 3. On first launch, enter your details (name, address, phone, email). You can change them later in **Settings**.
 
-Requires Windows 10 (1809 or newer) or Windows 11.
+**Requirements:** 64-bit Windows 10 (version 1809 or newer) or Windows 11, and about 200 MB of disk space. Nothing else needs installing: Python and all libraries are included, and no internet connection is needed. Reading photos and scanned PDFs uses Windows' text recognition, which needs the English language pack (normally already there). The optional AI helper needs [Ollama](https://ollama.com).
 
 ## Use
 
