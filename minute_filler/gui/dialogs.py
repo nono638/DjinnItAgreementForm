@@ -472,6 +472,7 @@ _BACKGROUND: list[QThread] = []
 
 CONTACT_EMAIL = "noahcollincourtreporter@gmail.com"
 SOURCE_URL = "https://github.com/nono638/DjinnItAgreementForm"
+COFFEE_URL = "https://buymeacoffee.com/noahcollin"
 
 COMPONENTS = [
     ("Qt / PySide6", "LGPL-3.0", "https://www.qt.io/qt-for-python"),
@@ -513,7 +514,8 @@ class AboutDialog(QDialog):
             f'Questions, bugs or ideas: <a href="mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm">'
             f"{CONTACT_EMAIL}</a><br><br>"
             "Free software under the GNU AGPL-3.0 license."
-            + (f' Source code: <a href="{SOURCE_URL}">{SOURCE_URL}</a>' if SOURCE_URL else ""))
+            + (f' Source code: <a href="{SOURCE_URL}">{SOURCE_URL}</a>' if SOURCE_URL else "")
+            + f'<br><br>If this saves you time, you can <a href="{COFFEE_URL}">buy me a coffee</a> ☕')
         body.setWordWrap(True)
         body.setTextFormat(Qt.RichText)
         body.setOpenExternalLinks(True)
@@ -529,10 +531,13 @@ class AboutDialog(QDialog):
         mail = QPushButton("Email Noah")
         mail.clicked.connect(lambda: QDesktopServices.openUrl(
             QUrl(f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}")))
+        coffee = QPushButton("☕  Buy me a coffee")
+        coffee.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(COFFEE_URL)))
         ok = QPushButton("Close")
         ok.clicked.connect(self.accept)
         row.addWidget(credits)
         row.addWidget(mail)
+        row.addWidget(coffee)
         row.addStretch(1)
         row.addWidget(ok)
         lay.addLayout(row)

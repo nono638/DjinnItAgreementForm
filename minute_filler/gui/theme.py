@@ -144,6 +144,8 @@ def apply_theme(app, theme: str) -> dict:
     pal.setColor(QPalette.ButtonText, QColor(tokens["text"]))
     pal.setColor(QPalette.Highlight, QColor(tokens["accent"]))
     pal.setColor(QPalette.PlaceholderText, QColor(tokens["muted"]))
+    pal.setColor(QPalette.Link, QColor(tokens["accent"]))          # readable links in both themes
+    pal.setColor(QPalette.LinkVisited, QColor(tokens["accent"]))
     app.setPalette(pal)
     app.setStyleSheet(qss)
     return tokens
