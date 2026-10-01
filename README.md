@@ -44,7 +44,7 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
    - Each field has a badge showing where its value came from: **regex** (found in the document), **AI**, **default** (your settings), **derived** (calculated), or **you**.
    - Amber fields are guesses. A ▾ button lists other candidates.
 3. **Pick the rate sheet and speed**, then tick the attorney(s) who ordered.
-4. **Tick what to make** (minute agreement, MOFR, invoice, run sheet), then **Generate** (Ctrl+Enter). The PDFs are saved next to your document, or to the folder chosen in Settings, and open automatically.
+4. **Tick what to make** (minute agreement, MOFR, invoice, run sheet), then **Generate** (Ctrl+Enter). The PDFs are saved next to your document, or to the folder chosen in Settings, and open automatically; the run sheet is kept in its own folder (see Run sheets).
 
 ## Invoices and records
 
@@ -64,7 +64,7 @@ Each party pays the total divided by the number of parties.
 
 **Records** (Ctrl+R, or File → Records) has two tabs:
 - **Invoices**: totals (billed, paid, outstanding), filters by year, month, firm and status, and per-firm and per-month breakdowns. Tick **Paid** to record a payment; you're asked which speed they paid for and the amount and date. Right-click an invoice to open it, void it or add a note.
-- **Everything made**: every minute agreement, MOFR and invoice, with the case, attorney and file. Double-click to open the file.
+- **Everything made**: every minute agreement, MOFR and invoice, and every run sheet takes were added to, with the case, attorney and file. Double-click to open the file.
 
 The records live in `%APPDATA%\DjinnItAgreementForm\records.db`, and are copied to `invoices.csv` and `activity.csv` in *Documents\DjinnIt Records* after every change, so you can always open them in Excel. Buttons export an HTML report, an Excel workbook (with *By firm* and *By month* sheets) or CSV files.
 
@@ -85,12 +85,12 @@ When several reporters share a trial, each one writes their initials at the foot
 
 - **Reporter:** the initials become a name. Put your own initials in Settings → My info, and other reporters' in Settings → Run sheet ("ds = Dana"). Without that, the reporters named on the title page ("DANA SMITH, Senior Court Reporter") are matched to the initials; failing that, the initials are written.
 - **Witness Start / End:** a witness sworn in, or a new witness in the running head, starts; "the witness stepped down" ends.
-- **Title pages alone** count as half a take (Note: *title page only*), as on a hand-kept run sheet.
-- The weekday, take counts and page numbers are formulas (the *Don't write here* columns), so rows you type in or correct are counted too. Filter the Reporter column to see one reporter's rows; the total of the pages shown is at the top. The **By Reporter** sheet totals each reporter's takes and pages.
+- **Title pages alone** show as half a take in *Day's Take* (Note: *title page only*), as on a hand-kept run sheet. The *By Reporter* totals don't count them as a take, but do count their pages.
+- The weekday, take counts and page numbers are formulas (the *Don't write here* columns; the first page of a transcript is written as a number), so rows you type in or correct are counted too. Filter the Reporter column to see one reporter's rows; the total of the pages shown is at the top. The **By Reporter** sheet totals each reporter's takes and pages.
 
-**One run sheet per trial.** Before adding, the app looks for the case's run sheet in the run sheets folder (*Documents\DjinnIt Run Sheets*, Settings → Run sheet) and next to the transcript. It's the case's when it has the same **index number**, or the same **case name**: a trial can have several index numbers that are billed together. It then asks whether to add the takes to it or start a new one (or, if you prefer, always adds or always starts a new one). Takes already on the run sheet are not added twice, and the rows stay in date and page order.
+**One run sheet per trial.** Before adding, the app looks for the case's run sheet in the run sheets folder (*Documents\DjinnIt Run Sheets*, Settings → Run sheet) and next to the transcript. It's the case's when it has the same **index number**, or the same **case name**: a trial can have several index numbers that are billed together. It then asks whether to add the takes to it or start a new one (or, if you prefer, always adds or always starts a new one). Takes already on the run sheet are not added twice, and an unchanged run sheet isn't saved again. New takes go in date and page order; rows already there keep their place, and what you typed on them (notes, formulas, extra columns) is kept. If the run sheet is open in Excel, nothing is made until you close it, so trying again never makes a second invoice.
 
-A run sheet made elsewhere, such as one downloaded from Google Sheets as .xlsx, can be added to as well. It needs Date, Reporter and Pages columns. New rows go at its end with its own formulas copied down, and a copy of the file is kept first ("… (before DjinnIt).xlsx").
+A run sheet made elsewhere, such as one downloaded from Google Sheets as .xlsx, can be added to as well. It needs Date, Reporter and Pages columns. New rows go at its end (or on a row you typed in ahead for that day) with its own formulas copied down, and a copy of the file is kept first ("… (before DjinnIt).xlsx").
 
 ## Batches
 
@@ -109,7 +109,7 @@ The jobs appear in a list on the left. Click one to check or correct it in the u
 Batches are read with the built-in rules and Windows' text recognition only; the AI helper is not used, as it would take most of a minute per document.
 
 The same can be done without the window:
-`DjinnItAgreementForm.exe --batch <output folder> [--outputs agreement,mofr,invoice,runsheet] <files or folders…>` makes the outputs (those ticked in the window, unless `--outputs` says otherwise) and writes a `batch.json` report.
+`DjinnItAgreementForm.exe --batch <output folder> [--outputs agreement,mofr,invoice,runsheet] <files or folders…>` makes the outputs (those ticked in the window, unless `--outputs` says otherwise) and writes a `batch.json` report. With nobody to ask, takes are added to a run sheet only when it has the same index number (or, with Settings → Run sheet set to always add, the same case name).
 
 Files this app made (agreements, MOFRs, invoices) are recognised and skipped when a folder is read again, so its output can live next to your documents.
 
@@ -173,9 +173,11 @@ build_installer.bat     :: tests + exe + installer (needs Inno Setup 6) -> dist\
 ```
 
 **Release checklist:**
-1. Run `build_installer.bat`. It runs the tests, then raises the version by one patch step (1.0.1 → 1.0.2) if that version was already built. The number lives only in `minute_filler/__init__.py`.
+1. Run `build_installer.bat`. It runs the tests, then raises the version by one patch step (1.0.1 → 1.0.2) if that version was already released on GitHub (or, without the `gh` tool, already built). The number lives only in `minute_filler/__init__.py`.
    - For a bigger step, run `python tools/bump_version.py minor` (or `major`, or an exact number such as `1.4.0`) first. `python tools/bump_version.py` alone shows the current version.
 2. Upload `dist\installer\DjinnItAgreementForm-Setup-x.y.z.exe` to a GitHub release.
+
+With Claude Code, `/update-the-app` runs the whole cycle: a bug sweep, a docstrings review, commit and push, the installer, the GitHub release, the website and these notes (`.claude/skills/update-the-app/`).
 
 Never change the `AppId` in `installer/DjinnItAgreementForm.iss`; Windows uses it to recognise upgrades.
 
