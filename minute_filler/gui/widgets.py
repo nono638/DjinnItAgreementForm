@@ -82,14 +82,15 @@ def set_checks(boxes: dict[str, QCheckBox], checked) -> None:
             cb.setChecked(key in checked)
 
 
-def show_save_error(parent: QWidget, e: Exception, what: str = "Could not save") -> None:
+def show_save_error(parent: QWidget, e: Exception, what: str = "Could not save", note: str = "") -> None:
     """Tells the user why a file could not be written. A locked file (open in Excel or a PDF viewer) is the
-    usual reason and is said plainly; anything else goes to the log too."""
+    usual reason and is said plainly; anything else goes to the log too. note: added below the message."""
     if isinstance(e, PermissionError):
-        QMessageBox.warning(parent, what, f"{e}\n\nIs the file open in another program (a PDF viewer or Excel)?")
+        QMessageBox.warning(parent, what, f"{e}\n\nIs the file open in another program (a PDF viewer or Excel)?"
+                            + note)
     else:
         log_error(what.lower(), e)
-        QMessageBox.critical(parent, what, f"{type(e).__name__}: {e}")
+        QMessageBox.critical(parent, what, f"{type(e).__name__}: {e}{note}")
 
 
 def plural(n: int, word: str) -> str:

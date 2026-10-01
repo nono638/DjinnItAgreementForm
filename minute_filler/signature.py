@@ -23,7 +23,8 @@ def signature_path() -> Path:
 
 def prepare(src: str | Path, dst: str | Path) -> Path:
     """Writes `src` (photo, scan, PNG...) to `dst` as a cropped PNG with a transparent background."""
-    img = ImageOps.exif_transpose(Image.open(src)).convert("RGBA")
+    with Image.open(src) as opened:
+        img = ImageOps.exif_transpose(opened).convert("RGBA")
     paper = Image.new("RGBA", img.size, "white")
     paper.alpha_composite(img)
     grey = ImageOps.autocontrast(paper.convert("L"), cutoff=1)  # grey paper in a photo becomes white

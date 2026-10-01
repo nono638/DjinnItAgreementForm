@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import date, timedelta
 
 from .dates import next_weekday, us_date
@@ -61,8 +62,10 @@ def merge(extractions: list[Extraction], s: Settings, previous: CaseInfo | None 
             ptypes[t] = min(0.99, max(ptypes.get(t, 0), c) + (0.1 if t in ptypes else 0))
     case.proc_types = {t for t, c in ptypes.items() if c >= CHECK_THRESHOLD}
 
-    # Attorneys: regex first (more exact), AI fills gaps / adds missing people
-    atts = [a for ex in extractions for a in ex.attorneys]
+    # Attorneys: regex first (more exact), AI fills gaps / adds missing people. Copies, because merging
+    # fills in and ticks entries: a document's own findings must stay as they were read, or a tick or an
+    # e-mail address taken from another document would stay behind after that document is removed.
+    atts = [replace(a) for ex in extractions for a in ex.attorneys]
     atts.sort(key=lambda a: a.source == SRC_AI)
     case.attorneys = dedupe_attorneys(atts, s.profile)
     real = [a for a in case.attorneys if not a.is_placeholder()]

@@ -123,7 +123,8 @@ def _jpeg(img: Image.Image, max_side: int = 1400) -> bytes:
 # ------------------------------------------------------------------ inputs
 
 def ingest_image(path: Path) -> Ingested:
-    return ingest_pil(ImageOps.exif_transpose(Image.open(path)), path.name)
+    with Image.open(path) as img:  # closed again, so the file can be moved or deleted while the app is open
+        return ingest_pil(ImageOps.exif_transpose(img), path.name)
 
 
 def ingest_pil(img: Image.Image, name: str = "Pasted image") -> Ingested:
@@ -137,8 +138,12 @@ def ingest_pil(img: Image.Image, name: str = "Pasted image") -> Ingested:
 
 
 def ingest_pdf(path: Path) -> Ingested:
-    doc = pymupdf.open(path)
-    ing = Ingested(path.name, "pdf", page_count=doc.page_count)
+    with pymupdf.open(path) as doc:  # closed again, so the file can be moved or deleted while the app is open
+        return _read_pdf(doc, path.name)
+
+
+def _read_pdf(doc: pymupdf.Document, name: str) -> Ingested:
+    ing = Ingested(name, "pdf", page_count=doc.page_count)
     parts = []
     for i in range(min(PDF_TEXT_PAGES, doc.page_count)):
         page = doc[i]

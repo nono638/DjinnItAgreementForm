@@ -132,7 +132,69 @@ def test_records_window_marks_paid(window, tmp_path, monkeypatch):
     monkeypatch.setattr(rw.PaidDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
     monkeypatch.setattr(rw.PaidDialog, "values", lambda self: ("Daily", "91.00", "2026-03-10"))
     win.inv_table.item(0, 0).setCheckState(QtCore.Qt.Checked)
+    QtWidgets.QApplication.processEvents()  # the tick is dealt with right after the click
     assert lg.invoice("2026-0001").status == "paid"
     assert win.kpi["paid"].text() == "$91.00" and win.kpi["outstanding"].text() == "$0.00"
     assert win.firm_table.item(0, 0).text() == "Example Firm LLP"
     win.close()
+
+
+def test_same_file_dropped_twice_in_a_row_is_read_once(window, tmp_path):
+    a = write(tmp_path, "a.txt", title="Smith v Jones", index="712222-2024", date="5-22-2026")
+    window.add_files([a])
+    window.add_files([a])  # before the first drop has been read
+    wait(window, lambda: len(window.cur.docs) >= 1)
+    assert len(window.cur.docs) == 1 and len(window.jobs) == 1
+    assert window.work == 0 and not window._loading and window.busy.isHidden()
+
+
+def test_one_batch_at_a_time_and_edits_do_not_reach_it(window, tmp_path):
+    import pymupdf
+    a = write(tmp_path, "a.txt", title="Smith v Jones", index="712222-2024", date="5-22-2026")
+    b = write(tmp_path, "b.txt", title="Roe v Doe", index="700001-2025", date="6-1-2026")
+    window.add_files([a, b])
+    wait(window, lambda: len(window.jobs) == 2)
+    window.fill_all_jobs()
+    assert window.filling and not window.fill_all_btn.isEnabled()
+    # while the batch is being made: no second batch, no single job, no "New job" ...
+    window.fill_all_jobs()
+    window.fill()
+    window.new_job()
+    window._refresh_job_labels()
+    assert not window.fill_all_btn.isEnabled()
+    # ... and what is typed now belongs to the next run, not to the files being written
+    window.rows["judge"].choose("Changed Meanwhile")
+    wait(window, lambda: not window.filling)
+    out = sorted((tmp_path / "out").iterdir())
+    assert len(out) == 2 and len(window.jobs) == 2 and all(j.saved for j in window.jobs)
+    for p in out:
+        with pymupdf.open(p) as doc:
+            assert not any("Changed Meanwhile" in str(w.field_value) for w in doc[0].widgets())
+    assert window.work == 0 and window.busy.isHidden() and window.fill_btn.isEnabled()
+    assert window.cur.case.get("judge") == "Changed Meanwhile"
+
+
+def test_ticked_attorneys_set_the_invoice_parties(window, tmp_path):
+    window.output_boxes["invoice"].setChecked(True)
+    window.add_files([str(transcript_pdf(tmp_path / "t.pdf", pages=12))])
+    wait(window, lambda: len(window.cur.docs) == 1)
+    assert window.att.rowCount() >= 2
+    for r in range(window.att.rowCount()):
+        window.att.item(r, 0).setCheckState(QtCore.Qt.Unchecked)
+    window.att.item(0, 0).setCheckState(QtCore.Qt.Checked)
+    assert window.inv_parties.value() == 1 and "each" not in window.inv_info.text()
+    window.inv_choice.setChecked(not window.inv_choice.isChecked())  # must not fix the number of parties
+    window.att.item(1, 0).setCheckState(QtCore.Qt.Checked)
+    assert window.inv_parties.value() == 2 and "each" in window.inv_info.text()
+    assert window.cur.invoice_opts().parties == 2
+    window.inv_parties.setValue(3)  # typed: stays, whatever is ticked
+    window.att.item(1, 0).setCheckState(QtCore.Qt.Unchecked)
+    assert window.inv_parties.value() == 3
+
+
+def test_an_answer_arriving_while_typing_leaves_the_text_alone(window):
+    row = window.rows["judge"]
+    row.edit.setText("Maria T. Lopez")
+    row.edit.setCursorPosition(5)
+    row.set_state(type(row.state)("Maria T. Lopez", "you", 1.0, []))  # e.g. a merge after an AI answer
+    assert row.edit.cursorPosition() == 5

@@ -30,8 +30,8 @@ def build_values(case: CaseInfo, s: Settings, pages: str = "") -> dict[str, str 
     civil = s.mofr_division != "criminal"
     title = " ".join(g("case_name").split())
     if not civil:  # "PEOPLE V" is printed on the form already
-        title = re.sub(r"(?i)^the\s+people\s+(of\s+the\s+state\s+of\s+new\s+york\s+)?v[s.]*\s+", "", title)
-        title = re.sub(r"(?i)^people\s+v[s.]*\s+", "", title)
+        title = re.sub(r"(?i)^(the\s+)?people(\s+of\s+the\s+state\s+of\s+new\s+york)?(,?\s+etc\.?,?)?\s+v[s.]*\s+",
+                       "", title)
     others = [p for p in PROC_TYPES if p in case.proc_types and p not in MOFR_PROCS]
     if g("proc_other").strip():
         others.append(g("proc_other").strip())

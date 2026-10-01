@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, Qt, QTimer
@@ -73,6 +75,9 @@ class FieldRow(QWidget):
         return self.edit.toPlainText().strip() if self.multiline else self.edit.text().strip()
 
     def set_text(self, t: str) -> None:
+        shown = self.edit.toPlainText() if self.multiline else self.edit.text()
+        if shown == t or (self.edit.hasFocus() and shown.strip() == t):
+            return  # unchanged: leave the cursor (and a space just typed) where they are
         self._loading = True
         if self.multiline:
             self.edit.setPlainText(t)
@@ -215,6 +220,11 @@ def handle_mime(md, on_files, on_text, on_image) -> bool:
     return False
 
 
+def _path_key(path: str) -> str:
+    """One spelling per file, to tell whether it is loaded already."""
+    return str(Path(path).resolve()).lower()
+
+
 def card(title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
     fr = QFrame()
     fr.setObjectName("card")
@@ -241,6 +251,9 @@ class MainWindow(QMainWindow):
         self.jobs: list[Job] = [Job()]  # more than one = a batch
         self.cur = self.jobs[0]         # the job shown in the editor
         self.ai_pending = 0
+        self.work = 0                   # documents being read / batches being made in the background
+        self.filling = False            # "Generate all" is running on another thread
+        self._loading: set[str] = set()  # files being read right now (so a second drop doesn't add them twice)
 
         self.setWindowTitle("DjinnItAgreementForm")
         self.setMinimumSize(1080, 720)
@@ -542,13 +555,13 @@ class MainWindow(QMainWindow):
         self.inv_choice = QCheckBox("Offer every speed")
         self.inv_choice.setToolTip("List the price of each speed (Settings → Invoice) so the attorney can choose;\n"
                                    "untick to bill only the speed chosen under Order.")
-        self.inv_choice.toggled.connect(self._invoice_opts_changed)
+        self.inv_choice.toggled.connect(self._invoice_choice_changed)
         self.inv_parties_label = QLabel("Parties:")
         self.inv_parties = QSpinBox()
         self.inv_parties.setRange(1, 20)
         self.inv_parties.setToolTip("How many parties ordered: the original is split between them,\n"
                                     "and each gets their own copy (normally the number of ticked attorneys)")
-        self.inv_parties.valueChanged.connect(self._invoice_opts_changed)
+        self.inv_parties.valueChanged.connect(self._invoice_parties_changed)
         self.inv_info = QLabel("")
         self.inv_info.setObjectName("muted")
         for w in (self.inv_choice, self.inv_parties_label, self.inv_parties, self.inv_info):
@@ -696,39 +709,52 @@ class MainWindow(QMainWindow):
     def add_files(self, paths: list[str], batch: bool = False):
         """Files and folders. Several documents about different cases (or batch=True) start a batch."""
         gen = self.gen
-        loaded = {str(Path(d.path).resolve()).lower() for j in self.jobs for d in j.docs if d.path}
 
         def find():  # off the UI thread: a big folder takes a while to go through
-            found = expand_paths(paths)
-            return found, [p for p in found if str(Path(p).resolve()).lower() not in loaded]
+            return [(p, _path_key(p)) for p in expand_paths(paths)]
 
-        def found(result):
-            if gen != self.gen:
+        def found(everything):
+            if not self._work_done(gen):
                 return
-            everything, fresh = result
+            # judged now, not when dropped: the same file dropped twice in a row is still being read
+            loaded = {_path_key(d.path) for j in self.jobs for d in j.docs if d.path} | self._loading
+            fresh = [(p, key) for p, key in everything if key not in loaded]
             if len(fresh) < len(everything):
                 self._toast(f"Skipped {len(everything) - len(fresh)} document(s) that are already loaded.")
             if fresh:
-                self._ingest([(lambda p=p: ingest_file(p)) for p in fresh], [Path(p).name for p in fresh],
-                             fresh, batch)
+                files = [p for p, _ in fresh]
+                self._ingest([(lambda p=p: ingest_file(p)) for p in files], [Path(p).name for p in files],
+                             files, batch, {key for _, key in fresh})
             else:
-                self.busy.setVisible(self.ai_pending > 0)
                 self._update_status()
                 if not everything:
                     self._toast("No documents found there.")
 
         def failed(msg):
-            self.busy.setVisible(self.ai_pending > 0)
+            if not self._work_done(gen):
+                return
             self._update_status()
             QMessageBox.warning(self, "Could not open that", msg)
 
+        self.work += 1
         if any(Path(p).is_dir() for p in paths):
             self._set_status("Looking for documents…", "busy")
             self.busy.setVisible(True)
         self.runner.start(find, on_done=found, on_error=failed)
 
-    def _ingest(self, loaders, names, paths=None, batch=False):
+    def _work_done(self, gen: int) -> bool:
+        """A background read or batch has ended. False when "New job" was clicked since it started:
+        its result is then dropped (and the counters were already reset)."""
+        if gen != self.gen:
+            return False
+        self.work = max(0, self.work - 1)
+        self._idle()
+        return True
+
+    def _ingest(self, loaders, names, paths=None, batch=False, keys=frozenset()):
         gen, target, s = self.gen, self.cur, self.s
+        self.work += 1
+        self._loading |= keys
         self._set_status(f"Reading {names[0]}…" if len(names) == 1 else f"Reading {len(names)} documents…", "busy")
         self.busy.setVisible(True)
 
@@ -742,10 +768,10 @@ class MainWindow(QMainWindow):
                 self._set_status(f"Reading {i + 1} of {n}:  {name[:40]}", "busy")
 
         def done(result):
-            if gen != self.gen:
+            if not self._work_done(gen):
                 return
+            self._loading -= keys
             docs, errors = result
-            self._idle()
             for d in docs:
                 for w in d.ing.warnings:
                     self._toast(w)
@@ -776,7 +802,9 @@ class MainWindow(QMainWindow):
                 self._unreadable(errors, len(loaders))
 
         def failed(msg):
-            self._idle()
+            if not self._work_done(gen):
+                return
+            self._loading -= keys
             self._set_status("Could not read that input", "warn")
             QMessageBox.warning(self, "Could not read input", msg)
 
@@ -837,13 +865,15 @@ class MainWindow(QMainWindow):
         if not item:
             return
         idx = self.input_list.row(item)
-        doc = self.cur.docs[idx]
+        if not 0 <= idx < len(self.cur.docs):
+            return
+        job, doc = self.cur, self.cur.docs[idx]
         m = QMenu(self)
         view = m.addAction("Show extracted text")
         split = m.addAction("Move to a job of its own") if len(self.cur.docs) > 1 else None
         rem = m.addAction("Remove from job")
         act = m.exec(self.input_list.mapToGlobal(pos))
-        if act is None:
+        if act is None or job is not self.cur or doc not in job.docs:  # (the job changed while the menu was open)
             return
         if act == view:
             box = QMessageBox(self)
@@ -853,7 +883,7 @@ class MainWindow(QMainWindow):
             box.exec()
         elif act in (rem, split):
             self._sync_from_ui()
-            del self.cur.docs[idx]
+            job.docs.remove(doc)
             remerge(self.cur, self.s)
             if act == split:
                 job = Job(docs=[doc], batch=True)
@@ -924,7 +954,7 @@ class MainWindow(QMainWindow):
         self.jobs_label.setText(text)
         files = sum(j.file_count(self.s.outputs) for j in chosen)
         self.fill_all_btn.setText(f"Generate all  ({plural(files, 'file')})")
-        self.fill_all_btn.setEnabled(bool(chosen) and bool(self.s.outputs))
+        self.fill_all_btn.setEnabled(bool(chosen) and bool(self.s.outputs) and not self.filling)
 
     def _show_job(self):
         """Puts the current job in the editor."""
@@ -957,8 +987,10 @@ class MainWindow(QMainWindow):
 
     def _job_menu(self, pos):
         item = self.job_list.itemAt(pos)
+        row = self.job_list.row(item) if item else -1
+        job = self.jobs[row] if 0 <= row < len(self.jobs) else None
         m = QMenu(self)
-        rem = m.addAction("Remove this job") if item else None
+        rem = m.addAction("Remove this job") if job else None
         m.addSeparator()
         tick = m.addAction("Tick all")
         untick = m.addAction("Untick all")
@@ -970,10 +1002,10 @@ class MainWindow(QMainWindow):
                 j.include = act == tick
             self._refresh_job_labels()
             return
-        if act is not rem:
+        if act is not rem or job not in self.jobs:  # (the list may have changed while the menu was open)
             return
         self._sync_from_ui()
-        del self.jobs[self.job_list.row(item)]
+        self.jobs.remove(job)
         if not self.jobs:
             self.jobs = [Job()]
         if self.cur not in self.jobs:
@@ -1060,12 +1092,19 @@ class MainWindow(QMainWindow):
 
     def _att_changed(self, _item):
         self.att_touched = True
+        self._attorneys_edited()
+
+    def _attorneys_edited(self):
+        """A tick or an edit in the attorney table: the invoice's parties and the file counts follow."""
+        self.case.attorneys = self._read_attorneys()
+        self._update_status()
 
     def _add_att_row(self):
         self.att.blockSignals(True)
         self._append_att(Attorney(source=SRC_USER, checked=True))
         self.att.blockSignals(False)
         self.att_touched = True
+        self._attorneys_edited()
         self.att.editItem(self.att.item(self.att.rowCount() - 1, 1))
 
     def _remove_att_rows(self):
@@ -1074,6 +1113,7 @@ class MainWindow(QMainWindow):
             self.att.removeRow(r)
         if rows:
             self.att_touched = True
+            self._attorneys_edited()
 
     # ------------------------------------------------ rate sheets / speed
     def _fill_sheet_box(self):
@@ -1151,6 +1191,7 @@ class MainWindow(QMainWindow):
             if self.rows[k].state.source != SRC_USER:
                 self.rows[k].set_state(self.case.fields[k])
         self._show_rate_info()
+        self._refresh_outputs()
 
     def _open_log_folder(self):
         open_path(logfile.log_dir())
@@ -1192,7 +1233,7 @@ class MainWindow(QMainWindow):
 
     def _job_status(self):
         busy = self.ai_pending > 0
-        self.busy.setVisible(busy)
+        self.busy.setVisible(busy or self.work > 0)
         if not self.cur.docs:
             self._set_status("Drop a document to begin", "")
             return
@@ -1215,9 +1256,10 @@ class MainWindow(QMainWindow):
             self.status.setToolTip("")
 
     def _idle(self):
-        """Background work is done: the progress bar goes back to 'busy' style, shown only while the AI works."""
+        """A piece of background work is done: the progress bar goes back to 'busy' style, and stays only
+        while the AI or another read is still going."""
         self.busy.setRange(0, 0)
-        self.busy.setVisible(self.ai_pending > 0)
+        self.busy.setVisible(self.ai_pending > 0 or self.work > 0)
 
     def _saved_box(self, title: str, text: str, folders: list, details: str = "", warn: bool = False):
         """The 'files saved' message, with a button that opens the folder(s)."""
@@ -1238,20 +1280,28 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, 8000)
 
     # --------------------------------------------------------- fill
+    def _batch_running(self) -> bool:
+        if self.filling:
+            self._toast("Still making the files of the batch - one moment.")
+        return self.filling
+
     def fill(self):
+        if self._batch_running():
+            return
         self._sync_from_ui()
-        case = self.case
+        job = self.cur
+        case = job.case
         outputs = list(self.s.outputs)
         if not outputs:
             QMessageBox.information(self, "Nothing to make", "Tick what to make first: minute agreement, MOFR "
                                     "and/or invoice (at the bottom of the window).")
             return
-        if self.cur.makeable(outputs) != outputs:
+        if job.makeable(outputs) != outputs:
             if QMessageBox.question(
                     self, "No invoice", "An invoice needs a transcript PDF (for the page count), and this job has "
                     "none.\n\nMake the other outputs without the invoice?") != QMessageBox.Yes:
                 return
-            outputs = self.cur.makeable(outputs)
+            outputs = job.makeable(outputs)
             if not outputs:
                 return
         # Ask about required fields that are blank, and fields with competing values
@@ -1264,31 +1314,47 @@ class MainWindow(QMainWindow):
         real = [a for a in case.attorneys if not a.is_placeholder() and (a.name or a.firm)]
         ask_att = real and not any(a.checked for a in case.attorneys)
         if questions or ask_att:
-            dlg = ClarifyDialog(questions, case.attorneys if ask_att else None, self)
-            if dlg.exec() != ClarifyDialog.Accepted:
+            asked = list(case.attorneys)
+            dlg = ClarifyDialog(questions, asked if ask_att else None, self)
+            if dlg.exec() != ClarifyDialog.Accepted or job not in self.jobs or self._batch_running():
                 return
+            # While the question was on screen an AI answer may have come in (the job was merged again) or
+            # documents still being read may have put another job in the editor: the answers go to the job
+            # they were asked about, as it is now.
+            case = job.case
             for key, val in dlg.answers().items():
                 case.fields[key] = FieldState(val, SRC_USER, 1.0, case.fields[key].alternatives)
-                self.rows[key].set_state(case.fields[key])
             chosen = dlg.checked_attorneys()
             if chosen is not None:
-                for i, a in enumerate(case.attorneys):
-                    a.checked = i in chosen
-                self._show_attorneys()
+                if len(case.attorneys) == len(asked):
+                    for i, a in enumerate(case.attorneys):
+                        a.checked = i in chosen
+                else:
+                    keys = {asked[i].key() for i in chosen}
+                    for a in case.attorneys:
+                        a.checked = a.key() in keys
+                job.att_touched = True  # a later AI answer must not undo the choice
+            if job is self.cur:
+                self._show_case()
 
-        out_dir = out_dir_for(self.cur, self.s)
+        out_dir = out_dir_for(job, self.s)
         try:
-            paths = generate(case, self.s, out_dir, outputs, self.cur.invoice_opts())
+            paths = generate(case, self.s, out_dir, outputs, job.invoice_opts())
         except Exception as e:
-            show_save_error(self, e, "Could not make the files")
+            made = list(getattr(e, "made", []))
+            job.saved, job.error = made, f"{type(e).__name__}: {e}"
+            show_save_error(self, e, "Could not make the files", "\n\nSaved before the problem:\n"
+                            + "\n".join(p.name for p in made) if made else "")
+            self._update_status()
+            self._records_changed()
             return
         log.info("made %d file(s): %s, form type %s", len(paths), "+".join(outputs), self.s.form_choice)
+        job.saved, job.error = paths, ""
         if self.s.open_after:
             for p in paths:
                 open_path(p)
         self._saved_box("Saved", f"Saved {plural(len(paths), 'file')}:\n\n" + "\n".join(p.name for p in paths)
                         + f"\n\nin {out_dir}", [out_dir])
-        self.cur.saved, self.cur.error = paths, ""
         self._update_status()
         self._set_status(f"✓  Saved {len(paths)} file(s)", "ok")
         self._records_changed()
@@ -1297,6 +1363,8 @@ class MainWindow(QMainWindow):
         """Fills the forms of every ticked job without asking questions."""
         if len(self.jobs) < 2:
             return self.fill()
+        if self._batch_running():
+            return
         self._sync_from_ui()
         chosen = [j for j in self.jobs if j.include and not j.is_empty()]
         if not chosen:
@@ -1322,10 +1390,22 @@ class MainWindow(QMainWindow):
                 chosen = [j for j in chosen if not j.output_problems(outputs)]
             elif box.clickedButton() != everything:
                 return
-        gen = self.gen
+        # The batch is made on another thread while the window stays usable, so it gets its own copy of the
+        # jobs and the settings: editing a job, an AI answer or a change in Settings can't reach files half made.
+        copies = {id(j): replace(j, case=deepcopy(j.case), docs=list(j.docs), saved=[], error="")
+                  for j in self.jobs}
+        todo, settings = [copies[id(j)] for j in chosen], deepcopy(self.s)
+        self.filling = True
+        self.work += 1
         self.fill_all_btn.setEnabled(False)
         self.fill_btn.setEnabled(False)
         self.busy.setVisible(True)
+
+        def ended():
+            self.filling = False
+            self.work = max(0, self.work - 1)
+            self._idle()
+            self.fill_btn.setEnabled(True)
 
         def step(i, n, name):
             self.busy.setRange(0, n)
@@ -1333,10 +1413,9 @@ class MainWindow(QMainWindow):
             self._set_status(f"Making {i + 1} of {n}…", "busy")
 
         def done(paths):
-            self.busy.setRange(0, 0)
-            self.fill_btn.setEnabled(True)
-            if gen != self.gen:
-                return
+            ended()
+            for j in chosen:
+                j.saved, j.error = copies[id(j)].saved, copies[id(j)].error
             failed = [j for j in chosen if j.error and not j.saved]
             partial = [j for j in chosen if j.error and j.saved]
             for j in chosen:
@@ -1351,23 +1430,24 @@ class MainWindow(QMainWindow):
                 text += f"\n\n{len(failed)} could not be saved (is a PDF open in another program?):\n" + \
                         "\n".join(f"•  {j.title()}: {j.error[:90]}" for j in failed[:6])
             if partial:
-                text += f"\n\n{len(partial)} job(s) got no invoice (no transcript PDF):\n" + \
-                        "\n".join(f"•  {j.title()}" for j in partial[:6])
+                text += f"\n\n{len(partial)} job(s) are not complete:\n" + \
+                        "\n".join(f"•  {j.title()}: {j.error[:90]}" for j in partial[:6])
             self._saved_box("Batch finished", text, folders, "\n".join(str(p) for p in paths), warn=bool(failed))
             self._set_status(f"✓  Saved {len(paths)} file(s)", "warn" if failed else "ok")
             self._records_changed()
 
         def crashed(msg):
-            self.busy.setRange(0, 0)
-            self.fill_btn.setEnabled(True)
+            ended()
             self._update_status()
             QMessageBox.critical(self, "Could not fill the forms", msg)
 
-        self.runner.start(fill_jobs, chosen, self.s, batch=list(self.jobs), outputs=outputs,
+        self.runner.start(fill_jobs, todo, settings, batch=list(copies.values()), outputs=outputs,
                           on_done=done, on_error=crashed, on_progress=step)
 
     # ------------------------------------------------------- misc
     def new_job(self):
+        if self._batch_running():
+            return
         if len(self.jobs) > 1 and QMessageBox.question(
                 self, "New job", f"Clear all {len(self.jobs)} jobs of this batch and start over?"
         ) != QMessageBox.Yes:
@@ -1375,7 +1455,8 @@ class MainWindow(QMainWindow):
         self.gen += 1
         self.jobs = [Job()]
         self.cur = self.jobs[0]
-        self.ai_pending = 0
+        self.ai_pending = self.work = 0
+        self._loading.clear()
         self.busy.setRange(0, 0)
         self._refresh_jobs()
         self.input_list.clear()
@@ -1441,10 +1522,13 @@ class MainWindow(QMainWindow):
         except Exception as e:  # a broken rate sheet must not break the window
             self.inv_info.setText(f"⚠ {e}")
 
-    def _invoice_opts_changed(self, _=None):
-        job = self.cur
-        job.invoice_choice = self.inv_choice.isChecked()
-        job.parties = self.inv_parties.value()
+    def _invoice_choice_changed(self, on: bool):
+        self.cur.invoice_choice = on
+        self._refresh_outputs()
+
+    def _invoice_parties_changed(self, n: int):
+        """A number typed here stays; set back to the number of ticked attorneys, it follows them again."""
+        self.cur.parties = 0 if n == self.cur.form_count() else n
         self._refresh_outputs()
 
     def open_records(self):
@@ -1480,6 +1564,11 @@ class MainWindow(QMainWindow):
             open_path(Path(dest).parent)
 
     def closeEvent(self, e):
+        if self.filling and QMessageBox.question(
+                self, "Still working", "The files of the batch are still being made. Close anyway?\n\n"
+                "(The file being written may be left incomplete.)") != QMessageBox.Yes:
+            e.ignore()
+            return
         self.s.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.s.save()
         super().closeEvent(e)

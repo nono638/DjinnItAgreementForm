@@ -25,12 +25,14 @@ def ledger_for(s: Settings) -> Ledger:
 def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | set[str],
              invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False) -> list[Path]:
     """Writes the chosen outputs (keys of settings.OUTPUTS) into out_dir and logs them in the records.
-    An invoice needs `invoice` with the page count; raises ValueError otherwise."""
+    An invoice needs `invoice` with the page count; raises ValueError otherwise.
+    When a file can't be made, the error raised carries the files made before it as `made`."""
     outputs = [o for o in OUTPUTS if o in outputs]
-    if "invoice" in outputs and (invoice is None or invoice.pages <= 0):
+    billed = invoice.pages if invoice and invoice.pages > 0 else 0  # 0: no transcript among the inputs
+    if "invoice" in outputs and not billed:
         raise ValueError(NO_TRANSCRIPT)
     ledger = ledger or ledger_for(s)
-    pages = invoice.pages if invoice else to_int(case.get("est_pages"))
+    pages = billed or to_int(case.get("est_pages"))
     made: list[Path] = []
 
     def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "") -> None:
@@ -43,14 +45,18 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
         except Exception as e:  # the files are made; a records problem must not lose them
             log_error("could not add to the records", e)
 
-    if "agreement" in outputs:
-        for atty in case.orderers():
-            record("agreement", fill(case, atty, s, out_dir, dated), atty)
-    if "mofr" in outputs:
-        record("mofr", fill_mofr(case, s, out_dir, dated, pages=str(pages) if invoice else ""))
-    if "invoice" in outputs:
-        quotes = job_quotes(case, s, invoice)
-        for atty in case.orderers():
-            path, number = make_invoice(case, atty, s, out_dir, invoice, ledger, dated, quotes)
-            record("invoice", path, atty, number)
+    try:
+        if "agreement" in outputs:
+            for atty in case.orderers():
+                record("agreement", fill(case, atty, s, out_dir, dated), atty)
+        if "mofr" in outputs:
+            record("mofr", fill_mofr(case, s, out_dir, dated, pages=str(billed) if billed else ""))
+        if "invoice" in outputs:
+            quotes = job_quotes(case, s, invoice)
+            for atty in case.orderers():
+                path, number = make_invoice(case, atty, s, out_dir, invoice, ledger, dated, quotes)
+                record("invoice", path, atty, number)
+    except Exception as e:
+        e.made = made  # what was saved before the problem, so the caller can say so
+        raise
     return made

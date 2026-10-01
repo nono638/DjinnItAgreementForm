@@ -17,7 +17,7 @@ from .dates import us_date
 from .fill import output_name, save_output
 from .invoice_calc import Quote, fmt, quotes_for
 from .models import Attorney, CaseInfo
-from .records import Invoice, Ledger
+from .records import NUMBER_LOCK, Invoice, Ledger
 from .settings import Settings
 
 PAGE = pymupdf.paper_rect("letter")
@@ -140,17 +140,18 @@ def make_invoice(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Pa
                  ledger: Ledger, dated: bool = False, quotes: list[Quote] | None = None) -> tuple[Path, str]:
     """Numbers, draws and records one invoice; returns (file, invoice number)."""
     quotes = quotes or job_quotes(case, s, opts)
-    number, year, seq = ledger.next_invoice_no(s.invoice_number_format)
-    name = output_name(case, atty, s, dated, pattern=s.invoice_filename_pattern, fallback=f"Invoice {number}",
-                       number=number)
-    out = render(case, atty, s, quotes, number, Path(out_dir) / name)
-    ledger.add_invoice(Invoice(
-        invoice_no=number, created=date.today().isoformat(), case_name=case.get("case_name"),
-        index_no=case.get("index_no"), dates=case.get("dates"), judge=case.get("judge"),
-        bill_to=atty.name if atty else "", firm=atty.firm if atty else "", email=atty.email if atty else "",
-        pages=opts.pages, parties=opts.parties,
-        amounts={q.speed: str(q.per_party) for q in quotes}, billed_speed=quotes[0].speed if quotes else "",
-        file_path=str(out)), year, seq)
+    with NUMBER_LOCK:  # no other thread may take the same number before this invoice is in the records
+        number, year, seq = ledger.next_invoice_no(s.invoice_number_format)
+        name = output_name(case, atty, s, dated, pattern=s.invoice_filename_pattern,
+                           fallback=f"Invoice {number}", number=number)
+        out = render(case, atty, s, quotes, number, Path(out_dir) / name)
+        ledger.add_invoice(Invoice(
+            invoice_no=number, created=date.today().isoformat(), case_name=case.get("case_name"),
+            index_no=case.get("index_no"), dates=case.get("dates"), judge=case.get("judge"),
+            bill_to=atty.name if atty else "", firm=atty.firm if atty else "", email=atty.email if atty else "",
+            pages=opts.pages, parties=opts.parties,
+            amounts={q.speed: str(q.per_party) for q in quotes}, billed_speed=quotes[0].speed if quotes else "",
+            file_path=str(out)), year, seq)
     return out, number
 
 

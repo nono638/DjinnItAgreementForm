@@ -202,6 +202,11 @@ class Settings:
             s.include_instructions = True
             if s.filename_pattern == OLD_FILENAME_PATTERN:
                 s.filename_pattern = FILENAME_PATTERN
-        s.outputs = [o for o in s.outputs if o in OUTPUTS]  # v4 added outputs; drop unknown ones
+        # v4 added outputs; unknown ones are dropped. Lists and tables keep only entries of the right kind.
+        s.outputs = [o for o in s.outputs if isinstance(o, str) and o in OUTPUTS]
+        s.invoice_speeds = [x for x in s.invoice_speeds if isinstance(x, str)] or cls().invoice_speeds
+        s.invoice_turnaround = {k: v for k, v in s.invoice_turnaround.items()
+                                if isinstance(k, str) and isinstance(v, str)}
+        s.invoice_index_threshold = max(1, s.invoice_index_threshold)
         s.settings_version = cls.settings_version
         return s

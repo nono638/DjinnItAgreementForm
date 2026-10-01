@@ -17,6 +17,8 @@ import csv
 import html
 import json
 import sqlite3
+import threading
+from contextlib import closing
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime
 from decimal import Decimal
@@ -27,6 +29,10 @@ from .invoice_calc import fmt, money
 from .log import error as log_error
 
 STATUSES = ("open", "paid", "void")
+# One writer at a time: the CSV copies are rewritten whole, and an invoice's number is taken and its row
+# added in one step (the batch runs on another thread than the window).
+_MIRROR_LOCK = threading.Lock()
+NUMBER_LOCK = threading.RLock()
 KINDS = {"agreement": "Minute agreement", "mofr": "MOFR", "invoice": "Invoice"}
 
 _SCHEMA = """
@@ -192,7 +198,7 @@ class Ledger:
         self.path = Path(path) if path else default_db()
         self.mirror_dir = mirror_dir
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._db() as db:
+        with closing(self._db()) as db:
             db.executescript(_SCHEMA)
 
     def _db(self) -> sqlite3.Connection:
@@ -233,11 +239,17 @@ class Ledger:
         year = (today or date.today()).year
         seq = self._next_seq(year)
         taken = {r[0] for r in self._rows("SELECT invoice_no FROM invoices")}
-        while True:
+
+        def number(pattern: str, seq: int) -> str:
             try:
-                no = pattern.format(year=year, seq=seq, yy=year % 100)
-            except (KeyError, IndexError, ValueError):  # a bad custom pattern
-                no = f"{year}-{seq:04}"
+                return pattern.format(year=year, seq=seq, yy=year % 100).strip() or f"{year}-{seq:04}"
+            except Exception:  # a bad custom pattern
+                return f"{year}-{seq:04}"
+
+        if number(pattern, 1) == number(pattern, 2):  # no {seq}: every invoice would get the same number
+            pattern += "-{seq:04}"
+        while True:
+            no = number(pattern, seq)
             if no not in taken:
                 return no, year, seq
             seq += 1
@@ -328,8 +340,9 @@ class Ledger:
         if self.mirror_dir is None:
             return
         try:
-            self.export_csv(self.mirror_dir)
-        except OSError as e:
+            with _MIRROR_LOCK:
+                self.export_csv(self.mirror_dir)
+        except Exception as e:  # the change itself is saved; the copies catch up with the next one
             log_error("could not update the CSV copies of the records", e)
 
     def export_csv(self, folder: Path) -> list[Path]:

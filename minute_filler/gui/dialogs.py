@@ -356,9 +356,10 @@ class SettingsDialog(QDialog):
             return
         final = signature_path()
         try:
-            final.unlink(missing_ok=True)
             if self._sig_new:
-                Path(self._sig_new).replace(final)
+                Path(self._sig_new).replace(final)  # in one step: the old picture stays if this fails
+            else:
+                final.unlink(missing_ok=True)
         except OSError:
             return
         self.s.signature_image = str(final) if self._sig_new else ""

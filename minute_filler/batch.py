@@ -199,6 +199,7 @@ def remerge(job: Job, s: Settings) -> None:
             a.checked = False
     if job.batch:
         _all_dates(new, job)
+    _all_pages(new, job)
     refresh_rate(new, s)  # a speed chosen by the user was restored after the defaults were applied
     if s.fill_delivery_date:
         refresh_delivery_date(new, s)
@@ -221,6 +222,16 @@ def _all_dates(case: CaseInfo, job: Job) -> None:
         value = ", ".join(sorted(every, key=_date_key))
         case.fields["dates"] = FieldState(value, fs.source or SRC_REGEX, 0.55,
                                           [value] + [a for a in fs.alternatives if a != value])
+
+
+def _all_pages(case: CaseInfo, job: Job) -> None:
+    """Several transcripts in one job (the days of a trial, volumes): their pages are added up."""
+    fs = case.fields["est_pages"]
+    counts = [d.ing.page_count for d in job.docs if d.regex.doc_kind == "transcript" and d.ing.kind == "pdf"]
+    if len(counts) > 1 and fs.source != SRC_USER:
+        total = str(sum(counts))
+        case.fields["est_pages"] = FieldState(total, SRC_REGEX, 0.9,
+                                              [total] + [a for a in fs.alternatives if a != total])
 
 
 def group(docs: list[Doc], s: Settings, jobs: list[Job] | None = None) -> list[Job]:
@@ -344,7 +355,9 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             job.error = "" if want == outputs else "no invoice: no transcript PDF among the inputs"
             done += job.saved
         except Exception as e:
+            job.saved = list(getattr(e, "made", []))  # what was made before the problem
             job.error = f"{type(e).__name__}: {e}"
+            done += job.saved
             log_error("could not save the forms of a job", e)
     log.info("saved %d form(s) for %d job(s)", len(done), len(jobs))
     return done

@@ -249,7 +249,7 @@ def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool 
             attorney=(atty.name or atty.firm) if atty else "",
             date=day, **extra,
         )
-    except (KeyError, IndexError, ValueError):  # a bad custom pattern
+    except (KeyError, IndexError, ValueError, AttributeError, TypeError):  # a bad custom pattern
         name = f"{fallback} - {case.get('index_no').replace('/', '-')}"
     if dated and day and "{date}" not in pattern:
         name += f" - {day}"

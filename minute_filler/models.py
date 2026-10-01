@@ -72,9 +72,9 @@ class Attorney:
 
 
 def to_int(v, default: int = 0) -> int:
-    """'30' -> 30; blank or unreadable -> default."""
+    """'30' -> 30, '1,200' -> 1200; blank or unreadable -> default."""
     try:
-        return int(str(v).strip())
+        return int(str(v).replace(",", "").strip())
     except ValueError:
         return default
 

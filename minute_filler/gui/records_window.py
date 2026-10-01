@@ -5,7 +5,7 @@ import calendar
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..deliver import ledger_for
+from ..fill import safe_filename
 from ..invoice_calc import fmt, money
 from ..log import error as log_error
 from ..records import KINDS, Invoice, _month_name, summarize, us_date
@@ -186,7 +187,7 @@ class RecordsWindow(QDialog):
         inner = QTabWidget()
         self.inv_table = _table(INV_COLS)
         self.inv_table.itemChanged.connect(self._paid_toggled)
-        self.inv_table.itemDoubleClicked.connect(lambda it: self._open_invoice(it.row()))
+        self.inv_table.itemDoubleClicked.connect(lambda it: self._open_invoice(self._inv_at(it.row())))
         self.inv_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.inv_table.customContextMenuRequested.connect(self._invoice_menu)
         self.inv_table.setToolTip("Tick Paid when an invoice is paid · double-click opens the PDF · "
@@ -232,6 +233,7 @@ class RecordsWindow(QDialog):
     # ------------------------------------------------------------ data
     def reload(self) -> None:
         """Re-reads the records (after new files were made) and keeps the filters chosen."""
+        self.ledger = ledger_for(self.s)  # the records folder may have been changed in Settings
         years = self.ledger.years()
         this_year = date.today().year
         year_items = [("All years", 0)] + [(str(y), y) for y in sorted(set(years) | {this_year}, reverse=True)]
@@ -271,7 +273,7 @@ class RecordsWindow(QDialog):
                      _item(inv.client if not inv.firm else f"{inv.firm} ({inv.bill_to})" if inv.bill_to else inv.firm),
                      _item(inv.pages, True), _item(inv.offered_text()), _money_item(inv.billed), _item(status),
                      _item(us_date(inv.paid_date))]
-            cells[8].setForeground(QColor(STATUS_COLORS[inv.status]))
+            cells[8].setForeground(QColor(STATUS_COLORS.get(inv.status, STATUS_COLORS["void"])))
             for c, it in enumerate(cells, 1):
                 t.setItem(r, c, it)
         t.blockSignals(False)
@@ -335,15 +337,19 @@ class RecordsWindow(QDialog):
     def _paid_toggled(self, item: QTableWidgetItem) -> None:
         if item.column() != 0:
             return
-        inv = self._inv_at(item.row())
-        if inv is None:
-            return
+        no, paid = item.data(Qt.UserRole), item.checkState() == Qt.Checked
+        # After the click has been dealt with, not in the middle of it: the answer rebuilds this table.
+        QTimer.singleShot(0, lambda: self._set_paid(no, paid))
+
+    def _set_paid(self, invoice_no: str, paid: bool) -> None:
+        """Marks an invoice paid (asking at which speed) or not paid, then shows the list afresh."""
         try:
-            if item.checkState() == Qt.Checked and inv.status != "paid":
+            inv = self.ledger.invoice(invoice_no)  # as it is now, whatever the table showed
+            if inv is not None and paid and inv.status != "paid":
                 dlg = PaidDialog(inv, self)
                 if dlg.exec() == QDialog.Accepted:
                     self.ledger.mark_paid(inv.invoice_no, *dlg.values())
-            elif item.checkState() == Qt.Unchecked and inv.status == "paid":
+            elif inv is not None and not paid and inv.status == "paid":
                 if QMessageBox.question(self, "Not paid", f"Mark invoice {inv.invoice_no} as not paid?") \
                         == QMessageBox.Yes:
                     self.ledger.mark_unpaid(inv.invoice_no)
@@ -352,8 +358,7 @@ class RecordsWindow(QDialog):
             QMessageBox.warning(self, "Could not save", f"{type(e).__name__}: {e}")
         self.show_invoices()
 
-    def _open_invoice(self, row: int) -> None:
-        inv = self._inv_at(row)
+    def _open_invoice(self, inv: Invoice | None) -> None:
         if inv is None:
             return
         if inv.file_path and Path(inv.file_path).exists():
@@ -368,13 +373,13 @@ class RecordsWindow(QDialog):
         if inv is None:
             return
         m = QMenu(self)
-        m.addAction("Open the PDF", lambda: self._open_invoice(row))
+        m.addAction("Open the PDF", lambda: self._open_invoice(inv))
         m.addAction("Show in folder", lambda: open_path(str(Path(inv.file_path).parent)) if inv.file_path else None)
         m.addSeparator()
         if inv.status != "paid":
-            m.addAction("Mark paid…", lambda: self.inv_table.item(row, 0).setCheckState(Qt.Checked))
+            m.addAction("Mark paid…", lambda: self._set_paid(inv.invoice_no, True))
         else:
-            m.addAction("Mark not paid", lambda: self.inv_table.item(row, 0).setCheckState(Qt.Unchecked))
+            m.addAction("Mark not paid", lambda: self._set_paid(inv.invoice_no, False))
         if inv.status != "void":
             m.addAction("Void (cancelled, not counted)", lambda: self._set_void(inv))
         else:
@@ -413,7 +418,7 @@ class RecordsWindow(QDialog):
     def _ask_path(self, title: str, name: str, filt: str) -> Path | None:
         folder = self.s.records_folder()
         folder.mkdir(parents=True, exist_ok=True)
-        p, _ = QFileDialog.getSaveFileName(self, title, str(folder / name), filt)
+        p, _ = QFileDialog.getSaveFileName(self, title, str(folder / safe_filename(name)), filt)
         return Path(p) if p else None
 
     def export_html(self) -> None:
