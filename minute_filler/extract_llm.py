@@ -1,8 +1,9 @@
 """Optional second opinion from a local Ollama model (default gemma4:e2b).
 
-The model gets the text (e-mail body, OCR of a photo, transcript cover page)
-and returns JSON constrained by a schema. Its answers are validated and given
-a lower confidence than labelled regex hits, so they mostly fill gaps.
+The model gets the text (e-mail body, OCR of a photo, a transcript's title page(s))
+and answers in JSON shaped like TEMPLATE (or, if that reply can't be read, constrained
+by SCHEMA). Its answers are checked against the text and given a lower confidence than
+labelled regex hits, so they mostly fill gaps.
 If there is no text at all (OCR unavailable), the image itself is sent.
 """
 from __future__ import annotations
@@ -16,9 +17,10 @@ from .ingest import Ingested
 from .models import Attorney, Extraction, PROC_TYPES, SRC_AI
 from .settings import Settings
 
-MAX_CHARS = 6000
-AI_CONF = 0.5
+MAX_CHARS = 6000  # the input text is cut here, to keep the question short for a small local model
+AI_CONF = 0.5     # below a labelled rules hit (0.8-0.95), so the AI's answer mostly fills gaps
 
+# JSON schema for the slower fallback call (Ollama's `format`)
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -71,6 +73,7 @@ INPUT:
 \"\"\"
 """
 
+# The reply's shape, shown to the model in the prompt (for the fast call: gemma4 ignores SCHEMA when not thinking)
 TEMPLATE = json.dumps({
     "court": "", "county": "", "part": "", "judge": "", "case_name": "", "index_number": "",
     "proceeding_dates": ["M/D/YYYY"], "proceeding_types": ["one of " + "/".join(PROC_TYPES) + "/Other"],
@@ -81,7 +84,8 @@ TEMPLATE = json.dumps({
 
 
 def parse_json(text: str) -> dict:
-    """Lenient: strips ``` fences and prose around the first {...} object."""
+    """The JSON object in a model's reply. Lenient: strips ``` fences and prose around the first {...}
+    object, and blanks filler answers such as "N/A" (see _blank_na). Raises ValueError when there is none."""
     text = re.sub(r"```(?:json)?", "", text or "")
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
@@ -91,6 +95,8 @@ def parse_json(text: str) -> dict:
 
 
 def _blank_na(v):
+    """Small models write "N/A", "unknown" or the template's own "M/D/YYYY" for a missing value: these
+    become "", and blank list items are dropped, all the way down."""
     if isinstance(v, dict):
         return {k: _blank_na(x) for k, x in v.items()}
     if isinstance(v, list):
@@ -100,22 +106,39 @@ def _blank_na(v):
     return v
 
 
+def client_options(host: str) -> dict:
+    """Options for ollama.Client (passed on to httpx): Ollama on this computer is reached directly, not through
+    a proxy set up in Windows (which may not pass "localhost" on)."""
+    name = re.sub(r"^\w+://", "", (host or "").strip()).split("/")[0].lower()
+    name = name.rsplit(":", 1)[0] if name.count(":") == 1 else name  # without the port
+    local = name in ("", "localhost", "127.0.0.1", "[::1]", "::1", "0.0.0.0") or name.startswith("[::1]")
+    return {"trust_env": False} if local else {}
+
+
 class OllamaExtractor:
+    """Asks the Ollama model in Settings about one document at a time and returns what it found as an
+    Extraction, checked against the document's text."""
     def __init__(self, settings: Settings):
         self.s = settings
         self._client = None
 
     @property
     def client(self):
+        """The ollama.Client for Settings' host, made on first use (with the AI timeout)."""
         if self._client is None:
             import ollama
-            self._client = ollama.Client(host=self.s.ollama_host, timeout=self.s.ai_timeout)
+            self._client = ollama.Client(host=self.s.ollama_host, timeout=self.s.ai_timeout,
+                                         **client_options(self.s.ollama_host))
         return self._client
 
     def installed_models(self, timeout: float = 3) -> list[str]:
         """The models Ollama has installed; raises when Ollama doesn't answer within `timeout` seconds."""
         import ollama
-        return [m.model for m in ollama.Client(host=self.s.ollama_host, timeout=timeout).list().models]
+        c = ollama.Client(host=self.s.ollama_host, timeout=timeout, **client_options(self.s.ollama_host))
+        try:
+            return [m.model for m in c.list().models]
+        finally:
+            c.close()
 
     def status(self) -> tuple[bool, str]:
         """(ok, message) - checks that Ollama runs and the model is installed."""
@@ -129,6 +152,7 @@ class OllamaExtractor:
         return True, f"AI ready ({want})"
 
     def extract(self, ing: Ingested) -> Extraction:
+        """The model's reading of one document. Raises when Ollama fails or the reply has no JSON."""
         from datetime import date
         text = ing.text.strip()
         if ing.kind == "pdf":  # a transcript's title page(s) carry everything
@@ -170,9 +194,12 @@ class OllamaExtractor:
             return not check or not toks or sum(t in src_lower for t in toks) / len(toks) >= 0.6
 
         def items(v) -> list:
+            """A list answer as it is; a single value as a list of one."""
             return v if isinstance(v, list) else [v] if v else []
 
         def tidy(v) -> str:
+            """An answer as one clean string: lists joined, anything but text or a number blank, and
+            'dana smith' or 'DANA SMITH' in Title Case."""
             if isinstance(v, list):
                 v = ", ".join(x for x in v if isinstance(x, str) and x)
             if not isinstance(v, (str, int, float)) or isinstance(v, bool):

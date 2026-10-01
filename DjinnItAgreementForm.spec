@@ -24,7 +24,7 @@ version_info = VSVersionInfo(
     ],
 )
 
-hidden = collect_submodules("winrt") + ["openpyxl"]  # openpyxl: imported only when exporting
+hidden = collect_submodules("winrt") + ["openpyxl"]  # openpyxl: imported only when needed (run sheet, Excel export)
 
 a = Analysis(
     ["minute_filler/main.py"],

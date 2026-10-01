@@ -10,7 +10,7 @@ if not exist "%ISCC%" (
   pause & exit /b 1
 )
 ".venv\Scripts\python.exe" -m pytest -q || (echo Tests failed - not building. & pause & exit /b 1)
-rem Each new build gets the next version number (unless this version was never built yet).
+rem A build after a release gets the next version number (a version not yet released on GitHub keeps its number).
 rem For a bigger step run first:  python tools\bump_version.py minor   (or major, or an exact number)
 ".venv\Scripts\python.exe" tools\bump_version.py auto
 for /f "tokens=2 delims==" %%V in ('findstr /r "__version__" minute_filler\__init__.py') do set "VER=%%~V"

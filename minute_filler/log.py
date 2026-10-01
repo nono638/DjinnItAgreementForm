@@ -25,7 +25,10 @@ log = logging.getLogger(NAME)
 _handler: RotatingFileHandler | None = None
 on_crash: Callable[[str], None] | None = None  # the window sets this to tell the user
 
-_FILES = r"pdf|docx?|txt|eml|msg|html?|jpe?g|png|gif|bmp|tiff?|webp|heic|csv|md"
+_FILES = r"pdf|docx?|txt|eml|msg|html?|jpe?g|png|gif|bmp|tiff?|webp|heic|csv|md|xlsx|xlsm|xls"
+# In this order: a full path to a file keeps only its type, then other paths go, then a bare file name
+# (which is often the case name: "Jane Roe v. Sam Poe.pdf" -> "<file.pdf>"), then e-mail addresses,
+# index and other long numbers, and phone numbers.
 _SCRUBS = [
     (re.compile(rf"[A-Za-z]:\\[^\"'<>|\n]*?\.({_FILES})\b", re.I), lambda m: f"<file.{m[1].lower()}>"),
     (re.compile(r"[A-Za-z]:\\[^\s\"'<>|]+"), "<path>"),
@@ -45,10 +48,13 @@ def scrub(text: object, limit: int = 300) -> str:
 
 
 def describe(exc: BaseException) -> str:
+    """An error as 'ValueError: ...', scrubbed, for the log and for messages to the user."""
     return scrub(f"{type(exc).__name__}: {exc}")
 
 
 class _Formatter(logging.Formatter):
+    """Writes tracebacks short and private: file, line and function only, no folders (a folder can name
+    the user or a case)."""
     def formatException(self, ei) -> str:
         # where it happened (file, line, function - no source text, no folders), then the scrubbed message
         etype, exc, tb = ei
@@ -57,16 +63,19 @@ class _Formatter(logging.Formatter):
 
 
 def log_dir() -> Path:
+    """The logs folder in the settings folder, created when missing."""
     d = settings_dir() / "logs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def log_path() -> Path:
+    """The current log file (older copies sit next to it as app.log.1 and app.log.2)."""
     return log_dir() / "app.log"
 
 
 def windows_version() -> str:
+    """'Windows 10.0 build 26200, AMD64'; on another system, whatever platform.platform() says."""
     try:
         v = sys.getwindowsversion()
         return f"Windows {v.major}.{v.minor} build {v.build}, {platform.machine()}"
@@ -108,6 +117,8 @@ def shutdown() -> None:
 
 
 def _excepthook(etype, exc, tb) -> None:
+    """Logs an error nothing caught (in any thread) and tells the window through on_crash. Ctrl+C and
+    sys.exit() are not errors."""
     if issubclass(etype, (KeyboardInterrupt, SystemExit)):
         return
     log.error("unexpected error", exc_info=(etype, exc, tb))
@@ -124,6 +135,7 @@ def error(what: str, exc: BaseException) -> None:
 
 
 def recent(lines: int = 60) -> str:
+    """The last `lines` lines of the log, or "(no log yet)"."""
     try:
         text = log_path().read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:

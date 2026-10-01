@@ -39,6 +39,8 @@ SRC_USER, SRC_REGEX, SRC_AI, SRC_DERIVED, SRC_DEFAULT = "you", "regex", "AI", "d
 
 @dataclass
 class Candidate:
+    """One proposed value for a field: where it came from (SRC_*), how sure the extractor is (0 to 1),
+    and an optional note shown with it ("from file name")."""
     value: str
     source: str
     confidence: float = 0.5
@@ -47,17 +49,20 @@ class Candidate:
 
 @dataclass
 class Attorney:
+    """An attorney or firm found in the inputs. Every ticked (checked) one orders the minutes and gets
+    their own agreement and invoice."""
     name: str = ""
     firm: str = ""
     address: str = ""  # multi-line
     phone: str = ""
     fax: str = ""
     email: str = ""
-    party: str = ""
-    source: str = ""
+    party: str = ""    # who they represent ("Plaintiff (Jane Roe)")
+    source: str = ""   # SRC_REGEX or SRC_AI
     checked: bool = True
 
     def key(self) -> str:
+        """Name (or firm) for comparing entries: 'Dana Smith, Esq.' -> 'dana smith esq'."""
         return (self.name or self.firm).lower().replace(".", "").replace(",", "").strip()
 
     def is_placeholder(self) -> bool:
@@ -89,6 +94,8 @@ class Extraction:
     doc_kind: str = ""  # "transcript", "invoice", "email" or "text" (set by the rules extractor)
 
     def add(self, key: str, value: str, source: str, confidence: float, note: str = "") -> None:
+        """Adds a candidate for field `key`. Blank values are skipped; a value already there (in any
+        case) only has its confidence raised."""
         value = (value or "").strip()
         if not value:
             return
@@ -100,11 +107,13 @@ class Extraction:
         lst.append(Candidate(value, source, confidence, note))
 
     def add_proc(self, ptype: str, confidence: float) -> None:
+        """Proposes a proceeding type (one of PROC_TYPES), keeping the highest confidence seen."""
         self.proc_types[ptype] = max(self.proc_types.get(ptype, 0.0), confidence)
 
 
 @dataclass
 class FieldState:
+    """The value chosen for one field, where it came from, and the other values offered in the window."""
     value: str = ""
     source: str = ""
     confidence: float = 0.0
@@ -112,6 +121,7 @@ class FieldState:
 
     @property
     def needs_review(self) -> bool:
+        """A value worth a second look: the extractors weren't sure of it, or found rivals."""
         return bool(self.value) and (self.confidence < 0.6 or len(self.alternatives) > 1)
 
 
@@ -124,9 +134,11 @@ class CaseInfo:
     notes: list[str] = field(default_factory=list)
 
     def get(self, key: str) -> str:
+        """The value of a field in FIELD_KEYS."""
         return self.fields[key].value
 
     def set(self, key: str, value: str, source: str = SRC_USER) -> None:
+        """Sets a field as certain (confidence 1.0); by default as typed by the user."""
         fs = self.fields[key]
         fs.value, fs.source, fs.confidence = value, source, 1.0
 
@@ -135,4 +147,5 @@ class CaseInfo:
         return [a for a in self.attorneys if a.checked] or [None]
 
     def missing_required(self) -> list[str]:
+        """The REQUIRED_KEYS that are still blank."""
         return [k for k in REQUIRED_KEYS if not self.get(k).strip()]

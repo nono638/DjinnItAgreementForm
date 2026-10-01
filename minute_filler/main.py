@@ -1,4 +1,9 @@
-"""Entry point: python -m minute_filler.main  (or the packaged .exe)."""
+"""Entry point: python -m minute_filler.main  (or the packaged .exe).
+
+Opens the window, with any files or folders given on the command line ("Open with", dropped on the exe).
+Without a window: --selftest OUTDIR files... checks a build, and --batch OUTDIR [--outputs ...] files...
+makes the forms of a whole folder (see selftest and batch).
+"""
 from __future__ import annotations
 
 import sys
@@ -6,7 +11,8 @@ from pathlib import Path
 
 
 def selftest(out_dir: str, files: list[str]) -> int:
-    """Headless check of a build: extract + fill each file, write a report. No settings are touched."""
+    """Headless check of a build: reads each file and fills its agreement on both forms (clean and original),
+    then writes selftest.json into out_dir. The default settings are used; the saved ones are not touched."""
     import json
     from minute_filler.extract_regex import RegexExtractor
     from minute_filler.fill import fill_all
@@ -35,13 +41,19 @@ def selftest(out_dir: str, files: list[str]) -> int:
 
 
 def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> int:
-    """Headless batch: --batch OUTDIR [--outputs agreement,mofr,invoice] files/folders... fills one set of
+    """Headless batch: --batch OUTDIR [--outputs agreement,mofr,invoice,runsheet] files/folders... fills one set of
     forms per case and date with the saved settings, and writes batch.json (what was grouped, saved or
-    unreadable). Without --outputs, the outputs ticked in the window are made."""
+    unreadable). Without --outputs, the outputs ticked in the window are made. Returns 0, 1 when a file or
+    job had a problem, or 2 for an unknown output."""
     import json
     from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
-    from minute_filler.settings import Settings
+    from minute_filler.settings import OUTPUTS, Settings
 
+    unknown = [o for o in outputs or [] if o not in OUTPUTS]
+    if unknown:  # a typo ("runsheets") must not quietly make nothing
+        if sys.stderr:
+            print(f"Unknown output(s): {', '.join(unknown)}. The outputs are: {', '.join(OUTPUTS)}.", file=sys.stderr)
+        return 2
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     s = Settings.load()
@@ -55,6 +67,13 @@ def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> i
          "forms": [p.name for p in j.saved], "error": j.error} for j in jobs]}
     (out / "batch.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return 1 if errors or any(j.error for j in jobs) else 0
+
+
+def app_icon() -> Path:
+    """The window icon, from the package's assets folder (in the built program this script is not in the
+    package's folder, so a path next to it would miss)."""
+    import minute_filler
+    return Path(minute_filler.__file__).resolve().parent / "assets" / "app.ico"
 
 
 def _tell_user_about_crashes(app) -> None:
@@ -92,6 +111,7 @@ def _tell_user_about_crashes(app) -> None:
 
 
 def main() -> int:
+    """Runs --selftest or --batch, else the window; returns the exit code."""
     from minute_filler import log
     log.setup()
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
@@ -119,7 +139,7 @@ def main() -> int:
     app.setApplicationName("DjinnItAgreementForm")
     _tell_user_about_crashes(app)
     app.setStyle("Fusion")
-    icon = Path(__file__).with_name("assets") / "app.ico"
+    icon = app_icon()
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
     settings = Settings.load()

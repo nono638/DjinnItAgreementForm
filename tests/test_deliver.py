@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
-from minute_filler.deliver import NO_TRANSCRIPT, generate, ledger_for
+from minute_filler.deliver import NO_INVOICE, generate, ledger_for
 from minute_filler.settings import Settings
 
 from helpers import pat_settings, transcript_pdf
@@ -40,7 +40,7 @@ def test_only_a_transcript_can_be_invoiced(folder, s):
     assert roe.invoice_pages() == 30  # the transcript's own count fills the Pages field
     assert smith.docs[0].regex.doc_kind == "text" and smith.transcript_pages() == 0
     assert smith.invoice_pages() == 0
-    assert smith.output_problems(["invoice"]) == [NO_TRANSCRIPT]
+    assert smith.output_problems(["invoice"]) == [NO_INVOICE]
     roe.case.set("est_pages", "28")  # an edited page count is what gets billed
     assert roe.invoice_pages() == 28
 
@@ -77,6 +77,7 @@ def test_generate_without_pages_refuses_an_invoice(s, tmp_path):
 
 
 def test_settings_v3_upgrade(tmp_path):
+    """A version 3 settings file loads as version 4: unknown outputs are dropped and the invoice defaults kick in."""
     import json
     s = Settings()
     s.path.write_text(json.dumps({"settings_version": 3, "outputs": ["agreement", "bogus", "mofr"],

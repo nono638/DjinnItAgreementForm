@@ -18,11 +18,13 @@ HEIGHT_ABOVE_LINE, DEPTH_BELOW_LINE = 28, 3  # points; the space the forms leave
 
 
 def signature_path() -> Path:
+    """Where the prepared signature is kept: signature.png next to settings.json."""
     return settings_dir() / "signature.png"
 
 
 def prepare(src: str | Path, dst: str | Path) -> Path:
-    """Writes `src` (photo, scan, PNG...) to `dst` as a cropped PNG with a transparent background."""
+    """Writes `src` (photo, scan, PNG...) to `dst` as a cropped PNG with a transparent background, at most
+    MAX_WIDTH pixels wide, and returns `dst`. Raises ValueError when the picture has no ink on it."""
     with Image.open(src) as opened:
         img = ImageOps.exif_transpose(opened).convert("RGBA")
     paper = Image.new("RGBA", img.size, "white")

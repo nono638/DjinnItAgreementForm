@@ -120,6 +120,8 @@ _CHECK_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path
 
 
 def _check_icon_path() -> str:
+    """Writes the tick-mark SVG to the settings folder once and returns its path with forward slashes.
+    A Qt style sheet can only load an image from a file, and url() wants "/" even on Windows."""
     from ..settings import settings_dir
     p = settings_dir() / "check.svg"
     if not p.exists():
@@ -128,6 +130,8 @@ def _check_icon_path() -> str:
 
 
 def is_dark(theme: str) -> bool:
+    """True for "dark", False for "light". Anything else (the "system" setting) follows the system color
+    scheme, and falls back to light when Qt cannot report it."""
     if theme in ("light", "dark"):
         return theme == "dark"
     try:
@@ -137,6 +141,9 @@ def is_dark(theme: str) -> bool:
 
 
 def apply_theme(app, theme: str) -> dict:
+    """Sets the app's palette and style sheet for theme ("light", "dark" or "system") and returns the color
+    tokens used. The palette is set as well as
+    the style sheet because some widgets (placeholders, links) read only the palette."""
     tokens = DARK if is_dark(theme) else LIGHT
     qss = QSS
     for k, v in tokens.items():

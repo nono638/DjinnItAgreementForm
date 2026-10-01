@@ -1,6 +1,6 @@
 # DjinnItAgreementForm
 
-A Windows app for New York court reporters. It fills in the UCS **Court Reporter Minute Agreement Form** (Private Party Transactions) and the **Minute Order Form/Receipt (MOFR)** for you, makes **invoices** from transcripts, and keeps a record of everything it made, with a dashboard of what you billed and what was paid.
+A Windows app for New York court reporters. It fills in the UCS **Court Reporter Minute Agreement Form** (Private Party Transactions) and the **Minute Order Form/Receipt (MOFR)** for you, makes **invoices** from transcripts, keeps a trial's **run sheet** (which reporter wrote which pages), and keeps a record of everything it made, with a dashboard of what you billed and what was paid.
 
 Drop in a transcript, invoice, or photo of a court document, or paste an e-mail. The app finds the court, part, judge, case name, index number, dates, proceeding type and attorneys, shows everything for review, and saves a filled PDF.
 
@@ -17,8 +17,9 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 - **Rate sheets.** Pick your price list (private, city, …) and delivery speed from dropdowns. The rate, delivery checkbox and estimated delivery date follow automatically.
 - **One form per attorney.** Tick several attorneys to get a separate PDF for each.
 - **Batches.** Drop many documents, or a whole folder, at once. Documents about the same case and date are combined, so each order gets one form.
-- **Choose what to make:** tick *Minute agreement*, *MOFR* and/or *Invoice* at the bottom of the window. Your choice is remembered.
+- **Choose what to make:** tick *Minute agreement*, *MOFR*, *Invoice* and/or *Run sheet* at the bottom of the window. Your choice is remembered.
 - **Invoices from transcripts.** Drop a transcript PDF and the invoice is priced from its page count and your rate sheet: one original, a copy (and e-mailed copy) for each ordering party, and an index for long transcripts, split between the parties. By default it lists Regular, Expedited and Daily so the attorney can choose ("choice" invoice), with your turnaround times and payment instructions (Settings → Invoice). Invoices need a transcript, because the page count is what's billed.
+- **Run sheets for shared trials.** When reporters take turns, each puts their initials at the foot of the pages they write. The app reads them and keeps the trial's run sheet in Excel: a row per take with the date, reporter, pages written, start and end page and the witness who took the stand. Filter by reporter for their total pages; the *By Reporter* sheet adds them up.
 - **Records and dashboard.** Every file made is logged. **Records** (Ctrl+R) shows your invoices with totals billed, paid and outstanding, filtered by year, month, firm or status, broken down by firm and by month. Tick **Paid** when an invoice is paid, and say which speed they chose. Export a report (HTML), an Excel workbook or CSV files at any time.
 - **Three agreement forms to choose from:** the court's own fillable UCS form (the default), a clean, re-typeset version of it (with room for a long case name, signature/date fields, fax and email), or the original 1999 scan.
 
@@ -43,11 +44,11 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
    - Each field has a badge showing where its value came from: **regex** (found in the document), **AI**, **default** (your settings), **derived** (calculated), or **you**.
    - Amber fields are guesses. A ▾ button lists other candidates.
 3. **Pick the rate sheet and speed**, then tick the attorney(s) who ordered.
-4. **Tick what to make** (minute agreement, MOFR, invoice), then **Generate** (Ctrl+Enter). The PDFs are saved next to your document, or to the folder chosen in Settings, and open automatically.
+4. **Tick what to make** (minute agreement, MOFR, invoice, run sheet), then **Generate** (Ctrl+Enter). The PDFs are saved next to your document, or to the folder chosen in Settings, and open automatically.
 
 ## Invoices and records
 
-An invoice can be made when one of the job's inputs is a **transcript PDF**: its page count is billed (you can change it in *Est. number of pages*). Several transcripts in one job, such as the days of a trial, are added up. A title that runs over two pages ("Title continues on next page") is read to its end, so the attorneys listed on the second page are found too. One invoice is made for each ticked attorney, numbered 2026-0001, 2026-0002, … (the format is in Settings → Invoice). The footer shows the prices before you generate, and lets you change the number of ordering parties or bill a single speed instead of offering every speed.
+An invoice can be made when one of the job's inputs is a **transcript PDF**: its pages are billed (you can change the number in *Est. number of pages*). The word index printed after a transcript (Min-U-Script) is not counted. Several transcripts in one job, such as the days of a trial, are added up. A title that runs over two pages ("Title continues on next page") is read to its end, so the attorneys listed on the second page are found too. One invoice is made for each ticked attorney, numbered 2026-0001, 2026-0002, … (the format is in Settings → Invoice). The footer shows the prices before you generate, and lets you change the number of ordering parties or bill a single speed instead of offering every speed.
 
 The price of each speed, per page of the transcript, is:
 
@@ -75,6 +76,22 @@ The Minute Order Form/Receipt gets the reporter's parts only: county, Civil/Crim
 
 The djinn in the drop zone shows what's happening: working while documents are read, smiling when the form is ready, and stumped when something required is missing. If you'd rather not see him, turn him off in Settings → Options.
 
+## Run sheets
+
+When several reporters share a trial, each one writes their initials at the foot (or top) of every page they write, and the run sheet keeps track of who wrote what, for billing. Tick **Run sheet** and Generate: the transcript's pages are grouped into takes by those initials, one row per take, in the columns of a reporters' run sheet:
+
+| Date | Weekday | Reporter | Day's Take | Running Take | Pages written | Starting Page No. | Ending Page No. | Witness Start | Witness End | Note |
+|---|---|---|---|---|---|---|---|---|---|---|
+
+- **Reporter:** the initials become a name. Put your own initials in Settings → My info, and other reporters' in Settings → Run sheet ("ds = Dana"). Without that, the reporters named on the title page ("DANA SMITH, Senior Court Reporter") are matched to the initials; failing that, the initials are written.
+- **Witness Start / End:** a witness sworn in, or a new witness in the running head, starts; "the witness stepped down" ends.
+- **Title pages alone** count as half a take (Note: *title page only*), as on a hand-kept run sheet.
+- The weekday, take counts and page numbers are formulas (the *Don't write here* columns), so rows you type in or correct are counted too. Filter the Reporter column to see one reporter's rows; the total of the pages shown is at the top. The **By Reporter** sheet totals each reporter's takes and pages.
+
+**One run sheet per trial.** Before adding, the app looks for the case's run sheet in the run sheets folder (*Documents\DjinnIt Run Sheets*, Settings → Run sheet) and next to the transcript. It's the case's when it has the same **index number**, or the same **case name**: a trial can have several index numbers that are billed together. It then asks whether to add the takes to it or start a new one (or, if you prefer, always adds or always starts a new one). Takes already on the run sheet are not added twice, and the rows stay in date and page order.
+
+A run sheet made elsewhere, such as one downloaded from Google Sheets as .xlsx, can be added to as well. It needs Date, Reporter and Pages columns. New rows go at its end with its own formulas copied down, and a copy of the file is kept first ("… (before DjinnIt).xlsx").
+
 ## Batches
 
 Drop any number of documents at once, or a folder (**File → Open a folder of documents**). The app reads them all and sorts them into **jobs**, one per case and date:
@@ -87,12 +104,12 @@ Drop any number of documents at once, or a folder (**File → Open a folder of d
 
 The jobs appear in a list on the left. Click one to check or correct it in the usual editor; right-click a document to move it to a job of its own. ✓ marks the jobs already saved, ⚠ the ones that would have blanks on the form: something required is missing, or attorneys were found but none is ticked (a transcript lists everyone who appeared, not who ordered).
 
-**Generate all** (Ctrl+Shift+Enter) makes the ticked outputs for every ticked job. A job without a transcript gets its forms but no invoice, and the summary says which. Documents dropped later are added to the job they belong to, and files that are already loaded are skipped.
+**Generate all** (Ctrl+Shift+Enter) makes the ticked outputs for every ticked job. A job without a transcript gets its forms but no invoice or run sheet, and the summary says which. The days of one trial in a batch go on one run sheet, and you're asked about it once. Documents dropped later are added to the job they belong to, and files that are already loaded are skipped.
 
 Batches are read with the built-in rules and Windows' text recognition only; the AI helper is not used, as it would take most of a minute per document.
 
 The same can be done without the window:
-`DjinnItAgreementForm.exe --batch <output folder> [--outputs agreement,mofr,invoice] <files or folders…>` makes the outputs (those ticked in the window, unless `--outputs` says otherwise) and writes a `batch.json` report.
+`DjinnItAgreementForm.exe --batch <output folder> [--outputs agreement,mofr,invoice,runsheet] <files or folders…>` makes the outputs (those ticked in the window, unless `--outputs` says otherwise) and writes a `batch.json` report.
 
 Files this app made (agreements, MOFRs, invoices) are recognised and skipped when a folder is read again, so its output can live next to your documents.
 
@@ -176,6 +193,7 @@ Never change the `AppId` in `installer/DjinnItAgreementForm.iss`; Windows uses i
 | Fill the chosen form, one PDF per attorney | `fill.py`, `forms/` |
 | Fill the MOFR | `mofr.py`, `forms/mofr_map.py` |
 | Price and draw invoices | `invoice_calc.py`, `invoice.py` |
+| Read who wrote which pages, keep the run sheet | `takes.py`, `runsheet.py` |
 | Make the chosen outputs and record them | `deliver.py`, `records.py` |
 | PySide6 interface | `gui/` |
 

@@ -10,7 +10,9 @@ Format (same layout as the reporter's own invoice sheet):
     Rates Last Updated:,5/2/2024
 
 - First column: the speed name. "Original" is the per-page rate written on the form.
-- "Copy" and any other columns are shown for reference.
+- Columns are found by how their heading starts, so a misspelt "Origianal" still counts; with no
+  such heading the second column is the rate.
+- "Copy" and any other columns (Email, Index) are kept for reference and for invoices.
 - "Days" (optional) is the turnaround used for the estimated delivery date; without it the
   turnaround days from Settings are used.
 - Files whose name contains "template" are ignored, so the blank template can sit alongside.
@@ -32,17 +34,20 @@ BUNDLED_DIR = Path(__file__).resolve().with_name("rate_sheets")
 
 @dataclass
 class Speed:
+    """One row of a rate sheet: a delivery speed and its prices."""
     name: str
     original: str                      # per-page rate, e.g. "4.30"
-    copy: str = ""
-    days: int | None = None
-    extras: dict[str, str] = field(default_factory=dict)
+    copy: str = ""                     # per-page rate for a copy
+    days: int | None = None            # turnaround; None = from Settings
+    extras: dict[str, str] = field(default_factory=dict)  # other columns: heading -> value ("Email": "$1.00")
 
     @property
     def key(self) -> str:
+        """The speed as speed_key names it ('Expedite' -> 'expedited')."""
         return speed_key(self.name)
 
     def label(self) -> str:
+        """'Regular  ·  $4.30/pg  ·  copy $1.00', for lists of speeds."""
         bits = [self.name, f"${self.original}/pg"]
         if self.copy:
             bits.append(f"copy ${self.copy}")
@@ -51,23 +56,28 @@ class Speed:
 
 @dataclass
 class RateSheet:
+    """One rate sheet file: its name (the file name without .csv), its speeds, cheapest first, and the
+    'Rates Last Updated' date. FALLBACK has no file (path None)."""
     name: str
     path: Path | None
     speeds: list[Speed]
     updated: str = ""
 
     def find(self, delivery: str) -> Speed | None:
-        """Matches 'Expedited' to 'Expedite', 'same day' to 'Immediate', etc."""
+        """Matches 'Expedited' to 'Expedite', 'same day' to 'Immediate', etc.; None when the sheet lacks it."""
         k = speed_key(delivery)
         return next((s for s in self.speeds if s.key == k), None) or \
             next((s for s in self.speeds if s.name.lower() == (delivery or "").strip().lower()), None)
 
     def rate(self, delivery: str) -> str:
+        """The per-page rate for a speed ('Regular' -> '4.30'); '' when the sheet lacks it."""
         s = self.find(delivery)
         return s.original if s else ""
 
 
 def speed_key(name: str) -> str:
+    """A speed's name as one of 'regular', 'expedited', 'daily' or 'immediate', whatever the spelling
+    ('Expedite', 'rush' -> 'expedited'); any other name comes back trimmed and in lowercase."""
     n = (name or "").strip().lower()
     if n.startswith("expedit") or n in ("rush", "expedite"):
         return "expedited"
@@ -87,11 +97,14 @@ def parse_money(v) -> Decimal | None:
 
 
 def _money(v: str) -> str:
+    """parse_money as text: '$4.3' -> '4.30'; '' when there is no number."""
     d = parse_money(v)
     return "" if d is None else str(d)
 
 
 def load_sheet(path: Path) -> RateSheet:
+    """Reads one rate sheet CSV (layout above). Rows without a rate are skipped; raises ValueError when
+    the file is empty or has no rates at all."""
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = [[c.strip() for c in r] for r in csv.reader(f)]
     rows = [r for r in rows if any(r)]
@@ -132,11 +145,13 @@ def load_sheet(path: Path) -> RateSheet:
 
 
 def default_dir() -> Path:
+    """The Rate Sheets folder in the settings folder."""
     from .settings import settings_dir
     return settings_dir() / "Rate Sheets"
 
 
 def sheets_dir(custom: str = "") -> Path:
+    """The rate sheet folder (`custom`, else default_dir()), created and seeded when needed."""
     d = Path(custom) if custom else default_dir()
     d.mkdir(parents=True, exist_ok=True)
     seed(d)
@@ -169,11 +184,13 @@ def list_sheets(custom_dir: str = "") -> tuple[list[RateSheet], list[str]]:
     return sheets, problems
 
 
+# Used when no rate sheet can be read, so the form still gets a rate.
 FALLBACK = RateSheet("Built-in (form minimums)", None, [
     Speed("Regular", "3.30", "1.00"), Speed("Expedited", "4.40", "1.10"), Speed("Daily", "5.50", "1.25")])
 
 
 def pick(sheets: list[RateSheet], name: str) -> RateSheet:
+    """The sheet called `name`, else the sample sheet, else the first one; FALLBACK when there are none."""
     if not sheets:
         return FALLBACK
     return next((s for s in sheets if s.name == name), None) or \

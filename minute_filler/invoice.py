@@ -49,17 +49,19 @@ table.opts td.amt, table.opts th.amt { text-align: right; }
 @dataclass
 class InvoiceOpts:
     """Choices made for one job's invoices (the footer controls)."""
-    pages: int
-    parties: int = 1
-    choice: bool | None = None   # None = Settings.invoice_choice
+    pages: int                   # the pages billed
+    parties: int = 1             # ordering parties: each pays an equal share
+    choice: bool | None = None   # list every speed offered; None = Settings.invoice_choice
 
 
 def _e(s: str) -> str:
+    """Text made safe for the invoice's HTML, its line breaks kept."""
     return html.escape(s or "").replace("\n", "<br>")
 
 
 def _detail(q: Quote) -> str:
-    """'Original 30 pp. x $4.30 + 2 copies x $1.00 ...' (the arithmetic, small print)."""
+    """'Original: 30 pp. × $4.30 + Copy: 2 × 30 pp. × $1.00 = $189.00, split 2 ways' (the arithmetic,
+    small print)."""
     bits = []
     for l in q.lines:
         n = f"{l.qty} × " if l.qty > 1 else ""
@@ -72,7 +74,8 @@ def _detail(q: Quote) -> str:
 
 def invoice_html(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: list[Quote], number: str,
                  when: date | None = None) -> str:
-    """The invoice page as HTML (see CSS)."""
+    """The invoice page as HTML (see CSS). atty: who is billed (None: a blank Bill To); quotes: a row per
+    speed offered; number: the invoice number; when: the invoice's date (today)."""
     when = when or date.today()
     p = s.profile
     me = "<br>".join(_e(x) for x in (p.title, p.address1, p.address2, p.phone and f"Tel. {p.phone}", p.email,
@@ -120,6 +123,7 @@ def invoice_html(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: lis
 
 
 def render(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: list[Quote], number: str, out: Path) -> Path:
+    """Draws the invoice on one letter page and saves it at out (or "out (2)" when taken); returns the path."""
     doc = pymupdf.open()
     page = doc.new_page(width=PAGE.width, height=PAGE.height)
     box = pymupdf.Rect(MARGIN, MARGIN, PAGE.width - MARGIN, PAGE.height - MARGIN)
@@ -129,7 +133,8 @@ def render(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: list[Quot
 
 
 def job_quotes(case: CaseInfo, s: Settings, opts: InvoiceOpts) -> list[Quote]:
-    """The prices an invoice for this job lists."""
+    """The prices an invoice for this job lists, for the job's speed (else the default one). ValueError
+    without a page count."""
     if opts.pages <= 0:
         raise ValueError("an invoice needs the transcript's page count")
     return quotes_for(opts.pages, opts.parties, s.sheet(), s, case.get("delivery") or s.default_delivery,
@@ -138,7 +143,8 @@ def job_quotes(case: CaseInfo, s: Settings, opts: InvoiceOpts) -> list[Quote]:
 
 def make_invoice(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, opts: InvoiceOpts,
                  ledger: Ledger, dated: bool = False, quotes: list[Quote] | None = None) -> tuple[Path, str]:
-    """Numbers, draws and records one invoice; returns (file, invoice number)."""
+    """Numbers, draws and records one invoice; returns (file, invoice number). quotes: the job's prices,
+    when already worked out for its other invoices."""
     quotes = quotes or job_quotes(case, s, opts)
     with NUMBER_LOCK:  # no other thread may take the same number before this invoice is in the records
         number, year, seq = ledger.next_invoice_no(s.invoice_number_format)

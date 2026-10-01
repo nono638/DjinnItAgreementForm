@@ -6,10 +6,15 @@
 ; Settings and rate sheets live in %APPDATA%\DjinnItAgreementForm and survive upgrades/uninstall.
 
 #define MyAppName "DjinnItAgreementForm"
-#ifndef MyAppVersion
-  #define MyAppVersion "0.0.0"
-#endif
 #define MyAppExe "DjinnItAgreementForm.exe"
+#ifndef MyAppVersion
+  ; not given on the command line (/DMyAppVersion=1.2.3): the version the built program carries
+  ; (ProductVersion, written by DjinnItAgreementForm.spec)
+  #define MyAppVersion GetStringFileInfo(AddBackslash(SourcePath) + "..\dist\" + MyAppName + "\" + MyAppExe, "ProductVersion")
+#endif
+#if MyAppVersion == ""
+  #error The version is unknown: build the program first (build_installer.bat), or pass /DMyAppVersion=X.Y.Z
+#endif
 #define MyAppPublisher "Noah Collin"
 #define MyContact "noahcollincourtreporter@gmail.com"
 

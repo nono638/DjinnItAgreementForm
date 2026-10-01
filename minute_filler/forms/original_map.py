@@ -1,7 +1,7 @@
 """Field map for the original scanned UCS form (minute_agreement_original.pdf).
 
-Its widgets have random names, so each one is mapped to a logical key here by
-its position on the page. Things the original lacks (signature lines, date of
+Its widgets have random names ("Text-gJUsgvzPVi"; fill.py drops the "Text-"), so each one
+is mapped to a logical key here by its position on the page. Things the original lacks (signature lines, date of
 agreement, fax, case name lines 2-3) are stamped as text at fixed rectangles
 (PDF points, origin top-left, page 608.4 x 790.2).
 """
@@ -50,6 +50,6 @@ OVERLAYS = {
     "atty_fax": (395, 661, 565, 673),
 }
 
-# The original has only one attorney address line after Firm/Address; the second
-# address line is merged into it.
+# Values with no line of their own on the original are appended to a neighbouring one (it has a
+# single attorney address line after Firm/Address, for example).
 MERGE_INTO = {"atty_address_2": "atty_address_1", "rep_address_3": "rep_address_2", "dates_2": "dates"}

@@ -23,11 +23,14 @@ FIELD_H = 13
 
 
 class Builder:
+    """Draws the form on one letter page: text, rules and fillable fields."""
+
     def __init__(self) -> None:
         self.doc = pymupdf.open()
         self.page = self.doc.new_page(width=W, height=H)
 
     def text(self, x, y, s, font=FONT, size=SIZE, align="left"):
+        """Writes s on baseline y; x is its left, centre or right edge (align). Returns where the text ends."""
         if align != "left":
             w = pymupdf.get_text_length(s, fontname=font, fontsize=size)
             x = x - w / 2 if align == "center" else x - w
@@ -35,6 +38,7 @@ class Builder:
         return x + pymupdf.get_text_length(s, fontname=font, fontsize=size)
 
     def line(self, x0, x1, y, width=0.6):
+        """A rule just under baseline y, to write on."""
         self.page.draw_line((x0, y + 2), (x1, y + 2), color=INK, width=width)
 
     def field(self, name, x0, x1, y, underline=True):
@@ -52,11 +56,13 @@ class Builder:
         self.page.add_widget(w)
 
     def labeled(self, x, y, label, name, x1, font=FONT):
+        """A label, then the field `name` from after it to x1; returns where the field starts."""
         x0 = self.text(x, y, label, font=font) + 4
         self.field(name, x0, x1, y)
         return x0
 
     def checkbox(self, name, x, y, label):
+        """A drawn box with a checkbox field on it and the label after it; returns where the label ends."""
         size = 9
         rect = pymupdf.Rect(x, y - size + 1, x + size, y + 1)
         self.page.draw_rect(rect, color=INK, width=0.7)
@@ -71,6 +77,7 @@ class Builder:
 
 
 def build(out: Path = OUT) -> Path:
+    """Draws the whole form and saves it at out (the app's forms folder); returns out."""
     b = Builder()
     t = b.text
 

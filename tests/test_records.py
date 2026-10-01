@@ -8,6 +8,7 @@ from minute_filler.records import Invoice, Ledger, summarize
 
 
 def inv(no, created, firm, amounts, **kw):
+    """An invoice for 10 pages, billed at its first speed."""
     return Invoice(invoice_no=no, created=created, case_name=f"Case {no}", index_no="700001/2025", bill_to="Alex",
                    firm=firm, pages=10, parties=1, amounts=amounts, billed_speed=next(iter(amounts)), **kw)
 

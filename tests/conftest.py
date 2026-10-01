@@ -1,3 +1,5 @@
+"""Fixtures for every test: settings and records kept in a temporary folder, no real Ollama, and an off-screen
+Qt application and main window for the GUI tests."""
 import os
 
 import pytest
@@ -10,6 +12,24 @@ def isolated_appdata(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+def pytest_configure(config):
+    """Registers the "ollama" marker, so pytest does not warn about it."""
+    config.addinivalue_line("markers", "ollama: the test may reach a real Ollama (not stubbed by no_ollama)")
+
+
+@pytest.fixture(autouse=True)
+def no_ollama(request, monkeypatch):
+    """Tests never ask a real Ollama (it answers differently on every computer, and slowly): it is 'not
+    running'. A test marked @pytest.mark.ollama gets the real thing."""
+    if request.node.get_closest_marker("ollama"):
+        return
+    from minute_filler.extract_llm import OllamaExtractor
+
+    def offline(self, timeout: float = 3):
+        raise ConnectionError("no Ollama in the tests")
+    monkeypatch.setattr(OllamaExtractor, "installed_models", offline)
 
 
 @pytest.fixture

@@ -54,5 +54,5 @@ OVERLAYS = {
 # Values with no line of their own on this form are appended to a neighbouring one
 MERGE_INTO = {"atty_address_2": "atty_address_1", "rep_address_3": "rep_address_2", "dates_2": "dates"}
 
-# Page 2 holds the official instructions
+# Page 2 holds the official instructions (fill.py drops it when Settings.include_instructions is off)
 INSTRUCTION_PAGES = 1

@@ -19,7 +19,8 @@ def s():
 
 
 def widgets(path):
-    doc = pymupdf.open(path)
+    """The first page's form fields {name: value}, and the open document."""
+    doc =pymupdf.open(path)
     return {w.field_name: w.field_value for w in doc[0].widgets()}, doc
 
 

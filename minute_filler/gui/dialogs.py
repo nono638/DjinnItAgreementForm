@@ -1,16 +1,20 @@
-"""Settings/profile dialog and the 'please clarify' dialog shown before filling."""
+"""The app's dialogs: Settings, the "please clarify" questions before filling, the run sheet choice, the
+Ollama setup help (with a model download) and About."""
 from __future__ import annotations
+
+import re
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QTabWidget,
-    QTextBrowser, QVBoxLayout, QWidget,
+    QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox,
+    QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from .. import __version__
 from ..models import Attorney, FIELD_LABELS
-from ..settings import OUTPUTS, SPEEDS, Settings
+from ..runsheet import runsheets_folder
+from ..settings import OUTPUTS, SPEEDS, Settings, reporter_key
 from .widgets import check_row, open_path, open_url, refill_combo, rounded
 
 
@@ -25,7 +29,7 @@ def _form(parent: QWidget) -> QFormLayout:
 
 
 class SettingsDialog(QDialog):
-    """The Settings window: tabs for My info, Defaults, Options, Invoice and AI.
+    """The Settings window: tabs for My info, Defaults, Options, Invoice, Run sheet and AI.
 
     Nothing is stored until Save (accept), which copies every control back into the Settings object
     and saves it to disk. Cancel leaves the settings, and a picked but unsaved signature image,
@@ -63,9 +67,13 @@ class SettingsDialog(QDialog):
         self.p_email = QLineEdit(p.email)
         self.p_web = QLineEdit(p.website)
         self.p_web.setPlaceholderText("optional, shown on invoices")
+        self.p_initials = QLineEdit(p.initials)
+        self.p_initials.setPlaceholderText("as you put them at the foot of your transcript pages, e.g. pr")
+        self.p_initials.setToolTip("Run sheets: the pages with these initials are yours.\n"
+                                   "Blank = the first letters of your first and last name.")
         for label, wid in (("Name", self.p_name), ("Title", self.p_title), ("Address", self.p_addr1),
                            ("", self.p_addr2), ("Telephone", self.p_phone), ("Fax", self.p_fax),
-                           ("Email", self.p_email), ("Website", self.p_web)):
+                           ("Email", self.p_email), ("Website", self.p_web), ("Initials", self.p_initials)):
             f.addRow(label, wid)
         # Signature picture: shown as it will appear on the form; stored on Save
         self._sig_new: str | None = None  # None = unchanged, "" = removed, else a prepared file
@@ -268,6 +276,48 @@ class SettingsDialog(QDialog):
         scroll.setWidget(w)
         self.tabs.addTab(scroll, "Invoice")
 
+        # --- Run sheet
+        w = QWidget()
+        f = _form(w)
+        intro = QLabel("A run sheet lists who wrote which pages of a trial, take by take, from the initials at the "
+                       "foot of each transcript page. There is one per case; a transcript's takes are added to it.")
+        intro.setObjectName("muted")
+        intro.setWordWrap(True)
+        f.addRow(intro)
+        row = QHBoxLayout()
+        self.r_dir = QLineEdit(settings.runsheet_dir)
+        self.r_dir.setPlaceholderText(str(runsheets_folder(Settings())))
+        rb = QPushButton("Browse...")
+        rb.clicked.connect(lambda: self._pick_into(self.r_dir, "Folder for the run sheets"))
+        ob = QPushButton("Open folder")
+        ob.clicked.connect(self._open_run_sheets_folder)
+        row.addWidget(self.r_dir, 1)
+        row.addWidget(rb)
+        row.addWidget(ob)
+        f.addRow("Run sheets folder", row)
+        self.r_existing = QComboBox()
+        for key, label in (("ask", "Ask whether to add to it or start a new one"),
+                           ("add", "Add to it without asking"), ("new", "Always start a new run sheet")):
+            self.r_existing.addItem(label, key)
+        self.r_existing.setCurrentIndex(max(0, self.r_existing.findData(settings.runsheet_existing)))
+        self.r_existing.setToolTip("A run sheet is the case's when it has the same index number or the same case "
+                                   "name\n(a trial with several index numbers is billed together).")
+        f.addRow("When the case has one", self.r_existing)
+        self.r_pattern = QLineEdit(settings.runsheet_filename_pattern)
+        self.r_pattern.setToolTip("Placeholders: {month} {year} (of the first day)  {case}  {index}  {date}")
+        f.addRow("File name", self.r_pattern)
+        self.r_names = QPlainTextEdit("\n".join(f"{k} = {v}" for k, v in sorted(settings.reporters.items())))
+        self.r_names.setPlaceholderText("ds = Dana\nkl = Kim")
+        self.r_names.setFixedHeight(110)
+        f.addRow("Reporters", self.r_names)
+        help_lbl = QLabel("Initials = the name for the Reporter column, one reporter per line. Without a line, the "
+                          "first name of the reporter listed on the transcript's title page is used (and yours "
+                          "for your own initials, under My info); failing that, the initials.")
+        help_lbl.setWordWrap(True)
+        help_lbl.setObjectName("muted")
+        f.addRow("", help_lbl)
+        self.tabs.addTab(w, "Run sheet")
+
         # --- AI
         w = QWidget()
         f = _form(w)
@@ -348,7 +398,8 @@ class SettingsDialog(QDialog):
 
     def _store_signature(self):
         """Applies a pick or removal made in this dialog: moves the prepared picture to signature.png (or
-        deletes it) and records it in the settings. Does nothing if the signature was not touched.
+        deletes it) and records it in the settings. Does nothing if the signature was not touched, and leaves
+        the settings as they were if the file cannot be moved or deleted.
         """
         from pathlib import Path
         from ..signature import signature_path
@@ -415,18 +466,56 @@ class SettingsDialog(QDialog):
         ok, msg = OllamaExtractor(tmp).status()
         self.a_status.setText(("✓ " if ok else "✗ ") + msg)
 
+    def _run_sheet_settings(self) -> Settings:
+        """A throwaway Settings with the run sheets folder typed in (for Open folder before Save)."""
+        tmp = Settings()
+        tmp.runsheet_dir = self.r_dir.text().strip()
+        return tmp
+
+    def _open_run_sheets_folder(self):
+        """Opens the run sheets folder typed in (or the default), making it first if needed."""
+        folder = runsheets_folder(self._run_sheet_settings())
+        try:
+            folder.mkdir(parents=True, exist_ok=True)  # not made until the first run sheet is
+        except OSError as e:
+            QMessageBox.warning(self, "Could not open the folder", str(e))
+            return
+        open_path(folder)
+
+    @staticmethod
+    def _reporter_names(text: str) -> tuple[dict[str, str], list[str]]:
+        """'ds = Dana' lines -> {'ds': 'Dana'} (also 'D.S.: Dana', 'ds - Dana', a tab, or 'ds Dana'), and the
+        lines that can't be read that way. The initials are written as in My info: 'D. S.' is 'ds'."""
+        out, bad = {}, []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r"(.+?)\s*(?:=|:|\t|\s-\s)\s*(.+)", line)
+            if not m or not re.fullmatch(r"[a-z]{2,4}", reporter_key(m.group(1))):
+                m = re.match(r"((?:[A-Za-z]\.?\s?){2,3})\s+(.+)", line)  # "ds Dana", "D.S. Dana"
+            if m and re.fullmatch(r"[a-z]{2,4}", reporter_key(m.group(1))) and m.group(2).strip():
+                out[reporter_key(m.group(1))] = m.group(2).strip()
+            else:
+                bad.append(line)
+        return out, bad
+
     def _pick_into(self, edit: QLineEdit, title: str):
-        d = QFileDialog.getExistingDirectory(self, title, edit.text() or edit.placeholderText())
+        """Asks for a folder, starting at the one in `edit`, and puts the choice into `edit`."""
+        d =QFileDialog.getExistingDirectory(self, title, edit.text() or edit.placeholderText())
         if d:
             edit.setText(d)
 
     def accept(self):
-        """Copies every control into the Settings object, saves it to disk and closes."""
+        """Copies every control into the Settings object, saves it to disk and closes. A blank file name
+        pattern or invoice number format keeps the old one. Reporter lines that cannot be read are left out,
+        with a warning that lists them."""
         s, p = self.s, self.s.profile
         p.name, p.title = self.p_name.text().strip(), self.p_title.text().strip()
         p.address1, p.address2 = self.p_addr1.text().strip(), self.p_addr2.text().strip()
         p.phone, p.fax, p.email = self.p_phone.text().strip(), self.p_fax.text().strip(), self.p_email.text().strip()
         p.website = self.p_web.text().strip()
+        p.initials = self.p_initials.text().strip().lower().replace(".", "").replace(" ", "")
         s.default_court, s.default_county = self.d_court.text().strip(), self.d_county.text().strip()
         s.default_delivery = self.d_delivery.currentData() or s.default_delivery
         s.default_copies = self.d_copies.text().strip()
@@ -457,6 +546,13 @@ class SettingsDialog(QDialog):
         s.invoice_number_format = self.i_number.text().strip() or s.invoice_number_format
         s.invoice_filename_pattern = self.i_pattern.text().strip() or s.invoice_filename_pattern
         s.records_dir = self.i_records.text().strip()
+        s.runsheet_dir = self.r_dir.text().strip()
+        s.runsheet_existing = self.r_existing.currentData()
+        s.runsheet_filename_pattern = self.r_pattern.text().strip() or s.runsheet_filename_pattern
+        s.reporters, bad = self._reporter_names(self.r_names.toPlainText())
+        if bad:
+            QMessageBox.warning(self, "Reporters", "These lines under Run sheet → Reporters were left out (write "
+                                "them as initials = name, e.g. ds = Dana):\n\n" + "\n".join(bad[:10]))
         s.show_djinn = self.o_djinn.isChecked()
         s.use_ai, s.ai_for_text = self.a_use.isChecked(), self.a_text.isChecked()
         s.ollama_model, s.ollama_host = self.a_model.currentText().strip(), self.a_host.text().strip()
@@ -530,6 +626,50 @@ class ClarifyDialog(QDialog):
             return None
         return [self.att_list.item(i).data(Qt.UserRole) for i in range(self.att_list.count())
                 if self.att_list.item(i).checkState() == Qt.Checked]
+
+
+class RunSheetDialog(QDialog):
+    """Asks whether a transcript's takes go on a run sheet that seems to be this case's, or on a new one."""
+
+    def __init__(self, found: list, title: str, parent=None):
+        """found: runsheet.Found entries, the likeliest first. title: the job, as the window names it."""
+        from PySide6.QtWidgets import QButtonGroup, QRadioButton
+        super().__init__(parent)
+        self.setWindowTitle("Run sheet")
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        intro = QLabel(f"There may already be a run sheet for {title}. Add this transcript's takes to it, or start "
+                       "a new run sheet?")
+        intro.setWordWrap(True)
+        intro.setObjectName("subtitle")
+        lay.addWidget(intro)
+        if any(f.why == "name" for f in found):
+            note = QLabel("A run sheet with the same case name but another index number may be the same trial: "
+                          "several index numbers are often billed together.")
+            note.setWordWrap(True)
+            note.setObjectName("muted")
+            lay.addWidget(note)
+        self.group = QButtonGroup(self)
+        for i, f in enumerate(found):
+            rb = QRadioButton(f"Add to  {f.path.name}\n({f.reason()}{'' if f.ours else ', made elsewhere'})")
+            rb.setToolTip(str(f.path))
+            rb.setProperty("path", str(f.path))
+            rb.setChecked(i == 0)
+            self.group.addButton(rb)
+            lay.addWidget(rb)
+        rb = QRadioButton("Start a new run sheet")
+        rb.setProperty("path", "")
+        self.group.addButton(rb)
+        lay.addWidget(rb)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def choice(self) -> str:
+        """The run sheet to add to, or "" for a new one."""
+        b = self.group.checkedButton()
+        return b.property("path") if b else ""
 
 
 OLLAMA_GUIDE = """
@@ -672,6 +812,8 @@ class OllamaHelpDialog(QDialog):
         super().accept()
 
 
+# Downloads that outlive their dialog. Qt aborts the program if a QThread is destroyed while it still runs,
+# so a reference is kept here for as long as the app is open.
 _BACKGROUND: list[QThread] = []
 
 
@@ -686,6 +828,9 @@ COMPONENTS = [
     ("Pillow", "MIT-CMU", "https://python-pillow.org"),
     ("ollama-python", "MIT", "https://github.com/ollama/ollama-python"),
     ("PyWinRT (Windows OCR bindings)", "MIT", "https://github.com/pywinrt/pywinrt"),
+    ("openpyxl (run sheets)", "MIT", "https://openpyxl.readthedocs.io"),
+    ("et_xmlfile (used by openpyxl)", "MIT", "https://foss.heptapod.net/openpyxl/et_xmlfile"),
+    ("HTTPX (used by ollama-python)", "BSD-3-Clause", "https://www.python-httpx.org"),
     ("Python", "PSF License", "https://www.python.org"),
 ]
 

@@ -21,10 +21,12 @@ SOURCE = ("Smith v. Jones, Index 712345/2024, Part MDP, judge Lopez, 5/22/2026, 
 
 
 def ai(reply, source=SOURCE):
+    """The extraction made from an AI reply (as parsed JSON), checked against the source text."""
     return OllamaExtractor(Settings())._to_extraction(reply, source)
 
 
 def value(ex, key):
+    """The first value found for a field ("" if none)."""
     return ex.fields[key][0].value if key in ex.fields else ""
 
 
@@ -129,7 +131,7 @@ def test_form_is_filled_with_plain_letters(tmp_path):
 
 
 def doc(s, title, index, day, name):
-    # no To: line, so no attorney
+    """A fictional invoice without a To: line, so without an attorney."""
     return text_doc(s, f"Invoice\nTitle: {title}\nIndex No. {index}\nDate of proceedings: {day}\nJudge: Lopez\n",
                     name)
 

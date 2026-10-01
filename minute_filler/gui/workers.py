@@ -9,12 +9,17 @@ from ..log import error as log_error
 
 
 class _Signals(QObject):
+    """A QRunnable is not a QObject and cannot have signals, so each Task owns one of these. The pool thread
+    emits them and Qt queues the calls to the UI thread."""
     finished = Signal(object)
     failed = Signal(str)
     progress = Signal(int, int, str)  # done, total, what is being worked on
 
 
 class Task(QRunnable):
+    """Calls fn(*args, **kwargs) on a pool thread and emits `finished` with its result, or `failed` with
+    "ErrorType: message" if it raised."""
+
     def __init__(self, fn: Callable, *args, **kwargs):
         super().__init__()
         self.fn, self.args, self.kwargs = fn, args, kwargs
@@ -31,7 +36,8 @@ class Task(QRunnable):
 
 
 class Runner:
-    """Keeps tasks alive until they report back."""
+    """Starts tasks on the global thread pool and keeps a reference to each until it reports back. Without
+    that reference Python could free the Task (and its signals) while it is still running."""
 
     def __init__(self) -> None:
         self.pool = QThreadPool.globalInstance()
@@ -39,7 +45,9 @@ class Runner:
 
     def start(self, fn: Callable, *args, on_done: Callable | None = None,
               on_error: Callable | None = None, on_progress: Callable | None = None, **kwargs) -> Task:
-        """With on_progress, fn is called with progress=<function(done, total, name)>."""
+        """Runs fn(*args, **kwargs) in the background. on_done gets its result and on_error gets the error
+        text, both on the UI thread. With on_progress, fn is also called with progress=<function(done, total,
+        name)>, and each call reaches on_progress on the UI thread. Returns the Task."""
         task = Task(fn, *args, **kwargs)
         if on_progress:
             task.kwargs["progress"] = task.signals.progress.emit

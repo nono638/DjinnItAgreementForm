@@ -1,4 +1,5 @@
-"""Drives the main window (off screen): several documents become a batch of jobs."""
+"""Drives the main window (off screen): several documents become a batch of jobs; outputs that need a
+transcript; the Records window; and background work that ends while the user is busy in the window."""
 import os
 import time
 
@@ -21,6 +22,7 @@ def window(tmp_path, monkeypatch, make_window):
 
 
 def wait(win, until, seconds=20):
+    """Runs the Qt event loop until no background task is left and until() is true."""
     end = time.time() + seconds
     while time.time() < end:
         QtWidgets.QApplication.processEvents()
@@ -31,7 +33,8 @@ def wait(win, until, seconds=20):
 
 
 def write(folder, name, **kw):
-    p = folder / name
+    """Writes a fictional invoice (see helpers.invoice_text) and returns its path."""
+    p =folder / name
     p.write_text(invoice_text(**kw))
     return str(p)
 
@@ -82,6 +85,7 @@ def test_documents_about_one_case_stay_one_job(window, tmp_path):
 
 
 def test_folder_and_split(window, tmp_path):
+    """A folder of documents about one case and day gives one job, even as a batch; New job clears it."""
     src = tmp_path / "in"
     src.mkdir()
     write(src, "a.txt", title="Smith v Jones", index="712222-2024", date="5-22-2026")

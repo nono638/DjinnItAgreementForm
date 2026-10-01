@@ -20,6 +20,7 @@ def s():
 
 
 def amounts(qs):
+    """{speed: (total, per party, per page)} of each quote."""
     return {q.speed: (q.total, q.per_party, q.per_page) for q in qs}
 
 

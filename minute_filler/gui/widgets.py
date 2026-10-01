@@ -46,6 +46,7 @@ def open_path(path) -> None:
 
 
 def open_url(url: str) -> None:
+    """Opens a web address in the default browser."""
     QDesktopServices.openUrl(QUrl(url))
 
 

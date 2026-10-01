@@ -20,6 +20,7 @@ OUT = Path(__file__).resolve().parent.parent / "minute_filler" / "forms" / "minu
 
 
 def prepare(src: Path, out: Path = OUT) -> Path:
+    """Writes the cleaned copy of the court's form src to out (the app's forms folder); returns out."""
     doc = pymupdf.open(src)
     page = doc[0]
     # The orange "SIGN" tags are the appearance of two Adobe digital-signature fields.

@@ -1,4 +1,4 @@
-"""Makes what the user asked for - minute agreements, a MOFR, invoices - and records each file.
+"""Makes what the user asked for - minute agreements, a MOFR, invoices, the run sheet - and records each file.
 
 Both the window's Generate button and the batch use generate(), so the records see every file made.
 """
@@ -12,9 +12,10 @@ from .log import error as log_error
 from .models import Attorney, CaseInfo, to_int
 from .mofr import fill_mofr
 from .records import Ledger
+from .runsheet import NO_RUNSHEET, RunSheetOpts, add_takes
 from .settings import OUTPUTS, Settings
 
-NO_TRANSCRIPT = "an invoice needs a transcript PDF (for the page count)"
+NO_INVOICE = "an invoice needs a transcript PDF (for the page count)"
 
 
 def ledger_for(s: Settings) -> Ledger:
@@ -23,29 +24,40 @@ def ledger_for(s: Settings) -> Ledger:
 
 
 def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | set[str],
-             invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False) -> list[Path]:
+             invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False,
+             runsheet: RunSheetOpts | None = None, folders: list[Path] | None = None) -> list[Path]:
     """Writes the chosen outputs (keys of settings.OUTPUTS) into out_dir and logs them in the records.
-    An invoice needs `invoice` with the page count; raises ValueError otherwise.
+    An invoice needs `invoice` with the page count, the run sheet `runsheet` with the takes of the transcripts;
+    raises ValueError otherwise. The run sheet goes to the run sheets folder (an existing one of the case is
+    looked for there and in `folders`, see runsheet.choose). It is written first: when it is open in Excel,
+    nothing is made, and trying again doesn't make the invoices twice. A run sheet that already had every
+    take is left as it was and is not among the files returned.
     When a file can't be made, the error raised carries the files made before it as `made`."""
     outputs = [o for o in OUTPUTS if o in outputs]
     billed = invoice.pages if invoice and invoice.pages > 0 else 0  # 0: no transcript among the inputs
     if "invoice" in outputs and not billed:
-        raise ValueError(NO_TRANSCRIPT)
+        raise ValueError(NO_INVOICE)
+    if "runsheet" in outputs and not (runsheet and runsheet.rows):
+        raise ValueError(NO_RUNSHEET)
     ledger = ledger or ledger_for(s)
     pages = billed or to_int(case.get("est_pages"))
     made: list[Path] = []
 
-    def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "") -> None:
+    def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "", count: int = pages) -> None:
         made.append(path)
         try:
             ledger.log_activity(kind, case_name=case.get("case_name"), index_no=case.get("index_no"),
                                 dates=case.get("dates"), judge=case.get("judge"), part=case.get("part"),
-                                attorney=atty.name if atty else "", firm=atty.firm if atty else "", pages=pages,
+                                attorney=atty.name if atty else "", firm=atty.firm if atty else "", pages=count,
                                 file_path=str(path), invoice_no=number)
         except Exception as e:  # the files are made; a records problem must not lose them
             log_error("could not add to the records", e)
 
     try:
+        if "runsheet" in outputs:
+            path = add_takes(case, runsheet, s, folders or [])
+            if runsheet.created or runsheet.added:
+                record("runsheet", path, count=runsheet.added_pages)  # the pages of the takes added
         if "agreement" in outputs:
             for atty in case.orderers():
                 record("agreement", fill(case, atty, s, out_dir, dated), atty)

@@ -1,5 +1,5 @@
-"""Transcripts whose title runs over two pages, and whose line numbers stand in front of the text
-(fictional names)."""
+"""Transcripts whose title runs over two pages, and whose line numbers stand in front of the text; also firm
+names told apart from street addresses in the appearances (fictional names)."""
 import pymupdf
 
 from minute_filler.batch import group, read_docs
@@ -78,12 +78,12 @@ PAGE_2 = """311
  4                 TAYLOR GREEN, Esq.
 
  5
-              NICHOLS HARTWELL, LLP
+              QUINN HARTWELL, LLP
  6             Attorneys for Poe, Hill, Marsh, and
               Example Health System
  7             400 Orchard Lane
               Orchard Town, New York 10004
- 8             BY: JORDAN NICHOLS, Esq.
+ 8             BY: JORDAN QUINN, Esq.
  9
 
 10
@@ -108,14 +108,16 @@ PAGE_3 = """Proceedings
  5              MS. BRIGHT:  No objection.
 """
 
-EVERYONE = ["Samuel R. Advocate", "Dana White", "Alex B. Counsel", "Morgan Bright", "Taylor Green", "Jordan Nichols"]
+EVERYONE = ["Samuel R. Advocate", "Dana White", "Alex B. Counsel", "Morgan Bright", "Taylor Green", "Jordan Quinn"]
 
 
 def transcript(last_line="(Title continues on next page.)", pages=(PAGE_2, PAGE_3)) -> str:
+    """The text of a transcript: PAGE_1 ending with last_line, then pages, split by form feeds."""
     return "\n\f\n".join([PAGE_1.format(last_line=last_line), *pages])
 
 
 def extract(text):
+    """The rules' extraction of a 95-page transcript PDF (starting at page 310) with this text."""
     return RegexExtractor(PAT).extract(Ingested("Roe transcript.pdf", "pdf", text=text, page_count=95,
                                                 first_page_no=310))
 
@@ -130,8 +132,8 @@ def test_attorneys_on_the_second_title_page_are_found():
     assert by_name["Alex B. Counsel"].address == "500 Sample Road, Suite 31\nLake Town, New York 10002"
     assert by_name["Taylor Green"].firm == "Bright Foster & Hayes"
     # a role that runs on to the next line is read whole
-    assert by_name["Jordan Nichols"].party == "Poe, Hill, Marsh, and Example Health System"
-    assert by_name["Jordan Nichols"].address == "400 Orchard Lane\nOrchard Town, New York 10004"
+    assert by_name["Jordan Quinn"].party == "Poe, Hill, Marsh, and Example Health System"
+    assert by_name["Jordan Quinn"].address == "400 Orchard Lane\nOrchard Town, New York 10004"
 
 
 def test_the_rest_of_the_title_is_read_without_the_line_numbers():
@@ -175,3 +177,46 @@ def test_such_a_transcript_can_be_invoiced(tmp_path):
     job, = group(docs, s)
     assert not errors and job.transcript_pages() == 4 and job.invoice_pages() == 4
     assert len(job.case.attorneys) == 6 and not any(a.checked for a in job.case.attorneys)
+
+
+FIRMS = """SUPREME COURT OF THE STATE OF NEW YORK
+COUNTY OF QUEENS
+Index No. 712345/2021
+
+A P P E A R A N C E S :
+
+HILL & LANE
+Attorneys for the Plaintiff
+350 Broadway, Suite 4 & 5
+Anytown, New York 10001
+BY: JOHN LANE
+
+BROADWAY LAW GROUP, PLLC
+Attorneys for the Defendant
+12 Court Street
+Lake Town, New York 10002
+BY: MARY PARKWAY, ESQ.
+
+LAW OFFICE OF DANA PLAZA
+Attorneys for the Third-Party Defendant
+One Example Plaza
+Hill Town, New York 10003
+BY: DANA PLAZA, ESQ.
+"""
+
+
+def test_a_firm_mark_beats_a_street_word():
+    from minute_filler.extract_regex import is_firm_line
+    for firm in ("HILL & LANE", "Broadway Law Group, PLLC", "Law Office of Dana Plaza", "Place & Drive LLP",
+                 "The Law Offices of Sam Road, P.C."):
+        assert is_firm_line(firm), firm
+    for address in ("350 Broadway, Suite 4 & 5", "Broadway & 42nd Street", "One Example Plaza", "12 Court Street",
+                    "Anytown, New York 10001", "P.O. Box 12, c/o Hill & Lane"):
+        assert not is_firm_line(address), address
+    found = {a.name: a for a in RegexExtractor(PAT).extract(Ingested("cover.txt", "text", text=FIRMS)).attorneys}
+    assert list(found) == ["John Lane", "Mary Parkway", "Dana Plaza"]
+    assert found["John Lane"].firm == "Hill & Lane"
+    assert found["John Lane"].address == "350 Broadway, Suite 4 & 5\nAnytown, New York 10001"
+    assert found["Mary Parkway"].firm == "Broadway Law Group, PLLC" and found["Mary Parkway"].party == "Defendant"
+    assert found["Dana Plaza"].firm == "Law Office of Dana Plaza"
+    assert found["Dana Plaza"].address == "One Example Plaza\nHill Town, New York 10003"

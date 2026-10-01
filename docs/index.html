@@ -44,7 +44,7 @@
 <header class="hero">
   <div class="wrap">
     <h1>DjinnItAgreementForm</h1>
-    <p class="lead">Fills in the UCS <b>Court Reporter Minute Agreement Form</b> and the <b>MOFR</b> for you, makes invoices from your transcripts, and keeps track of what you billed and what was paid. Drop in what the attorney sent, check the details, and get finished PDFs.</p>
+    <p class="lead">Fills in the UCS <b>Court Reporter Minute Agreement Form</b> and the <b>MOFR</b> for you, makes invoices from your transcripts, keeps a shared trial's run sheet, and keeps track of what you billed and what was paid. Drop in what the attorney sent, check the details, and get finished PDFs.</p>
     <a class="btn" href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Download for Windows</a>
     <a class="btn ghost" href="https://github.com/nono638/DjinnItAgreementForm">View on GitHub</a>
     <p class="note">Free and open source (AGPL). Windows 10 or 11. No administrator rights needed.</p>
@@ -69,7 +69,7 @@
       <li><b>Drop it in</b>A PDF (transcript, invoice), a photo, or paste the e-mail text or a screenshot with Ctrl+V.</li>
       <li><b>Check the details</b>Every field shows where it came from. Guesses are highlighted, and a list offers other candidates.</li>
       <li><b>Pick speed and attorney</b>Rates and the estimated delivery date follow your rate sheet. Buttons fill today, tomorrow, 1 to 3 weeks or 1 month.</li>
-      <li><b>Generate</b>Tick what to make (minute agreement, MOFR, invoice). The PDFs are saved and opened, one per attorney you tick. Ctrl+Enter does it from the keyboard.</li>
+      <li><b>Generate</b>Tick what to make (minute agreement, MOFR, invoice, run sheet). The PDFs are saved and opened, one per attorney you tick. Ctrl+Enter does it from the keyboard.</li>
     </ol>
   </div>
 </section>
@@ -101,6 +101,16 @@
       <h2>Invoices from your transcripts</h2>
       <p>Drop a transcript PDF and tick <b>Invoice</b>. The page count and your rate sheet price the original, each party's copy and e-mailed copy, and an index for long transcripts, split between the ordering parties. By default the invoice lists Regular, Expedited and Daily so the attorney can choose, with your turnaround times and how to pay you. Each invoice gets its own number. Sample shown uses made-up names.</p>
     </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap two">
+    <div>
+      <h2>Shared trial? The run sheet keeps count.</h2>
+      <p>When reporters take turns, each one puts their initials on the pages they write. Tick <b>Run sheet</b> and the app reads those initials page by page and adds a row per take to the trial's run sheet in Excel: date, reporter, pages written, start and end page, and the witness who took the stand. It finds the trial's run sheet by index number or case name (one trial can have several index numbers) and asks before adding to it. Filter by reporter to see their pages, or open the <b>By Reporter</b> sheet for everyone's totals. Sample shown uses made-up names.</p>
+    </div>
+    <img class="shot" src="runsheet.png" alt="A run sheet: one row per take, with the reporter, pages written and page numbers">
   </div>
 </section>
 

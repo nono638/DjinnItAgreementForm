@@ -5,11 +5,12 @@ mirrored as invoices.csv / activity.csv in the records folder (Settings.records_
 change, so the data can always be opened in Excel. Unlike the log file, these hold case details:
 they are the user's own business records and never leave the computer.
 
-  activity  one row per file made (minute agreement, MOFR, invoice)
+  activity  one row per file made (minute agreement, MOFR, invoice) or run sheet added to
   invoices  one row per invoice, with the amount of each speed offered and whether it was paid
 
-An invoice's "billed" amount is what it was paid at once paid, else the price of its cheapest offered
-speed (a choice invoice lets the attorney pick; Regular is what they owe at the least). Void ones count 0.
+An invoice's "billed" amount is what it was paid at once paid, else the price of the first speed it
+offers: the job's own speed, or on a choice invoice the cheapest (the attorney picks; Regular is what they
+owe at the least). Void ones count 0.
 """
 from __future__ import annotations
 
@@ -28,18 +29,17 @@ from .dates import us_date
 from .invoice_calc import fmt, money
 from .log import error as log_error
 
-STATUSES = ("open", "paid", "void")
 # One writer at a time: the CSV copies are rewritten whole, and an invoice's number is taken and its row
 # added in one step (the batch runs on another thread than the window).
 _MIRROR_LOCK = threading.Lock()
 NUMBER_LOCK = threading.RLock()
-KINDS = {"agreement": "Minute agreement", "mofr": "MOFR", "invoice": "Invoice"}
+KINDS = {"agreement": "Minute agreement", "mofr": "MOFR", "invoice": "Invoice", "runsheet": "Run sheet"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,             -- 2026-09-30T14:05:00
-    kind TEXT NOT NULL,           -- agreement / mofr / invoice
+    kind TEXT NOT NULL,           -- agreement / mofr / invoice / runsheet
     case_name TEXT, index_no TEXT, dates TEXT, judge TEXT, part TEXT,
     attorney TEXT, firm TEXT, pages INTEGER, file_path TEXT, invoice_no TEXT
 );
@@ -60,12 +60,15 @@ CREATE TABLE IF NOT EXISTS invoices (
 
 
 def default_db() -> Path:
+    """records.db in the app's settings folder."""
     from .settings import settings_dir
     return settings_dir() / "records.db"
 
 
 @dataclass
 class Invoice:
+    """One invoice in the ledger. amounts: speed -> what each party pays ({"Regular": "63.00"});
+    status: "open", "paid" or "void"."""
     invoice_no: str
     created: str
     case_name: str = ""
@@ -93,6 +96,7 @@ class Invoice:
 
     @property
     def billed(self) -> Decimal:
+        """What the invoice counts for (see the module docstring)."""
         if self.status == "void":
             return Decimal("0.00")
         if self.status == "paid":
@@ -108,11 +112,13 @@ class Invoice:
         return self.billed if self.status == "open" else Decimal("0.00")
 
     def offered_text(self) -> str:
+        """'Regular $63.00; Expedite $95.00' (the speeds offered, for the tables)."""
         return "; ".join(f"{k} {fmt(money(v))}" for k, v in self.amounts.items())
 
 
 @dataclass
 class Activity:
+    """One file made, or a run sheet added to (pages: the pages of the takes added). kind: a key of KINDS."""
     kind: str
     ts: str = ""                  # 2026-09-30T14:05:00; blank = now
     id: int = 0
@@ -130,6 +136,7 @@ class Activity:
 
 @dataclass
 class Summary:
+    """The count and money totals of a group of invoices (void ones are not counted)."""
     count: int = 0
     billed: Decimal = Decimal("0.00")
     paid: Decimal = Decimal("0.00")
@@ -177,10 +184,12 @@ ACTIVITY_COLUMNS = [h for h, _ in ACTIVITY_TABLE]
 
 
 def invoice_row(i: Invoice) -> list:
+    """One invoice as a row of the exported tables (see INVOICE_TABLE)."""
     return [get(i) for _, get in INVOICE_TABLE]
 
 
 def activity_row(a: Activity) -> list:
+    """One activity as a row of the exported tables (see ACTIVITY_TABLE)."""
     return [get(a) for _, get in ACTIVITY_TABLE]
 
 
@@ -207,6 +216,7 @@ class Ledger:
         return db
 
     def _run(self, sql: str, args: tuple = ()) -> None:
+        """Makes one change, then brings the CSV copies up to date."""
         db = self._db()
         try:
             with db:
@@ -235,7 +245,9 @@ class Ledger:
 
     # ----------------------------------------------------------- invoice numbers
     def next_invoice_no(self, pattern: str = "{year}-{seq:04}", today: date | None = None) -> tuple[str, int, int]:
-        """(number, year, seq): the next number for this year, e.g. '2026-0007'."""
+        """(number, year, seq): the next number for this year, e.g. '2026-0007'. pattern: the number's format
+        ({year}, {yy}, {seq}); a number already taken is skipped. Hold NUMBER_LOCK until add_invoice, or two
+        invoices may get the same number."""
         year = (today or date.today()).year
         seq = self._next_seq(year)
         taken = {r[0] for r in self._rows("SELECT invoice_no FROM invoices")}
@@ -264,28 +276,34 @@ class Ledger:
         self._insert("activity", values)
 
     def add_invoice(self, inv: Invoice, year: int = 0, seq: int = 0) -> None:
-        """year/seq: from next_invoice_no; without them the invoice counts as the next one of its year."""
+        """Enters a new invoice. year/seq: from next_invoice_no; without them the invoice counts as the next
+        one of its year."""
         year = year or int(inv.created[:4])
         values = asdict(inv)
         values.update(amounts=json.dumps(inv.amounts), year=year, seq=seq or self._next_seq(year))
         self._insert("invoices", values)
 
     def mark_paid(self, invoice_no: str, speed: str, amount, paid_date: str | None = None) -> None:
+        """Paid at this speed. amount: '$63.00' or 63; paid_date: ISO ('2026-09-30'), today when not given."""
         self._set_status(invoice_no, "paid", speed, str(money(amount)), paid_date or date.today().isoformat())
 
     def mark_unpaid(self, invoice_no: str) -> None:
+        """Back to open; the payment details are cleared."""
         self._set_status(invoice_no, "open")
 
     def void(self, invoice_no: str) -> None:
+        """Cancelled: it counts 0 from now on (the number stays taken)."""
         self._set_status(invoice_no, "void")
 
     def set_notes(self, invoice_no: str, notes: str) -> None:
+        """Replaces the invoice's notes."""
         self._run("UPDATE invoices SET notes=? WHERE invoice_no=?", (notes, invoice_no))
 
     # ------------------------------------------------------------------ reading
     def invoices(self, year: int | None = None, month: int | None = None, client: str = "",
                  status: str = "", text: str = "") -> list[Invoice]:
-        """Newest first. client: exact firm/attorney (see Invoice.client); text: words found anywhere."""
+        """Newest first, filtered by year, month, status ("open", "paid", "void"), client (the exact
+        firm/attorney, see Invoice.client) and text (words found anywhere)."""
         out = []
         for r in self._rows("SELECT * FROM invoices ORDER BY created DESC, year DESC, seq DESC, invoice_no DESC"):
             try:
@@ -308,10 +326,11 @@ class Ledger:
         return out
 
     def invoice(self, invoice_no: str) -> Invoice | None:
+        """One invoice by its number, or None."""
         return next((i for i in self.invoices() if i.invoice_no == invoice_no), None)
 
     def activity(self, kind: str = "", since: str = "", until: str = "", text: str = "") -> list[Activity]:
-        """Newest first. since/until: ISO dates (inclusive)."""
+        """Newest first. kind: a key of KINDS; since/until: ISO dates (inclusive); text: words found anywhere."""
         out = []
         for r in self._rows("SELECT * FROM activity ORDER BY ts DESC, id DESC"):
             a = _from_row(Activity, r)
@@ -327,11 +346,13 @@ class Ledger:
         return out
 
     def years(self) -> list[int]:
+        """The years with any invoice or activity, newest first."""
         rows = self._rows("SELECT DISTINCT substr(created,1,4) FROM invoices UNION "
                           "SELECT DISTINCT substr(ts,1,4) FROM activity")
         return sorted({int(r[0]) for r in rows if r[0] and r[0].isdigit()}, reverse=True)
 
     def clients(self) -> list[str]:
+        """Every firm or attorney billed (see Invoice.client), A to Z."""
         return sorted({i.client for i in self.invoices()}, key=str.lower)
 
     # ------------------------------------------------------------------ exports
@@ -346,6 +367,7 @@ class Ledger:
             log_error("could not update the CSV copies of the records", e)
 
     def export_csv(self, folder: Path) -> list[Path]:
+        """Writes invoices.csv and activity.csv (every row) into folder; returns their paths."""
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
         out = []
@@ -360,7 +382,8 @@ class Ledger:
         return out
 
     def export_xlsx(self, path: Path, invoices: list[Invoice] | None = None) -> Path:
-        """An Excel workbook: Invoices, Activity, By firm and By month sheets."""
+        """An Excel workbook: Invoices, Activity, By firm and By month sheets. invoices: the ones to list
+        (default: all); the Activity sheet always has every row."""
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
         from openpyxl.utils import get_column_letter
@@ -415,11 +438,13 @@ class Ledger:
 
 
 def _matches(text: str, values: list) -> bool:
+    """Every word of text is somewhere in values (any case)."""
     hay = " ".join(str(v) for v in values if v).lower()
     return all(w in hay for w in text.lower().split())
 
 
 def _month_name(ym: str) -> str:
+    """'2026-09' -> 'Sep 2026'."""
     try:
         return date(int(ym[:4]), int(ym[5:7]), 1).strftime("%b %Y")
     except ValueError:

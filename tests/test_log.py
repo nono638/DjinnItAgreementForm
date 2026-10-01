@@ -10,6 +10,7 @@ from minute_filler.settings import Settings
 
 @pytest.fixture
 def logfile(tmp_path, monkeypatch):
+    """A fresh log in a temporary folder; the path of its file."""
     monkeypatch.setenv("APPDATA", str(tmp_path))
     log.shutdown()
     log.setup()
@@ -18,6 +19,7 @@ def logfile(tmp_path, monkeypatch):
 
 
 def text(logfile):
+    """Everything written to the log so far."""
     for h in log.log.handlers:
         h.flush()
     return logfile.read_text(encoding="utf-8")
@@ -25,7 +27,7 @@ def text(logfile):
 
 def test_startup_is_recorded(logfile):
     t = text(logfile)
-    assert "started: version" in t and "Windows" in t or "Python" in t
+    assert "started: version" in t and ("Windows" in t or "Python" in t)
 
 
 def test_setup_twice_does_not_duplicate(logfile):
@@ -35,9 +37,9 @@ def test_setup_twice_does_not_duplicate(logfile):
 
 
 def test_scrub_removes_case_and_personal_data():
-    s = log.scrub(r"cannot open C:\Users\jane\Cases\Powell v Powell Invoice.pdf for jdoe@doeroelaw.com "
+    s = log.scrub(r"cannot open C:\Users\jane\Cases\Kerr v Kerr Invoice.pdf for jdoe@doeroelaw.com "
                   r"index 712222-2024 call (555) 555-0100 in C:\Users\jane\Cases")
-    for secret in ("Powell", "jane", "jdoe", "doeroelaw", "712222", "555-0100", "Cases"):
+    for secret in ("Kerr", "jane", "jdoe", "doeroelaw", "712222", "555-0100", "Cases"):
         assert secret not in s
     assert "<file.pdf>" in s and "<email>" in s and "<path>" in s
     assert len(log.scrub("x" * 1000)) < 400
@@ -45,13 +47,13 @@ def test_scrub_removes_case_and_personal_data():
 
 
 def test_an_unreadable_file_is_logged_without_its_name(logfile, tmp_path):
-    bad = tmp_path / "Powell v Powell 712222-2024.pdf"
+    bad = tmp_path / "Kerr v Kerr 712222-2024.pdf"
     bad.write_bytes(b"not a pdf at all")
     with pytest.raises(ValueError):
         ingest_file(bad)
     t = text(logfile)
     assert "could not read a .pdf file" in t
-    assert "Powell" not in t and "712222" not in t
+    assert "Kerr" not in t and "712222" not in t
 
 
 def test_crashes_are_logged_with_traceback_and_reported(logfile):

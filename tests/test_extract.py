@@ -65,6 +65,7 @@ def test_informal_email():
 
 
 def test_lowercase_email():
+    """A short e-mail written all in lower case still gives the index number, part, judge and caption."""
     ex = run("email_short.txt")
     assert best(ex, "index_no") == "700123/2025"
     assert best(ex, "part") == "7"
@@ -73,6 +74,7 @@ def test_lowercase_email():
 
 
 def test_merge_defaults_and_derived():
+    """Merging fills the court from the defaults and works out the speed, rate and delivery date."""
     s = Settings()
     s.profile = PROFILE
     case = merge([run("email_informal.txt")], s)

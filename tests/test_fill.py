@@ -1,4 +1,5 @@
-"""Fills both form variants and checks the values that land in the PDF."""
+"""Fills each form variant (UCS, clean, original) and checks the values that land in the PDF; also the file
+names, the short caption, and older settings files upgraded to the new form defaults."""
 import pymupdf
 import pytest
 
@@ -102,6 +103,7 @@ def test_ucs_form_is_default(case, settings, tmp_path):
 
 
 def test_file_name(case, settings):
+    """The default file name, with the day of the minutes for a batch, custom patterns, and a bad pattern."""
     from datetime import date
     from minute_filler.fill import output_name
     t = date.today()
@@ -149,6 +151,7 @@ def test_settings_v2_get_the_new_defaults(tmp_path, monkeypatch):
 
 
 def test_short_caption():
+    """The short caption keeps the first party on each side."""
     assert short_caption("John Smith, Mary Smith Estate v. Acme Hospital Group Inc., "
                          "Beta Medical Center") == "John Smith v. Acme Hospital Group Inc."
     assert short_caption("Matter of Jane Doe") == "Matter of Jane Doe"

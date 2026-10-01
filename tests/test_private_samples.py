@@ -1,7 +1,7 @@
 """Runs every document in samples_internal/ (git-ignored, for real documents).
 
 Every PDF, image, .eml, .txt or .docx dropped in that folder is automatically checked: it must be read,
-extracted, merged and filled into both forms without errors.
+extracted, merged and filled into the clean and the original form without errors.
 
 To also check the extracted values, add an entry to samples_internal/expected.json:
 
@@ -17,9 +17,11 @@ To also check the extracted values, add an entry to samples_internal/expected.js
     }
 
 - "fields": exact best value per field (see models.FIELD_KEYS)
+- "fields_startswith": the best value must start with this text
 - "proc_types": proceeding types that must be detected
 - "attorneys": the exact set of attorneys found (name, or firm when there is no name),
   leaving out "Unrepresented" / "No one appeared" entries
+- "attorney_fields": values of one attorney (named as in "attorneys") that must match exactly
 - "_profile": your own details, so they are never mistaken for an attorney
 """
 import json

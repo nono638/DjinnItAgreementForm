@@ -2,6 +2,8 @@
 
 Every finding is a Candidate with a confidence in [0, 1]; merge.py picks the
 winner and keeps the rest as alternatives for the user to choose from.
+The transcript layout helpers here (strip_line_numbers, title_page_count) are
+also used by runsheet.py.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ from datetime import date, timedelta
 from .ingest import Ingested
 from .models import Attorney, Extraction, SRC_REGEX
 from .settings import Profile
+from .takes import body_pages
 
 # ------------------------------------------------------------------ helpers
 
@@ -26,6 +29,8 @@ NY_COUNTIES = [
 ]
 BOROUGHS = {"brooklyn": "Kings", "manhattan": "New York", "staten island": "Richmond", "the bronx": "Bronx"}
 
+# (heading, the court's name on the form). Tried in this order; the first that appears wins.
+# Housing Court is a part of the Civil Court.
 COURTS = [
     (r"SUPREME\s+COURT", "Supreme"),
     (r"CIVIL\s+COURT", "Civil"),
@@ -42,6 +47,7 @@ MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 MONTH_RE = r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 
+# smart_title keeps these as they are: KEEP_UPPER in capitals, SMALL_WORDS in lowercase (after the first word)
 KEEP_UPPER = {"LLP", "PLLC", "LLC", "PC", "P.C.", "L.L.P.", "P.L.L.C.", "L.L.C.", "P.A.", "N.A.", "NY", "N.Y.",
               "NYC", "USA", "II", "III", "IV", "DDS", "MD", "CPA", "LP", "NYCHA", "MTA", "MSK", "NYU", "CUNY"}
 SMALL_WORDS = {"and", "of", "the", "for", "in", "on", "at", "to", "a", "an", "v.", "vs.", "v", "vs", "de", "del"}
@@ -51,8 +57,9 @@ FIRM_RE = re.compile(
     r"\bLaw\s+(?:Office|Firm|Group)|\bLaw\s+Offices?\b|Attorneys?\s+at\s+Law|\bCorporation\s+Counsel\b|"
     r"\bLegal\s+Aid\b|\bLegal\s+Services?\b|\s&\s)", re.I)
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?\(?(\d{3})\)?[\s.-]*(\d{3})[\s.-](\d{4})(?!\d)")
-# (the lookbehind keeps matching linear on long unbroken runs such as encoded attachments)
+# The lookbehind keeps EMAIL_RE fast (linear) on long unbroken runs such as encoded attachments.
 EMAIL_RE = re.compile(r"(?<![\w.+'-])[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
+# "Dana Smith, Esq." / "BY: DANA SMITH, ESQ." -> the name
 ESQ_RE = re.compile(r"(?:\bBY\s*:?\s*)?([A-Z][A-Za-z.'\-]*(?:\s+[A-Z][A-Za-z.'\-]*){0,4}),?\s+Esq\b\.?", re.I)
 ROLE_RE = re.compile(r"^(?:attorneys?|counsel)\s+(?:for|to)\s+(?:the\s+)?(.+?)[.:,]?$", re.I)
 SPECIAL_ROLE_RE = re.compile(
@@ -65,11 +72,25 @@ GREETING_RE = re.compile(r"^(thanks?|thank you|regards|best|sincerely|cheers|ver
 ADDRESS_RE = re.compile(r"(^\d+[\w-]*\s+\w|\b(street|st\.?|avenue|ave\.?|road|rd\.?|boulevard|blvd|plaza|place|"
                         r"suite|floor|fl\.|broadway|drive|lane|parkway|court\s+st|p\.?o\.?\s+box)\b|"
                         r",\s*(NY|N\.Y\.|New York|NJ|New Jersey|CT)\b|\b\d{5}(?:-\d{4})?\s*$)", re.I)
+# What makes a line an address even though it carries a firm's "&", "LLP" or "Law Office": a street
+# number in front, a suite or floor, a state or a ZIP code. A street word alone ("Lane", "Plaza",
+# "Broadway") does not: "Hill & Lane" and "Broadway Law Group, PLLC" are firms.
+SURE_ADDRESS_RE = re.compile(r"(^\d+[\w-]*\s+\w|&\s*\d|\b(suite|floor|fl\.|p\.?o\.?\s+box)\b|"
+                             r",\s*(NY|N\.Y\.|New York|NJ|New Jersey|CT)\b|\b\d{5}(?:-\d{4})?\s*$)", re.I)
+# The "-----------X" rules that frame a court caption
 X_LINE_RE = re.compile(r"^[-\s]*-{5,}[-\s]*X?\s*$|^X\s*[-\s]{5,}$")
+# Lines that end a block of counsel: APPEARANCES / BEFORE / HELD / PRESENT (often letter-spaced),
+# the judge's HONORABLE line, a bare page or line number, "COPY", "Proceedings" and the court reporter's line
 HEADING_RE = re.compile(
     r"^(A\s*P\s*P\s*E\s*A\s*R\s*A\s*N\s*C\s*E\s*S|B\s*E\s*F\s*O\s*R\s*E|H\s*E\s*L\s*D|P\s*R\s*E\s*S\s*E\s*N\s*T)"
     r"\s*:?\s*$|^(THE\s+)?HONORABLE\b|^J\s+U\s+S\s+T\s+I\s+C\s+E|^\d{1,3}$|^COPY$|^Proceedings$|"
     r"(senior|official|principal)?\s*court\s+reporter\s*$", re.I)
+
+
+def is_firm_line(line: str) -> bool:
+    """A law firm's name: it has a firm's mark (&, LLP, PLLC, P.C., Law Office of ...) and is not plainly
+    an address (see SURE_ADDRESS_RE)."""
+    return bool(FIRM_RE.search(line)) and not SURE_ADDRESS_RE.search(line)
 
 
 def smart_title(s: str) -> str:
@@ -143,7 +164,11 @@ DATE_JOIN_WORDS = r"(,|and|&|-|through|thru|to)"  # between the days of a list: 
 
 
 def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, str]]:
-    """Returns (start, end, M/D/YYYY) for every date in text."""
+    """Returns (start, end, M/D/YYYY) for every date in text, in order ('Sept. 14, 2026', '9/14/26').
+
+    allow_yearless (for e-mails): also '9/14' and 'March 3' without a year. Such a day takes the year of
+    a dated day right after it in a list ('9/14 and 9/15/2025'), else the year from guess_year.
+    """
     found = []
     for m in re.finditer(MONTH_RE + r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b", text, re.I):
         v = fmt_date(int(m.group(3)), MONTHS[m.group(1)[:3].lower()], int(m.group(2)))
@@ -176,6 +201,9 @@ def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, 
 
 # A transcript's line number at the left margin: " 1    SUPREME COURT ..." or a number on a line of its own.
 _LINE_NO = re.compile(r"^[ \t]{0,4}(\d{1,2})(?:[ \t]{2,}(?=\S)|[ \t]*$)")
+# Signs read by title_page_count: the title says it goes on ("Appearances continued", "continued on the
+# next page"); someone speaks (THE COURT:, MR. POE:, a Q or A line), so the proceedings have begun; a page
+# lists counsel (Esq., "Attorneys for", "BY:").
 _CONTINUES = re.compile(r"(?i)\b(?:title|appearances?|caption)\b[^\n]{0,40}\bcontinue[sd]?\b|"
                         r"\bcontinue[sd]?\s+on\s+(?:the\s+)?(?:next|following)\s+page")
 _SPEAKER = re.compile(r"(?m)^\s*(?:\d{1,2}\s+)?(?:(?:THE\s+(?:COURT|WITNESS|CLERK|DEFENDANT|PLAINTIFF)|"
@@ -198,17 +226,23 @@ def strip_line_numbers(text: str) -> tuple[str, bool]:
     return "\n".join(lines), True
 
 
-def title_pages(text: str) -> str:
-    """The title of a transcript: its first page, plus the pages after it while the title goes on (more
-    appearances than fit on one page). A page belongs to the title when the page before says so ("Title
-    continues on next page") or when it lists counsel and nobody speaks on it yet."""
+def title_page_count(text: str) -> int:
+    """How many pages the title of a transcript takes: its first page, plus the pages after it while the
+    title goes on (more appearances than fit on one page). A page belongs to the title when the page before
+    says so ("Title continues on next page") or when it lists counsel and nobody speaks on it yet.
+    `text` has its pages separated by form feeds ("\\f"), as ingest gives them."""
     pages = text.split("\f")
-    keep = pages[:1]
+    count = 1
     for prev, page in zip(pages, pages[1:]):
         if _SPEAKER.search(page) or not (_CONTINUES.search(prev) or _COUNSEL.search(page)):
             break
-        keep.append(page)
-    return "\n\n".join(keep)
+        count += 1
+    return count
+
+
+def title_pages(text: str) -> str:
+    """The title of a transcript (see title_page_count), its pages joined."""
+    return "\n\n".join(text.split("\f")[:title_page_count(text)])
 
 
 # --------------------------------------------------------------- extractor
@@ -311,7 +345,6 @@ class RegexExtractor:
         self._pages(ing, text, ex)
         ex.attorneys = self._attorneys(text)
 
-        # The file name often carries case, index and date ("5-22-2026 Smith v Jones - 712345-2024").
         if ing.kind in ("pdf", "image", "email", "text") and "." in ing.name:
             stem = re.sub(r"[_]+", " ", ing.name.rsplit(".", 1)[0])
             fx = Extraction()
@@ -335,7 +368,7 @@ class RegexExtractor:
 
     # ----- index number
     def _index(self, text: str, ex: Extraction, unlabeled_conf: float = 0.45) -> None:
-        """Index number written as N/YYYY (a two-digit year means 20xx).
+        """Index numbers ('712345-2024', 'Index No. 712345/24', '712345 of 2024'), written as '712345/2024'.
 
         Confidence: 0.95 when labelled ('Index No. 712345-2024', 'Docket ...'), 0.8 after a bare 'No.',
         and unlabeled_conf for a lone number-year pair (ZIP+4 codes after a state are skipped).
@@ -411,9 +444,9 @@ class RegexExtractor:
         # numbered parts ("PART 25", "Part: 53", "Part TR-3") - any capitalisation
         numbered = re.compile(r"\b(?:IAS\s+|TRIAL\s+|TAP\s+)?PART\s*(?:No\.?)?\s*[:#]?\s*"
                               r"((?:[A-Z]{1,4}[- ]?)?\d{1,3}[A-Z]?)\b", re.I)
-        # letter parts ("PART MDP", "Part: TAP-A") - the code itself must be in capitals, so
-        # "part of the record" is not mistaken for a part
+        # letter parts ("PART MDP", "Part: TAP-A") - the code itself in capitals
         lettered = re.compile(r"\b(?:PART|Part)(?:\s+No\.?)?[ \t]*[:#]?[ \t]*([A-Z]{1,6}(?:-[A-Z0-9]{1,3})?)\b(?![a-z])")
+        # capital words that follow PART in ALL-CAPS text without being one ("PART OF THE RECORD")
         not_a_part = {"OF", "THE", "AND", "IN", "TO", "A", "AN", "IS", "IT", "ON", "FOR", "AS", "OR", "BY", "AT", "NO"}
         for scope, conf in ((head, 0.9), (text, 0.7)):
             for m in numbered.finditer(scope):
@@ -502,8 +535,10 @@ class RegexExtractor:
     def _caption(self, text: str, ex: Extraction) -> None:
         """Reads the court caption: the lines above and below a line that says 'against' or 'v.'.
 
-        Takes up to eight lines each way and stops at the court heading, X rule lines or a party role
-        such as 'Plaintiff'. Adds the full caption (0.85) and a short form with 'et al.' (0.55).
+        Takes up to eight lines each way. Going up it stops at the court heading or an X rule line and
+        skips party roles ('Plaintiffs,'); going down it stops at those and at the first party role.
+        Index numbers and the like are skipped. Adds the full caption (0.85) and a short form with
+        'et al.' (0.55).
         """
         lines = text.splitlines()
         role = re.compile(r"^(?:[-\s]*)(plaintiffs?|defendants?|petitioners?|respondents?|claimants?|appellants?|"
@@ -573,13 +608,14 @@ class RegexExtractor:
 
         Highest: after a label such as 'Date of proceedings:' or 'held on'. Next: a date alone on one of
         the first lines of a court document. Then a date after 'on', 'from' or 'for', then any other date.
-        E-mails skip their 'Sent:' and 'Date:' headers and allow dates without a year. Runs of dates
+        E-mails and other plain text skip 'Sent:', 'Date:' and 'On ... wrote:' lines and allow dates
+        without a year. Runs of dates
         joined by 'and', commas or 'through' also become one multi-date candidate, and an e-mail naming
         two to six different dates gets an 'all dates in the text' candidate.
         """
         is_email = self.kind in ("email", "text")
         body = text
-        if is_email:  # skip header lines like "Sent: ..." / "Date: ..."
+        if is_email:
             body = "\n".join(l for l in text.splitlines()
                              # "Sent: ..." / "Date: ..." headers, not "Date of proceedings: ..."
                              if not re.match(r"(?i)^\s*((sent|date|received)\s*:|on .* wrote\s*:?)", l))
@@ -618,6 +654,7 @@ class RegexExtractor:
                 ex.add("dates", ", ".join(uniq), SRC_REGEX, 0.5, "all dates in the text")
 
     # ----- proceeding types
+    # Words that tick each proceeding type box on the form
     PROC_PATTERNS = {
         "Trial": r"\b(?:jury|bench|non-?jury)\s+trial\b|\btrial\b",
         "Hearing": r"\bhearing\b|appoint(?:ment of)?\s+a\s+guardian|\bguardianship\b|article\s+81|\btraverse\b|"
@@ -627,6 +664,7 @@ class RegexExtractor:
         "Plea": r"\bplea\b|\bpleads?\s+guilty\b",
         "Arraignment": r"\barraign(?:ment|ed)?\b",
     }
+    # Labels offered for "Other (specify)", from e-mails only
     OTHER_PATTERNS = {
         "Jury selection": r"jury\s+selection|voir\s+dire",
         "Summations": r"\bsummations?\b|closing\s+arguments?",
@@ -662,7 +700,8 @@ class RegexExtractor:
         """What was ordered, from the wording of an e-mail: delivery speed (expedited, daily, immediate,
         regular), number of copies ('original and 2 copies') and a rate per page.
 
-        On an invoice it reads the Regular and Expedited rates the invoice lists.
+        On an invoice it reads the totals it lists per speed ('Regular Rate: $94.50', 'Expedited Rate: ...');
+        merge.apply_defaults works the page count out from them.
         """
         if self.kind in ("email", "text") and not self.is_invoice:
             if re.search(r"(?i)\b(expedit\w*|rush)\b", text):
@@ -693,12 +732,17 @@ class RegexExtractor:
     def _pages(self, ing: Ingested, text: str, ex: Extraction) -> None:
         """Estimated pages: the page count of a transcript PDF (noting its page numbers, such as
         'transcript pages 358-380', when it does not start at 1), or 'N pages' written in an e-mail.
+        A transcript's count leaves out the word index printed after it (see takes.scan_pdf).
         """
         if ing.kind == "pdf" and self.is_transcript and ing.page_count:
+            pages = body_pages(ing.marks, ing.page_count)  # without the word index printed after it
             note = ""
             if ing.first_page_no and ing.first_page_no > 1:
-                note = f"transcript pages {ing.first_page_no}-{ing.first_page_no + ing.page_count - 1}"
-            ex.add("est_pages", str(ing.page_count), SRC_REGEX, 0.95, note or "page count of the transcript")
+                note = f"transcript pages {ing.first_page_no}-{ing.first_page_no + pages - 1}"
+            if pages < ing.page_count:
+                note = (note or f"{pages} transcript pages") + \
+                    f", not counting {ing.page_count - pages} page(s) after the transcript (word index)"
+            ex.add("est_pages", str(pages), SRC_REGEX, 0.95, note or "page count of the transcript")
         for m in re.finditer(r"(?i)\b(?:about|approx\.?|approximately|~|est\.?|estimated)?\s*(\d{1,4})\s+pages?\b", text):
             if self.kind in ("email", "text"):
                 ex.add("est_pages", m.group(1), SRC_REGEX, 0.7)
@@ -707,13 +751,15 @@ class RegexExtractor:
     def _attorneys(self, text: str) -> list[Attorney]:
         """Attorneys and firms found in the text, as Attorney entries.
 
-        Reads three things. An invoice's 'To: Firm, attn: e-mail' and an e-mail's 'From:' line become
-        the orderer, ticked. Then the text is cut into blocks at blank lines and headings such as
-        APPEARANCES; in each block names come from 'Name, Esq.' or 'BY:', the firm from FIRM_RE, and
-        address, phone, fax, e-mail and role ('Attorney for the Plaintiff') from the other lines.
-        Placeholders such as 'Unrepresented' become unticked entries. The reporter's own block, e-mail
-        and phone are skipped, and duplicates are merged by dedupe_attorneys. Block entries are not
-        ticked, because a transcript lists everyone who appeared, not who ordered.
+        In a transcript only the title page(s) are read (from APPEARANCES down, if it has that heading).
+        Lines of dialogue ('MR. POE: ...') are dropped everywhere. Then two passes. First, an invoice's
+        'To: Firm, attn: e-mail' and an e-mail's 'From:' line become the orderer, ticked. Then the text is cut into blocks
+        at blank lines and headings such as APPEARANCES; in each block names come from 'Name, Esq.' or
+        'BY:', the firm from FIRM_RE, and address, phone, fax, e-mail and role ('Attorney for the
+        Plaintiff') from the other lines. Placeholders such as 'Unrepresented' become unticked entries.
+        The reporter's own block, e-mail and phone are skipped, and duplicates are merged by
+        dedupe_attorneys. Block entries are not ticked, because a transcript lists everyone who
+        appeared, not who ordered.
         """
         found: list[Attorney] = []
         if self.is_transcript:  # appearances are on the title page(s); the body is dialogue
@@ -773,7 +819,8 @@ class RegexExtractor:
             caps_names = False  # transcript style: everything in capitals
             role_open = False   # the role went on to the next line ("Attorneys for A, B, and" / "C")
             for i, l in enumerate(block):
-                if role_open and not (ESQ_RE.search(l) or ADDRESS_RE.search(l) or EMAIL_RE.search(l)
+                if role_open and not (ESQ_RE.search(l) or (ADDRESS_RE.search(l) and not is_firm_line(l))
+                                      or EMAIL_RE.search(l)
                                       or PHONE_RE.search(l) or re.match(r"(?i)^by\s*:", l)):
                     party = f"{party} {l.lower() if upper else l}".strip()
                     role_open = bool(re.search(r"(?i)(,|&|\band)$", l))
@@ -805,7 +852,8 @@ class RegexExtractor:
                             names.append(self.tc(n))
                     continue
                 m = re.match(r"(?i)^by\s*:?\s+([A-Z][A-Za-z.'\- ]{3,40})$", l)
-                if m and not ADDRESS_RE.search(l):
+                if m and not SURE_ADDRESS_RE.search(l):  # "BY: John Lane" is a name
+                    caps_names = caps_names or is_mostly_upper(m.group(1))
                     names.append(self.tc(m.group(1)))
                     continue
                 emails = EMAIL_RE.findall(l)
@@ -823,7 +871,7 @@ class RegexExtractor:
                     else:
                         phone = phone or fmt_phone(ph)
                     continue
-                if not firm and FIRM_RE.search(l) and not ADDRESS_RE.search(l):
+                if not firm and is_firm_line(l):
                     firm, firm_idx = l, i
                     if l.startswith("&") and client and client[-1] == block[i - 1].rstrip(":").strip():
                         firm = f"{client.pop()} {l}"

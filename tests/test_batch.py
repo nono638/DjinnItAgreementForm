@@ -71,6 +71,7 @@ def test_document_without_a_date_joins_the_only_job_of_its_case(settings):
 
 
 def test_combine_dates_option(settings):
+    """With "put all days of the same case on one form", two days of one case make one job with both dates."""
     settings.batch_combine_dates = True
     jobs = group([invoice(settings, name="a"), invoice(settings, date="5-26-2026", name="d")], settings)
     assert [names(j) for j in jobs] == [["a", "d"]]
@@ -92,6 +93,8 @@ def test_new_documents_join_existing_jobs_and_keep_edits(settings):
 
 
 def test_folder_in_forms_out(settings, tmp_path):
+    """A folder (with a subfolder) is searched for documents, earlier outputs and unknown files are skipped,
+    a damaged PDF is reported, and the rest are grouped and filled into the output folder."""
     src = tmp_path / "in"
     (src / "sub").mkdir(parents=True)
     (src / "1.txt").write_text(invoice_text(title="Smith v Jones", index="712222-2024", date="5-22-2026"))

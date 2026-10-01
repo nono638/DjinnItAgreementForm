@@ -53,6 +53,7 @@ Part: 53
 
 
 def invoice_text(title="Smith v Jones", index="712222-2024", date="5-22-2026") -> str:
+    """The INVOICE text for one case and day of proceedings."""
     return INVOICE.format(title=title, index=index, date=date)
 
 

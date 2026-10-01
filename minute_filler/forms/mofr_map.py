@@ -20,7 +20,7 @@ TEXT = {
 }
 
 CHECKS = {
-    "Check Box0": "criminal",
+    "Check Box0": "criminal",            # header: the division (Settings.mofr_division)
     "Check Box1": "civil",
     "Check Box3": "daily",               # Section I type of order: DAILY (NEXT DAY DELIVERY)
     "Check Box4": "expedited",           # EXPEDITE (THREE DAY DELIVERY)

@@ -12,15 +12,17 @@ from .models import (CaseInfo, Candidate, Extraction, FIELD_KEYS, FieldState, SR
 from .rates import speed_key
 from .settings import Settings
 
-CHECK_THRESHOLD = 0.6
+CHECK_THRESHOLD = 0.6  # a proceeding type is ticked from this confidence up
 
 
 def _norm(v: str) -> str:
+    """A value for comparing: '712345-2024' and '712345/2024' are the same."""
     return re.sub(r"[^a-z0-9]", "", v.lower())
 
 
 def pool(extractions: list[Extraction]) -> dict[str, list[Candidate]]:
-    """All candidates per field; agreement between sources boosts confidence."""
+    """All candidates per field, best first. When the rules and the AI agree on a value its confidence
+    goes up, and it is credited to the rules."""
     out: dict[str, list[Candidate]] = {}
     for ex in extractions:
         for key, cands in ex.fields.items():
@@ -42,6 +44,9 @@ def pool(extractions: list[Extraction]) -> dict[str, list[Candidate]]:
 
 
 def merge(extractions: list[Extraction], s: Settings, previous: CaseInfo | None = None) -> CaseInfo:
+    """One CaseInfo from the extractions of all of a job's documents: for each field the best candidate,
+    with up to eight likely values offered as alternatives; the likely proceeding types ticked; the attorneys merged;
+    blanks filled from Settings (apply_defaults). Values the user typed into `previous` are kept."""
     case = CaseInfo()
     cands = pool(extractions)
 
@@ -90,6 +95,9 @@ def merge(extractions: list[Extraction], s: Settings, previous: CaseInfo | None 
 
 
 def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]] | None = None) -> None:
+    """Fills blank fields from Settings: court, county, delivery, copies, the rate from the rate sheet, the
+    delivery date and today's agreement date. With the pooled candidates `cands`, the page count can also
+    come from an invoice's total."""
     cands = cands or {}
     f = case.fields
 
@@ -106,7 +114,7 @@ def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]
     default("copies", s.default_copies)
     default("rate", s.rate_for(f["delivery"].value))
 
-    # Pages from an invoice total: total / rate
+    # Pages from an invoice's total at the chosen speed ("Regular Rate: $94.50" at $4.30 a page -> 22)
     if not f["est_pages"].value:
         for key, dl in (("invoice_regular", "Regular"), ("invoice_expedited", "Expedited")):
             if key in cands and speed_key(dl) == speed_key(f["delivery"].value):
@@ -138,6 +146,7 @@ def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
 
 
 def refresh_rate(case: CaseInfo, s: Settings) -> None:
+    """Rate = the rate sheet's rate for the chosen delivery type (unless the user typed one)."""
     f = case.fields["rate"]
     if f.source == SRC_USER and f.value:
         return

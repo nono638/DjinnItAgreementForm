@@ -63,6 +63,7 @@ def labels(ws, rows: list[tuple], col_width=(26, 46)) -> None:
 
 
 def build() -> Workbook:
+    """The template workbook, not yet saved (its tabs are listed in the module docstring)."""
     wb = Workbook()
 
     # ---------------------------------------------------------------- Setup

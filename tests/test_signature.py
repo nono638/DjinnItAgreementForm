@@ -62,6 +62,7 @@ def test_signature_is_placed_on_the_reporter_line(form, settings, tmp_path):
 
 
 def settings_on(s):
+    """The same settings, signing again."""
     s.sign_reporter = True
     return s
 

@@ -21,11 +21,13 @@ MOFR_PROCS = ("Sentence", "Plea")
 
 
 def mofr_path() -> Path:
+    """The blank MOFR that comes with the app (in the forms folder)."""
     return forms_dir() / MOFR_FILE
 
 
 def build_values(case: CaseInfo, s: Settings, pages: str = "") -> dict[str, str | bool]:
-    """The MOFR's values: field key (see mofr_map) -> text or checkmark."""
+    """The MOFR's values: field key (see mofr_map) -> text or checkmark. pages: the transcript's page count,
+    when known (else the estimated pages)."""
     g = case.get
     civil = s.mofr_division != "criminal"
     title = " ".join(g("case_name").split())

@@ -30,7 +30,8 @@ STATUS_COLORS = {"open": "#d97706", "paid": "#16a34a", "void": "#8a8797"}  # rea
 
 
 def _item(text, align_right: bool = False, data=None) -> QTableWidgetItem:
-    it = QTableWidgetItem("" if text is None else str(text))
+    """A read-only table cell showing text (None shows as blank). data, when given, is kept under UserRole."""
+    it =QTableWidgetItem("" if text is None else str(text))
     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
     if align_right:
         it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -40,13 +41,15 @@ def _item(text, align_right: bool = False, data=None) -> QTableWidgetItem:
 
 
 def _money_item(d) -> QTableWidgetItem:
-    it = _item(fmt(d), True)
+    """A right-aligned cell showing an amount as "$1,234.50", with the plain number kept under UserRole + 1."""
+    it =_item(fmt(d), True)
     it.setData(Qt.UserRole + 1, float(d))
     return it
 
 
 def _table(cols: list[str]) -> QTableWidget:
-    t = QTableWidget(0, len(cols))
+    """An empty table with these column headings: whole-row selection, striped rows, no row numbers."""
+    t =QTableWidget(0, len(cols))
     t.setHorizontalHeaderLabels(cols)
     t.verticalHeader().setVisible(False)
     t.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -58,7 +61,7 @@ def _table(cols: list[str]) -> QTableWidget:
 
 
 class PaidDialog(QDialog):
-    """Asks which speed was paid for, how much and when."""
+    """Asks which speed was paid for, how much and when. The amount starts at the price of the chosen speed."""
 
     def __init__(self, inv: Invoice, parent=None):
         super().__init__(parent)
@@ -86,15 +89,20 @@ class PaidDialog(QDialog):
         self._speed_changed()
 
     def _speed_changed(self, _=None):
+        """Puts the chosen speed's price in the amount box."""
         self.amount.setText(str(money(self.inv.amounts.get(self.speed.currentData(), "0"))))
 
     def values(self) -> tuple[str, str, str]:
-        d = self.when.date()
+        """(speed, amount, date paid), e.g. ("Expedite", "125.00", "2026-09-30"), as Ledger.mark_paid takes them."""
+        d =self.when.date()
         return self.speed.currentData() or "", str(money(self.amount.text())), \
             date(d.year(), d.month(), d.day()).isoformat()
 
 
 class RecordsWindow(QDialog):
+    """The Records window. Two tabs: Invoices (filters, totals, paid ticks, by-firm and by-month sums) and
+    Everything made (each file the app made). The window does not load anything until reload() is called."""
+
     def __init__(self, s: Settings, parent=None):
         super().__init__(parent)
         self.s = s
@@ -128,6 +136,8 @@ class RecordsWindow(QDialog):
 
     # ------------------------------------------------------------ building
     def _filters(self, lay: QHBoxLayout, with_client: bool) -> tuple[QComboBox, QComboBox, QComboBox | None]:
+        """Adds Year and Month boxes (and a Firm box when with_client) to lay. The year and firm lists stay
+        empty until reload() fills them from the records."""
         year, month = QComboBox(), QComboBox()
         month.addItem("All months", 0)
         for m in range(1, 13):
@@ -145,6 +155,7 @@ class RecordsWindow(QDialog):
         return year, month, client
 
     def _build_invoices(self) -> QWidget:
+        """The Invoices tab: filters, the four total tiles, and the Invoices / By firm / By month tables."""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(12, 12, 12, 12)
@@ -201,6 +212,7 @@ class RecordsWindow(QDialog):
         return w
 
     def _build_activity(self) -> QWidget:
+        """The Everything made tab: kind, year and month filters, a search box and the table of files."""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(12, 12, 12, 12)
@@ -246,14 +258,16 @@ class RecordsWindow(QDialog):
         self.show_activity()
 
     def _invoice_filters(self) -> dict:
+        """The Invoices tab's filters as keyword arguments for Ledger.invoices ("All" is None or "")."""
         return dict(year=self.i_year.currentData() or None, month=self.i_month.currentData() or None,
                     client=self.i_client.currentData() or "", status=self.i_status.currentData() or "",
                     text=self.i_text.text().strip())
 
     def show_invoices(self, _=None) -> None:
+        """Lists the invoices that match the filters and updates the totals and the by-firm and by-month tabs."""
         self.shown = self.ledger.invoices(**self._invoice_filters())
         t = self.inv_table
-        t.blockSignals(True)
+        t.blockSignals(True)  # setting the Paid ticks must not look like the user clicking them
         t.setSortingEnabled(False)
         t.setRowCount(0)
         for inv in self.shown:
@@ -292,6 +306,7 @@ class RecordsWindow(QDialog):
 
     @staticmethod
     def _fill_summary(t: QTableWidget, rows, total) -> None:
+        """Fills a by-firm or by-month table from (name, Summary) rows, with a bold Total row last."""
         t.setRowCount(0)
         for name, sm in rows + [("Total", total)]:
             r = t.rowCount()
@@ -306,11 +321,13 @@ class RecordsWindow(QDialog):
         t.resizeColumnsToContents()
 
     def show_activity(self, _=None) -> None:
+        """Lists the files made that match the Everything made filters, with a count of each kind."""
         y, m = self.a_year.currentData() or 0, self.a_month.currentData() or 0
         since = until = ""
         if y:
             since, until = f"{y}-{m or 1:02}-01", f"{y}-{m or 12:02}-{calendar.monthrange(y, m or 12)[1]:02}"
         rows = self.ledger.activity(self.a_kind.currentData() or "", since, until, self.a_text.text().strip())
+        # A month in every year ("March", All years) is not one date range, so it is filtered here.
         if m and not y:
             rows = [a for a in rows if a.ts[5:7] == f"{m:02}"]
         t = self.act_table
@@ -330,11 +347,13 @@ class RecordsWindow(QDialog):
 
     # ------------------------------------------------------------ actions
     def _inv_at(self, row: int) -> Invoice | None:
-        it = self.inv_table.item(row, 0)
+        """The invoice shown on this table row, or None (row -1 is below the last row)."""
+        it =self.inv_table.item(row, 0)
         no = it.data(Qt.UserRole) if it else None
         return next((i for i in self.shown if i.invoice_no == no), None)
 
     def _paid_toggled(self, item: QTableWidgetItem) -> None:
+        """A Paid tick was clicked: ask about it once the click is over."""
         if item.column() != 0:
             return
         no, paid = item.data(Qt.UserRole), item.checkState() == Qt.Checked
@@ -359,6 +378,7 @@ class RecordsWindow(QDialog):
         self.show_invoices()
 
     def _open_invoice(self, inv: Invoice | None) -> None:
+        """Opens the invoice's PDF, or says where it was if it has been moved or deleted."""
         if inv is None:
             return
         if inv.file_path and Path(inv.file_path).exists():
@@ -368,6 +388,7 @@ class RecordsWindow(QDialog):
                                     f"{inv.file_path or '(unknown)'}")
 
     def _invoice_menu(self, pos) -> None:
+        """The right-click menu on an invoice: open, show in folder, paid / not paid, void / restore, notes."""
         row = self.inv_table.rowAt(pos.y())
         inv = self._inv_at(row)
         if inv is None:
@@ -388,12 +409,14 @@ class RecordsWindow(QDialog):
         m.exec(self.inv_table.viewport().mapToGlobal(pos))
 
     def _set_void(self, inv: Invoice) -> None:
+        """Voids the invoice after asking: it stays listed but leaves the totals."""
         if QMessageBox.question(self, "Void invoice", f"Void invoice {inv.invoice_no}? It stays in the list but is "
                                 "no longer counted in the totals.") == QMessageBox.Yes:
             self.ledger.void(inv.invoice_no)
             self.show_invoices()
 
     def _notes(self, inv: Invoice) -> None:
+        """Edits the invoice's free-text notes."""
         from PySide6.QtWidgets import QInputDialog
         text, ok = QInputDialog.getText(self, f"Invoice {inv.invoice_no}", "Notes:", text=inv.notes)
         if ok:
@@ -402,7 +425,8 @@ class RecordsWindow(QDialog):
 
     # ------------------------------------------------------------ exports
     def _filter_title(self) -> str:
-        f = self._invoice_filters()
+        """A title for an export that names the filters, e.g. "Invoices - March 2026 - Dana Smith (unpaid)"."""
+        f =self._invoice_filters()
         bits = []
         if f["month"]:
             bits.append(calendar.month_name[f["month"]])
@@ -416,23 +440,27 @@ class RecordsWindow(QDialog):
         return title
 
     def _ask_path(self, title: str, name: str, filt: str) -> Path | None:
+        """A Save As box that starts in the records folder with name filled in. None when cancelled."""
         folder = self.s.records_folder()
         folder.mkdir(parents=True, exist_ok=True)
         p, _ = QFileDialog.getSaveFileName(self, title, str(folder / safe_filename(name)), filt)
         return Path(p) if p else None
 
     def export_html(self) -> None:
+        """Saves a report of the invoices shown as a web page and opens it."""
         title = self._filter_title()
         p = self._ask_path("Save the report", f"{title}.html", "Web page (*.html)")
         if p:
             self._try(lambda: open_path(str(self.ledger.export_html(p, self.shown, title))))
 
     def export_xlsx(self) -> None:
+        """Saves the invoices shown (and everything made, and totals) as an Excel workbook and opens it."""
         p = self._ask_path("Export to Excel", f"{self._filter_title()}.xlsx", "Excel workbook (*.xlsx)")
         if p:
             self._try(lambda: open_path(str(self.ledger.export_xlsx(p, self.shown))))
 
     def export_csv(self) -> None:
+        """Writes invoices.csv and activity.csv to a folder the user picks and opens it."""
         folder = self.s.records_folder()
         folder.mkdir(parents=True, exist_ok=True)
         d = QFileDialog.getExistingDirectory(self, "Folder for invoices.csv and activity.csv", str(folder))
@@ -440,10 +468,12 @@ class RecordsWindow(QDialog):
             self._try(lambda: (self.ledger.export_csv(Path(d)), open_path(d)))
 
     def open_folder(self) -> None:
+        """Brings the CSV copies in the records folder up to date, then opens the folder."""
         folder = self.s.records_folder()
         self._try(lambda: (self.ledger.export_csv(folder), open_path(str(folder))))
 
     def _try(self, fn) -> None:
+        """Runs an export and shows why it failed, if it did."""
         try:
             fn()
         except Exception as e:

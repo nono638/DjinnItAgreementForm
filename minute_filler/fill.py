@@ -1,9 +1,13 @@
-"""Writes a CaseInfo + Attorney + reporter profile into one of the PDF forms.
+"""Writes a CaseInfo + Attorney + reporter profile into one of the minute agreement forms.
 
 Forms (Settings.form_choice):
   "ucs"      - the court's fillable UCS form (default)
   "clean"    - the app's re-typeset form with named fields and extra lines
   "original" - the 1999 scan with fields added on top
+
+Also helpers that the MOFR, invoices and run sheets share: writing form fields (set_text), file names
+(output_name, safe_filename, unique_path) and saving (save_output, which labels every PDF the app
+makes so it is never read back as an input).
 """
 from __future__ import annotations
 
@@ -27,12 +31,12 @@ FORM_SPEEDS = ("regular", "expedited", "daily")  # the speeds with a box of thei
 
 
 def forms_dir() -> Path:
-    # Works from source and from a PyInstaller bundle (forms are shipped as
-    # data under minute_filler/forms).
+    """The folder of blank forms. Works from source and from a PyInstaller bundle (the forms are
+    shipped as data under minute_filler/forms)."""
     return Path(__file__).resolve().with_name("forms")
 
 
-FORMS = {
+FORMS = {  # Settings.form_choice -> (file in forms/, name shown in Settings)
     "ucs": ("minute_agreement_ucs.pdf", "UCS form (fillable)"),
     "clean": ("minute_agreement_clean.pdf", "Re-typeset form"),
     "original": ("minute_agreement_original.pdf", "Original 1999 scan"),
@@ -41,14 +45,18 @@ DEFAULT_FORM = "ucs"
 
 
 def form_path(choice: str) -> Path:
+    """The blank PDF for a form choice; an unknown choice gets the UCS form."""
     return forms_dir() / FORMS.get(choice, FORMS[DEFAULT_FORM])[0]
 
 
 def text_width(s: str, fs: float) -> float:
+    """Width of `s` in points, in the fields' font at size `fs`."""
     return pymupdf.get_text_length(s, fontname=FIELD_FONT, fontsize=fs)
 
 
 def fit_size(s: str, rect: pymupdf.Rect, max_fs: float = MAX_FS) -> float:
+    """The font size for `s` on one line of `rect`: as large as the line's height allows (at most max_fs),
+    then smaller until it fits, but never below MIN_FS."""
     fs = min(max_fs, max(MIN_FS, rect.height * 0.78))
     while fs > MIN_FS and text_width(s, fs) > rect.width - 4:
         fs -= 0.5
@@ -73,7 +81,8 @@ def wrap(s: str, width: float, lines: int, fs: float = MAX_FS) -> list[str]:
 
 
 def wrap_fit(s: str, width: float, lines: int, max_fs: float = MAX_FS) -> tuple[list[str], float]:
-    """Largest font size at which `s` wraps into `lines` lines of `width`."""
+    """(lines, font size): the largest size at which `s` wraps into `lines` lines of `width`, the lines
+    padded with "" to that many. At MIN_FS the last line may still overflow."""
     fs = max_fs
     while fs > MIN_FS:
         out = wrap(s, width, lines, fs)
@@ -84,13 +93,16 @@ def wrap_fit(s: str, width: float, lines: int, max_fs: float = MAX_FS) -> tuple[
 
 
 def split_address(addr: str) -> list[str]:
-    lines = [l.strip(" ,") for l in re.split(r"[\r\n]+", addr or "") if l.strip(" ,")]
+    """An address as the form's two lines: the first line, then the rest joined with commas."""
+    lines =[l.strip(" ,") for l in re.split(r"[\r\n]+", addr or "") if l.strip(" ,")]
     if len(lines) > 2:
         lines = [lines[0], ", ".join(lines[1:])]
     return lines + [""] * (2 - len(lines))
 
 
 def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str, str | bool]:
+    """What goes on the form, by the keys of forms/*_map.py ('judge', 'proc_trial', 'delivery_daily',
+    'atty_email'...). Boxes are True/False. With atty None the attorney's lines stay blank."""
     g = case.get
     v: dict[str, str | bool] = {
         "court": g("court"), "county": g("county"), "part": g("part"), "judge": g("judge"),
@@ -143,14 +155,17 @@ def form_text(s: str) -> str:
 
 
 def set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
+    """Writes `text` into a text field at size `fs`, else the largest that fits."""
     w.field_value = text
     w.text_font = "Helv"
+    # size 0 on a blank field = automatic, for whoever types into it later in a PDF viewer
     w.text_fontsize = (fs or fit_size(text, w.rect)) if text else 0
     w.text_color = (0, 0, 0)
     w.update()
 
 
 def set_check(w: pymupdf.Widget, on: bool) -> None:
+    """Ticks or clears a checkbox field."""
     w.field_value = w.on_state() if on else "Off"
     w.update()
 
@@ -165,6 +180,7 @@ def _spread(v: dict, text: str, keys: list[str], width: float, fixed: dict[str, 
 
 
 def _fill_clean(doc: pymupdf.Document, v: dict) -> None:
+    """Fills the re-typeset form, whose fields are named by our keys and have real checkboxes."""
     page = doc[0]
     widgets = {w.field_name: w for w in page.widgets()}
     fixed: dict[str, float] = {}
@@ -180,9 +196,11 @@ def _fill_clean(doc: pymupdf.Document, v: dict) -> None:
 
 
 def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
-    """Fills a form whose field names are mapped to our keys (forms/*_map.py): blank text
-    lines get "X" for checkmarks, and missing lines (signatures etc.) are printed as overlays."""
+    """Fills a form whose field names are mapped to our keys (forms/*_map.py). Its boxes are text
+    fields, so a ticked one gets an "X"; lines it lacks (signatures etc.) are printed as overlays.
+    case_fs: the largest font size for the case name."""
     page = doc[0]
+    # the original's fields are named "Text-<id>"; fields not in the map end up under None and are skipped
     widgets = {fmap.WIDGETS.get(w.field_name.removeprefix("Text-")): w for w in page.widgets()}
     fixed: dict[str, float] = {}
     for k, val in v.items():
@@ -216,12 +234,13 @@ def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
 
 
 def safe_filename(s: str) -> str:
+    """A name Windows accepts for a file: 'Roe v. Poe: 9/14' -> 'Roe v. Poe- 9-14'. At most 150 characters."""
     s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", s)
     s = re.sub(r"\s+", " ", s).strip(" .-")
     return s[:150] or "Minute Agreement"
 
 
-_NOT_A_SPLIT = r"(?!(?:Inc|LLC|L\.L\.C|Corp|P\.C|LLP|Ltd|Jr|Sr)\b)"
+_NOT_A_SPLIT = r"(?!(?:Inc|LLC|L\.L\.C|Corp|P\.C|LLP|Ltd|Jr|Sr)\b)"  # ", Inc." does not start another party
 
 
 def short_caption(name: str, limit: int = 60) -> str:
@@ -234,7 +253,10 @@ def short_caption(name: str, limit: int = 60) -> str:
 
 def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool = False,
                 pattern: str | None = None, fallback: str = "Minute Agreement", **extra: str) -> str:
-    """dated: add the date of the minutes, to tell apart the forms for several days of one case.
+    """The file name (with .pdf) for a PDF made for this case, from a pattern with {case} (short caption),
+    {index}, {attorney}, {date} (the first date of the minutes) and {today}. A pattern that can't be
+    filled in gives '<fallback> - <index>'.
+    dated: add the date of the minutes, to tell apart the forms for several days of one case.
     pattern: another file name pattern (MOFR, invoice) than the agreement's; extra: more placeholders."""
     pattern = s.filename_pattern if pattern is None else pattern
     day = case.get("dates").split(",")[0].strip().replace("/", "-")
@@ -293,6 +315,7 @@ def is_generated(path: Path) -> bool:
 
 
 def unique_path(p: Path) -> Path:
+    """`p`, or 'name (2).pdf', 'name (3).pdf'... when it already exists, so nothing is overwritten."""
     if not p.exists():
         return p
     for i in range(2, 1000):
@@ -303,6 +326,9 @@ def unique_path(p: Path) -> Path:
 
 
 def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, dated: bool = False) -> Path:
+    """Fills the agreement form chosen in Settings for one attorney (None = blank attorney lines), saves
+    it in out_dir and returns its path. A blank agreement date on `case` is set to today when Settings
+    say so."""
     if s.agreement_today and not case.get("agreement_date"):
         case.set("agreement_date", us_date())
     v = build_values(case, atty, s)

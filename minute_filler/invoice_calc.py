@@ -43,6 +43,7 @@ def extra_rate(sp: Speed, *names: str) -> Decimal:
 
 @dataclass
 class QuoteLine:
+    """One line of a Quote: 'Copy', its rate per page, how many, and the amount (rate x pages x qty)."""
     label: str
     rate: Decimal
     qty: int        # how many (copies, parties)
@@ -51,6 +52,7 @@ class QuoteLine:
 
 @dataclass
 class Quote:
+    """The price of one speed for one job, line by line."""
     speed: str                  # the sheet's name for it, e.g. "Expedite"
     pages: int
     parties: int
@@ -62,6 +64,7 @@ class Quote:
 
     @property
     def per_party(self) -> Decimal:
+        """What each party pays: the total split evenly, to the cent."""
         return (self.total / max(1, self.parties)).quantize(CENT, ROUND_HALF_UP)
 
     @property
@@ -97,7 +100,7 @@ def offered(sheet: RateSheet, speeds: list[str], chosen: str, choice: bool) -> l
     wanted = speeds if choice else [chosen]
     keys = {speed_key(w) for w in wanted if w}
     found = [sp for sp in sheet.speeds if sp.key in keys]
-    if not found and chosen:  # e.g. the job's speed isn't on the sheet's list: fall back to it
+    if not found and chosen:  # none of them is on the sheet: the job's own speed, matched by name too
         sp = sheet.find(chosen)
         found = [sp] if sp else []
     return found or sheet.speeds[:1]

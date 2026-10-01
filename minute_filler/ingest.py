@@ -1,10 +1,11 @@
 """Turns any dropped input into plain text (plus images for the AI model).
 
-- PDF with a text layer: text of the first pages, page count and first page number.
+- PDF with a text layer: text of the first pages (separated by form feeds, "\\f"), page count,
+  first page number, and for a transcript what each page says about itself (takes.scan_pdf).
 - Scanned PDF / photo: Windows' built-in OCR engine (fast, offline). Line
   positions are used to split the page into blocks, so appearance columns stay
   together.
-- E-mail: pasted text (the usual way) or a saved .eml; also .txt and .docx.
+- E-mail: pasted text (the usual way) or a saved .eml; also .txt, .htm(l) and .docx.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import pymupdf
 from PIL import Image, ImageOps
 
 from .log import describe, log
+from .takes import scan_pdf
 
 try:  # pillow-heif is optional
     from pillow_heif import register_heif_opener
@@ -29,25 +31,28 @@ except Exception:
     pass
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".heic", ".heif"}
-TEXT_EXT = {".txt", ".text", ".md", ".csv", ".htm", ".html"}
-PDF_TEXT_PAGES = 3
+PDF_TEXT_PAGES = 3  # a transcript's title and appearances are on its first pages; the rest is dialogue
 
 
 @dataclass
 class Ingested:
-    name: str
+    """One input as text, ready for the extractors."""
+    name: str                      # file name, or "Pasted text" / "Pasted image"
     kind: str                      # pdf / image / email / text
     text: str = ""
     images: list[bytes] = field(default_factory=list)   # JPEG bytes for the AI model
     page_count: int = 0
-    first_page_no: int | None = None
+    first_page_no: int | None = None  # the number printed on a transcript's first page ("358")
     ocr_used: bool = False
     warnings: list[str] = field(default_factory=list)
+    # PDF: one takes.PageMark per transcript page (its number, the reporter's initials...); [] otherwise
+    marks: list = field(default_factory=list)
 
 
 # --------------------------------------------------------------------- OCR
 
 def _winrt_ocr(png: bytes):
+    """Runs Windows OCR over PNG bytes and returns its OcrResult. Raises when no OCR language is installed."""
     from winrt.windows.graphics.imaging import BitmapDecoder
     from winrt.windows.media.ocr import OcrEngine
     from winrt.windows.storage.streams import DataWriter, InMemoryRandomAccessStream
@@ -73,7 +78,7 @@ def ocr_image(img: Image.Image) -> str:
     from winrt.windows.media.ocr import OcrEngine
 
     img = img.convert("RGB")
-    img.thumbnail((OcrEngine.max_image_dimension,) * 2)
+    img.thumbnail((OcrEngine.max_image_dimension,) * 2)  # Windows OCR refuses larger images
     buf = io.BytesIO()
     img.save(buf, "PNG")
     result = _winrt_ocr(buf.getvalue())
@@ -92,6 +97,8 @@ def ocr_image(img: Image.Image) -> str:
     heights = sorted(l[2] for l in lines)
     typical = heights[len(heights) // 2] or 10
 
+    # A new block starts after a gap of more than a line, when the text jumps back up the page (the
+    # next column), or when it starts far to the left or right of the line before.
     out, prev = [], None
     for x, y, h, text in lines:
         if prev is not None:
@@ -105,6 +112,7 @@ def ocr_image(img: Image.Image) -> str:
 
 
 def ocr_available() -> bool:
+    """True when Windows OCR works here (the winrt packages load and a language pack is installed)."""
     try:
         from winrt.windows.media.ocr import OcrEngine
         return OcrEngine.try_create_from_user_profile_languages() is not None
@@ -113,6 +121,7 @@ def ocr_available() -> bool:
 
 
 def _jpeg(img: Image.Image, max_side: int = 1400) -> bytes:
+    """The image as JPEG bytes, at most `max_side` pixels each way (enough for the AI model to read)."""
     img = img.convert("RGB")
     img.thumbnail((max_side, max_side))
     buf = io.BytesIO()
@@ -123,11 +132,14 @@ def _jpeg(img: Image.Image, max_side: int = 1400) -> bytes:
 # ------------------------------------------------------------------ inputs
 
 def ingest_image(path: Path) -> Ingested:
+    """A photo or scan file, turned upright (phone photos store their rotation separately) and read."""
     with Image.open(path) as img:  # closed again, so the file can be moved or deleted while the app is open
         return ingest_pil(ImageOps.exif_transpose(img), path.name)
 
 
 def ingest_pil(img: Image.Image, name: str = "Pasted image") -> Ingested:
+    """An image (pasted or from a file): its OCR text, and the picture itself for the AI model. Without
+    OCR the text stays blank and a warning says why."""
     ing = Ingested(name, "image", images=[_jpeg(img)])
     try:
         ing.text = ocr_image(img)
@@ -138,11 +150,14 @@ def ingest_pil(img: Image.Image, name: str = "Pasted image") -> Ingested:
 
 
 def ingest_pdf(path: Path) -> Ingested:
+    """A PDF file: see _read_pdf."""
     with pymupdf.open(path) as doc:  # closed again, so the file can be moved or deleted while the app is open
         return _read_pdf(doc, path.name)
 
 
 def _read_pdf(doc: pymupdf.Document, name: str) -> Ingested:
+    """The text of the first PDF_TEXT_PAGES pages (OCR for scanned ones, whose pictures also go to the
+    AI model), the page count, the number printed on the first page, and the page marks."""
     ing = Ingested(name, "pdf", page_count=doc.page_count)
     parts = []
     for i in range(min(PDF_TEXT_PAGES, doc.page_count)):
@@ -163,10 +178,15 @@ def _read_pdf(doc: pymupdf.Document, name: str) -> Ingested:
     m = re.match(r"\s*(\d{1,5})\s*\n", parts[0] if parts else "")
     if m:
         ing.first_page_no = int(m.group(1))
+    try:  # every page: who wrote it, and where the transcript ends (the word index after it isn't counted)
+        ing.marks = scan_pdf(doc)
+    except Exception as e:  # the run sheet then has one row for the whole transcript
+        log.warning("could not read the pages' initials: %s", describe(e))
     return ing
 
 
 def _html_to_text(html: str) -> str:
+    """Rough plain text of an HTML page or e-mail: line breaks kept, tags and scripts dropped."""
     html = re.sub(r"(?is)<(script|style).*?</\1>", "", html)
     html = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", html)
     text = re.sub(r"<[^>]+>", "", html)
@@ -175,6 +195,7 @@ def _html_to_text(html: str) -> str:
 
 
 def ingest_eml(path: Path) -> Ingested:
+    """A saved e-mail: its From/To/Subject/Date lines, then the body (plain text if it has one)."""
     msg = email.message_from_bytes(path.read_bytes(), policy=email.policy.default)
     header = "\n".join(f"{k}: {msg[k]}" for k in ("From", "To", "Subject", "Date") if msg[k])
     body = msg.get_body(preferencelist=("plain", "html"))
@@ -185,6 +206,7 @@ def ingest_eml(path: Path) -> Ingested:
 
 
 def ingest_docx(path: Path) -> Ingested:
+    """A Word file's text, read straight from its XML: one line per paragraph."""
     with zipfile.ZipFile(path) as z:
         xml = z.read("word/document.xml").decode("utf-8", "ignore")
     xml = re.sub(r"</w:p>", "\n", xml)
@@ -207,6 +229,8 @@ def decode_text(raw: bytes) -> str:
 
 
 def ingest_file(path: str | Path) -> Ingested:
+    """Reads any input file by its extension. A file that can't be read raises ValueError with a
+    message for the user (or FileNotFoundError / PermissionError as they are)."""
     path = Path(path)
     ext = path.suffix.lower()
     try:
@@ -223,6 +247,7 @@ def ingest_file(path: str | Path) -> Ingested:
 
 
 def _ingest_file(path: Path, ext: str) -> Ingested:
+    """ingest_file without the error wording: any other extension is read as text."""
     if ext == ".pdf":
         ing = ingest_pdf(path)
     elif ext in IMAGE_EXT:
@@ -243,5 +268,6 @@ def _ingest_file(path: Path, ext: str) -> Ingested:
 
 
 def ingest_text(text: str, name: str = "Pasted text") -> Ingested:
+    """Pasted text; it counts as an e-mail when a line starts with From:, To:, Sent: or Subject:."""
     kind = "email" if re.search(r"(?im)^(from|subject|sent|to):", text) else "text"
     return Ingested(name, kind, text=text)
