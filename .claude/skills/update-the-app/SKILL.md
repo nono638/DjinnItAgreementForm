@@ -34,7 +34,11 @@ Tell the user in a line or two what you're on as you go, e.g. "Step 2 of 7: docs
   backslashes (`\b` became a backspace character, `\\n` became a real newline). After a scripted patch,
   check the changed `.py` files for control characters. The working copy is CRLF.
 - **Long commands** (PyInstaller, about 3 minutes): `run_in_background`. Wait with an `until` loop, not
-  `sleep`. Don't combine `rm -rf` with other commands.
+  `sleep`. Don't combine `rm -rf` with other commands. Give commands no stray `cat` or `python -` that would
+  wait for input.
+- **Subagents** (the bug sweep runs several): tell each one to edit only its own files, to keep repro
+  scripts in the scratchpad, and never to end processes by name (`taskkill /IM python*` once closed the
+  user's own Python programs). Only processes it started itself.
 - Read the project memory (`MEMORY.md` and the files it points to) for the current state and known
   limits before starting.
 
@@ -45,6 +49,9 @@ Tell the user in a line or two what you're on as you go, e.g. "Step 2 of 7: docs
 2. Work may be waiting from an earlier session (built but not released, uncommitted changes). Look at the
    diff and include it. If you can't tell whether it was meant to ship, ask.
 3. Run the tests once so you know the starting point.
+4. Scan the whole repository, not just the changes, against the private words: older commits can hold a
+   real name that was added before the word was on the list. Run privacy_scan.py with `--all`. A hit in
+   the author's own credit lines (README contact, About box, installer publisher) is intended.
 
 ## Step 1: Bug sweep and fixes
 

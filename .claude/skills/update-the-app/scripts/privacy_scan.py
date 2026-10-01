@@ -9,6 +9,7 @@ written in the repository:
 Run from anywhere in the repository after `git add`:
     .venv/Scripts/python.exe .claude/skills/update-the-app/scripts/privacy_scan.py [--worktree]
 --worktree scans every change not yet committed (staged or not) and new files instead of the staged ones.
+--all scans every file of the repository (tracked or new), not just the changes.
 The names of the files are checked too, and the text of Excel workbooks and PDFs being added.
 Exit code 1 when something is found (or the check can't be done). Pictures can't be read: they are listed,
 look at them yourself.
@@ -41,7 +42,7 @@ COMMON = {"transcript", "copy", "invoice", "minutes", "page", "sheet", "supreme"
           "civil", "trial", "plaintiff", "defendant", "group", "office", "offices", "firm", "law", "esq", "llp", "pllc",
           "the", "and", "for", "state", "city", "health", "hospital", "hospitals", "care", "center", "medical",
           "associates", "attorneys", "private", "rates", "choice", "form", "agreement", "fillable", "minute", "auto",
-          "billing", "corporation", "company"}
+          "billing", "holding", "corporation", "company"}
 
 
 def terms() -> tuple[set[str], set[str]]:
@@ -163,6 +164,26 @@ def changes(worktree: bool) -> tuple[list[tuple[str, str]], list[str], list[str]
     return lines, list(dict.fromkeys(paths + new)), unread
 
 
+def every_file() -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """(file, line) for every line of every tracked or new file, as changes() gives them (--all)."""
+    files = [p for p in _git("ls-files", "--cached", "--others", "--exclude-standard", cwd=ROOT).splitlines() if p]
+    lines, unread = [], []
+    for f in files:
+        try:
+            data = (ROOT / f).read_bytes()
+        except OSError:
+            continue
+        if b"\0" in data:
+            text = document_text(f, data)
+            if text is None:
+                unread.append(f)
+                continue
+        else:
+            text = data.decode("utf-8", "replace")
+        lines += [(f, l) for l in text.splitlines()]
+    return lines, files, unread
+
+
 def main() -> int:
     if not PRIVATE.is_dir():
         print("samples_internal/ is missing: there is nothing to compare against - the check can't be done.")
@@ -179,7 +200,7 @@ def main() -> int:
         digits = re.sub(r"\D", "", text)
         return [w for w, p in patterns if p.search(text)] + [p for p in phones if p and p in digits]
 
-    lines, paths, pictures = changes("--worktree" in sys.argv)
+    lines, paths, pictures = every_file() if "--all" in sys.argv else changes("--worktree" in sys.argv)
     hits = []
     for f in paths:
         if f.startswith("samples_internal/"):
