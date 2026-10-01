@@ -11,7 +11,7 @@ import json
 import re
 
 from .extract_regex import (COURTS, DELIVERY_WORDS, PHONE_RE, PLACEHOLDER_RE, RegexExtractor, find_dates, fmt_phone,
-                            mentions_reporter, norm_index, normalize_caption, smart_title, tidy_name)
+                            mentions_reporter, norm_index, normalize_caption, smart_title, tidy_name, title_pages)
 from .ingest import Ingested
 from .models import Attorney, Extraction, PROC_TYPES, SRC_AI
 from .settings import Settings
@@ -131,8 +131,8 @@ class OllamaExtractor:
     def extract(self, ing: Ingested) -> Extraction:
         from datetime import date
         text = ing.text.strip()
-        if ing.kind == "pdf":  # a transcript's cover page carries everything
-            text = text.split("\f")[0]
+        if ing.kind == "pdf":  # a transcript's title page(s) carry everything
+            text = title_pages(text)
         kind = {"email": "an e-mail", "image": "OCR text of a photographed court document",
                 "pdf": "text of a court document"}.get(ing.kind, "free text")
         images = None

@@ -47,7 +47,7 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 
 ## Invoices and records
 
-An invoice can be made when one of the job's inputs is a **transcript PDF**: its page count is billed (you can change it in *Est. number of pages*). Several transcripts in one job, such as the days of a trial, are added up. One invoice is made for each ticked attorney, numbered 2026-0001, 2026-0002, … (the format is in Settings → Invoice). The footer shows the prices before you generate, and lets you change the number of ordering parties or bill a single speed instead of offering every speed.
+An invoice can be made when one of the job's inputs is a **transcript PDF**: its page count is billed (you can change it in *Est. number of pages*). Several transcripts in one job, such as the days of a trial, are added up. A title that runs over two pages ("Title continues on next page") is read to its end, so the attorneys listed on the second page are found too. One invoice is made for each ticked attorney, numbered 2026-0001, 2026-0002, … (the format is in Settings → Invoice). The footer shows the prices before you generate, and lets you change the number of ordering parties or bill a single speed instead of offering every speed.
 
 The price of each speed, per page of the transcript, is:
 

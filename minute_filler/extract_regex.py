@@ -172,6 +172,45 @@ def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, 
     return found
 
 
+# ------------------------------------------------------- transcript layout
+
+# A transcript's line number at the left margin: " 1    SUPREME COURT ..." or a number on a line of its own.
+_LINE_NO = re.compile(r"^[ \t]{0,4}(\d{1,2})(?:[ \t]{2,}(?=\S)|[ \t]*$)")
+_CONTINUES = re.compile(r"(?i)\b(?:title|appearances?|caption)\b[^\n]{0,40}\bcontinue[sd]?\b|"
+                        r"\bcontinue[sd]?\s+on\s+(?:the\s+)?(?:next|following)\s+page")
+_SPEAKER = re.compile(r"(?m)^\s*(?:\d{1,2}\s+)?(?:(?:THE\s+(?:COURT|WITNESS|CLERK|DEFENDANT|PLAINTIFF)|"
+                      r"(?:MR|MS|MRS|DR)\.\s+[A-Z][A-Za-z'\- ]*|COURT\s+OFFICER)\s*:|[QA][.:]?[ \t]{2,}\S)")
+_COUNSEL = re.compile(r"(?im)\besq\b|\battorneys?\s+for\b|^\s*(?:\d{1,2}\s+)?by\s*:")
+
+
+def strip_line_numbers(text: str) -> tuple[str, bool]:
+    """Removes the line numbers some transcripts print in front of the text of each line ("17    SMITH LAW
+    GROUP"), so that the rules see the text alone. Returns (text, True) when the lines were numbered that
+    way; text whose numbers stand on lines of their own, or that has none, comes back unchanged."""
+    lines = text.split("\n")
+    hits = [(i, m) for i, l in enumerate(lines) if (m := _LINE_NO.match(l))]
+    nums = [int(m.group(1)) for _, m in hits]
+    counted = any(nums[k:k + 5] == [1, 2, 3, 4, 5] for k in range(len(nums)))
+    if not counted or not any(m.end() < len(lines[i]) for i, m in hits):
+        return text, False
+    for i, m in hits:
+        lines[i] = lines[i][m.end():]
+    return "\n".join(lines), True
+
+
+def title_pages(text: str) -> str:
+    """The title of a transcript: its first page, plus the pages after it while the title goes on (more
+    appearances than fit on one page). A page belongs to the title when the page before says so ("Title
+    continues on next page") or when it lists counsel and nobody speaks on it yet."""
+    pages = text.split("\f")
+    keep = pages[:1]
+    for prev, page in zip(pages, pages[1:]):
+        if _SPEAKER.search(page) or not (_CONTINUES.search(prev) or _COUNSEL.search(page)):
+            break
+        keep.append(page)
+    return "\n\n".join(keep)
+
+
 # --------------------------------------------------------------- extractor
 
 def tidy_name(s: str, title_case: bool = True) -> str:
@@ -249,10 +288,12 @@ class RegexExtractor:
         confidence, because names like '5-22-2026 Smith v Jones - 712345-2024' are common.
         """
         ex = Extraction()
-        text = self._clean(ing.text)
+        text, numbered = strip_line_numbers(self._clean(ing.text))
         self.kind = ing.kind
         self.is_invoice = bool(re.search(r"(?im)^\s*invoice\b", text))
-        self.is_transcript = bool(re.search(r"(?m)^\s*1\s*\n\s*2\s*\n\s*3\s*\n", text)) and not self.is_invoice
+        # a transcript numbers its lines: 1, 2, 3 on lines of their own, or in front of the text
+        self.is_transcript = (numbered or bool(re.search(r"(?m)^\s*1\s*\n\s*2\s*\n\s*3\s*\n", text))) \
+            and not self.is_invoice
         self.is_caption_doc = bool(re.search(r"(?i)\bappearances\b|a p p e a r|b e f o r e|\bBEFORE:|-against-|"
                                              r"\bindex\s+n", text))
         head = text.split("\f")[0][:2500]
@@ -475,7 +516,7 @@ class RegexExtractor:
                 continue
             left, j = [], i - 1
             while j >= 0 and len(left) < 8:
-                l = lines[j].strip()
+                l = self._caption_side(lines[j])
                 if l and (stopper.search(l) or X_LINE_RE.match(l)):
                     break
                 if l and not role.match(l) and not noise.match(l):
@@ -483,7 +524,7 @@ class RegexExtractor:
                 j -= 1
             right, j = [], i + 1
             while j < len(lines) and len(right) < 8:
-                l = lines[j].strip()
+                l = self._caption_side(lines[j])
                 if l and (role.match(l) or X_LINE_RE.match(l) or stopper.search(l)):
                     break
                 if l and not noise.match(l):
@@ -497,6 +538,11 @@ class RegexExtractor:
                 short = self._short_caption(self.tc(lt), self.tc(rt))
                 if short != full:
                     ex.add("case_name", short, SRC_REGEX, 0.55, "short form")
+
+    @staticmethod
+    def _caption_side(line: str) -> str:
+        """A caption line without what stands in the column to its right ('Plaintiffs,       INDEX NO.')."""
+        return re.split(r"\s{4,}", line.strip())[0]
 
     @staticmethod
     def _split_parties(s: str) -> list[str]:
@@ -670,8 +716,11 @@ class RegexExtractor:
         ticked, because a transcript lists everyone who appeared, not who ordered.
         """
         found: list[Attorney] = []
-        if self.is_transcript:  # appearances are on the cover page; the body is dialogue
-            text = text.split("")[0]
+        if self.is_transcript:  # appearances are on the title page(s); the body is dialogue
+            text = title_pages(text)
+            m = re.search(r"(?im)^\s*A\s*P\s*P\s*E\s*A\s*R\s*A\s*N\s*C\s*E\s*S\b", text)
+            if m:  # what stands above the heading is the caption: its parties are not counsel
+                text = text[m.start():]
         lines = [l.strip() for l in text.splitlines()]
         lines = [l for l in lines if not re.match(r"^(MR|MS|MRS|DR)\.\s+[A-Z'-]+:|^THE\s+[A-Z ]+:", l)]
 
@@ -722,7 +771,14 @@ class RegexExtractor:
             names, addr, phone, fax, email_ = [], [], "", "", ""
             placeholder = ""
             caps_names = False  # transcript style: everything in capitals
+            role_open = False   # the role went on to the next line ("Attorneys for A, B, and" / "C")
             for i, l in enumerate(block):
+                if role_open and not (ESQ_RE.search(l) or ADDRESS_RE.search(l) or EMAIL_RE.search(l)
+                                      or PHONE_RE.search(l) or re.match(r"(?i)^by\s*:", l)):
+                    party = f"{party} {l.lower() if upper else l}".strip()
+                    role_open = bool(re.search(r"(?i)(,|&|\band)$", l))
+                    continue
+                role_open = False
                 if PARTY_HEADING_RE.match(l):
                     heading = PARTY_HEADING_RE.match(l).group(1).capitalize()
                     continue
@@ -735,6 +791,9 @@ class RegexExtractor:
                 if rm:
                     party = (rm.group(1) if rm.re is ROLE_RE else l).strip()
                     party = party[0].upper() + party[1:].lower() if upper else party
+                    if re.search(r"\b(?:[A-Za-z]\.)+[A-Za-z]$", party):  # "Sam Poe, M.D": the full stop was its own
+                        party += "."
+                    role_open = bool(re.search(r"(?i)(,|&|\band)$", l))
                     continue
                 esq = list(ESQ_RE.finditer(l))
                 if esq:
