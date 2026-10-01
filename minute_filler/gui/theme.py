@@ -32,6 +32,9 @@ QLabel#title { font-size: 16pt; font-weight: 600; }
 QLabel#subtitle, QLabel#muted { color: {muted}; }
 QLabel#section { font-size: 11pt; font-weight: 700; color: {card_title}; }
 QLabel#fieldLabel { color: {muted}; }
+QLabel#kpiValue { font-size: 17pt; font-weight: 700; }
+QLabel#kpiValue[tone="ok"] { color: {ok}; }
+QLabel#kpiValue[tone="warn"] { color: {review}; }
 
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
   background: {input}; border: 1px solid {input_border}; border-radius: 6px; padding: 5px 8px;
@@ -86,13 +89,13 @@ QLabel#badge[src="derived"] { color: {derived}; }
 QLabel#badge[src="you"] { color: {you}; }
 QLabel#badge[src=""] { color: transparent; border: 1px solid transparent; }
 
-QListWidget, QTableWidget {
+QListWidget, QTableWidget, QTableView {
   background: {card}; border: 1px solid {border}; border-radius: 8px; gridline-color: {border};
   alternate-background-color: {bg};
 }
 QListWidget::item { padding: 5px; }
-QListWidget::indicator { width: 15px; height: 15px; border: 1px solid {input_border}; border-radius: 4px; background: {input}; }
-QListWidget::indicator:checked { background: {accent}; border: 1px solid {accent}; image: url(CHECK_ICON); }
+QListWidget::indicator, QTableView::indicator { width: 15px; height: 15px; border: 1px solid {input_border}; border-radius: 4px; background: {input}; }
+QListWidget::indicator:checked, QTableView::indicator:checked { background: {accent}; border: 1px solid {accent}; image: url(CHECK_ICON); }
 QListWidget::item:selected, QTableWidget::item:selected { background: {sel}; color: {text}; }
 QHeaderView::section { background: {header_bg}; border: none; border-bottom: 1px solid {border}; padding: 5px; color: {muted}; font-weight: 600; }
 QTabWidget::pane { border: 1px solid {border}; border-radius: 8px; background: {card}; top: -1px; }

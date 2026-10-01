@@ -1,16 +1,17 @@
 """Settings/profile dialog and the 'please clarify' dialog shown before filling."""
 from __future__ import annotations
 
-from PySide6.QtCore import QThread, QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QTabWidget, QTextBrowser, QVBoxLayout,
-    QWidget,
+    QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QTabWidget,
+    QTextBrowser, QVBoxLayout, QWidget,
 )
 
+from .. import __version__
 from ..models import Attorney, FIELD_LABELS
-from ..settings import Settings
+from ..settings import OUTPUTS, SPEEDS, Settings
+from .widgets import check_row, open_path, open_url, refill_combo, rounded
 
 
 def _form(parent: QWidget) -> QFormLayout:
@@ -24,7 +25,7 @@ def _form(parent: QWidget) -> QFormLayout:
 
 
 class SettingsDialog(QDialog):
-    """The Settings window: tabs for My info, Defaults, Options and AI.
+    """The Settings window: tabs for My info, Defaults, Options, Invoice and AI.
 
     Nothing is stored until Save (accept), which copies every control back into the Settings object
     and saves it to disk. Cancel leaves the settings, and a picked but unsaved signature image,
@@ -60,9 +61,11 @@ class SettingsDialog(QDialog):
         self.p_phone = QLineEdit(p.phone)
         self.p_fax = QLineEdit(p.fax)
         self.p_email = QLineEdit(p.email)
+        self.p_web = QLineEdit(p.website)
+        self.p_web.setPlaceholderText("optional, shown on invoices")
         for label, wid in (("Name", self.p_name), ("Title", self.p_title), ("Address", self.p_addr1),
                            ("", self.p_addr2), ("Telephone", self.p_phone), ("Fax", self.p_fax),
-                           ("Email", self.p_email)):
+                           ("Email", self.p_email), ("Website", self.p_web)):
             f.addRow(label, wid)
         # Signature picture: shown as it will appear on the form; stored on Save
         self._sig_new: str | None = None  # None = unchanged, "" = removed, else a prepared file
@@ -125,8 +128,8 @@ class SettingsDialog(QDialog):
 
         self.days = {}
         row = QHBoxLayout()
-        for label, attr in (("Immediate", "days_immediate"), ("Daily", "days_daily"),
-                            ("Expedited", "days_expedited"), ("Regular", "days_regular")):
+        for label in reversed(SPEEDS):  # fastest first
+            attr = f"days_{label.lower()}"
             spin = QSpinBox()
             spin.setRange(0, 120)
             spin.setValue(getattr(settings, attr))
@@ -165,6 +168,14 @@ class SettingsDialog(QDialog):
             self.o_form.addItem(label, key)
         self.o_form.setCurrentIndex(max(0, self.o_form.findData(settings.form_choice)))
         f.addRow("Form", self.o_form)
+        make, self.o_outputs = check_row(OUTPUTS, settings.outputs)
+        make.addStretch(1)
+        f.addRow("Make by default", make)
+        self.o_division = QComboBox()
+        self.o_division.addItem("Civil division", "civil")
+        self.o_division.addItem("Criminal", "criminal")
+        self.o_division.setCurrentIndex(max(0, self.o_division.findData(settings.mofr_division)))
+        f.addRow("MOFR box", self.o_division)
         self.o_instr = QCheckBox("Include the instructions page (UCS form page 2)")
         self.o_instr.setToolTip("Unticked: the saved PDF has the form page only.")
         self.o_instr.setChecked(settings.include_instructions)
@@ -177,7 +188,7 @@ class SettingsDialog(QDialog):
         self.o_dir = QLineEdit(settings.output_dir)
         self.o_dir.setPlaceholderText("Same folder as the dropped file")
         browse = QPushButton("Browse...")
-        browse.clicked.connect(self._pick_dir)
+        browse.clicked.connect(lambda: self._pick_into(self.o_dir, "Save filled forms to"))
         row.addWidget(self.o_dir)
         row.addWidget(browse)
         f.addRow("Save to", row)
@@ -185,11 +196,77 @@ class SettingsDialog(QDialog):
         self.o_pattern.setToolTip("Placeholders:\n{case}  {index}  {attorney}\n"
                                   "{date} - date of the minutes\n{today} - the day the form is filled")
         f.addRow("File name", self.o_pattern)
+        self.o_mofr_pattern = QLineEdit(settings.mofr_filename_pattern)
+        self.o_mofr_pattern.setToolTip(self.o_pattern.toolTip())
+        f.addRow("MOFR file name", self.o_mofr_pattern)
         self.o_theme = QComboBox()
         self.o_theme.addItems(["system", "light", "dark"])
         self.o_theme.setCurrentText(settings.theme)
         f.addRow("Theme", self.o_theme)
         self.tabs.addTab(w, "Options")
+
+        # --- Invoice
+        w = QWidget()
+        f = _form(w)
+        intro = QLabel("Invoices are made from transcripts (they need the page count), priced from the rate sheet.")
+        intro.setObjectName("muted")
+        intro.setWordWrap(True)
+        f.addRow(intro)
+        self.i_choice = QCheckBox("List every speed below so the attorney can choose (a \"choice\" invoice)")
+        self.i_choice.setChecked(settings.invoice_choice)
+        f.addRow("", self.i_choice)
+        from ..rates import speed_key
+        offered = {speed_key(x) for x in settings.invoice_speeds}
+        speeds, self.i_speeds = check_row({n: n for n in SPEEDS}, [n for n in SPEEDS if speed_key(n) in offered],
+                                          spacing=12)
+        speeds.addStretch(1)
+        f.addRow("Speeds offered", speeds)
+        self.i_email = QCheckBox("Each party also gets an e-mailed copy (Email column of the rate sheet)")
+        self.i_email.setChecked(settings.invoice_include_email)
+        f.addRow("", self.i_email)
+        idx = QHBoxLayout()
+        self.i_index = QCheckBox("Add an index for each party and the judge from")
+        self.i_index.setChecked(settings.invoice_include_index)
+        self.i_threshold = QSpinBox()
+        self.i_threshold.setRange(1, 10000)
+        self.i_threshold.setValue(settings.invoice_index_threshold)
+        self.i_threshold.setSuffix(" pages")
+        self.i_threshold.setFixedWidth(110)
+        idx.addWidget(self.i_index)
+        idx.addWidget(self.i_threshold)
+        idx.addStretch(1)
+        f.addRow("", idx)
+        self.i_turn: dict[str, QLineEdit] = {}
+        for name in SPEEDS:
+            e = QLineEdit(settings.turnaround(name))
+            self.i_turn[name] = e
+            f.addRow(f"{name} turnaround", e)
+        self.i_pay = QPlainTextEdit(settings.invoice_payment_text)
+        self.i_pay.setPlaceholderText("How to pay you: Zelle, check payable to..., mailing address")
+        self.i_pay.setFixedHeight(96)
+        f.addRow("Payment", self.i_pay)
+        self.i_footer = QPlainTextEdit(settings.invoice_footer)
+        self.i_footer.setFixedHeight(56)
+        f.addRow("Footer note", self.i_footer)
+        self.i_number = QLineEdit(settings.invoice_number_format)
+        self.i_number.setToolTip("{year} and {seq} (the count this year, {seq:04} = 0007); {yy} = 26")
+        f.addRow("Invoice numbers", self.i_number)
+        self.i_pattern = QLineEdit(settings.invoice_filename_pattern)
+        self.i_pattern.setToolTip("Placeholders: {number} {case} {index} {attorney} {date} {today}")
+        f.addRow("File name", self.i_pattern)
+        row = QHBoxLayout()
+        self.i_records = QLineEdit(settings.records_dir)
+        self.i_records.setPlaceholderText(str(settings.records_folder()))
+        rb = QPushButton("Browse...")
+        rb.clicked.connect(lambda: self._pick_into(self.i_records, "Folder for the records (CSV copies)"))
+        row.addWidget(self.i_records)
+        row.addWidget(rb)
+        f.addRow("Records folder", row)
+        scroll = QScrollArea()  # a long tab: scrolls on small screens
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(w)
+        self.tabs.addTab(scroll, "Invoice")
 
         # --- AI
         w = QWidget()
@@ -218,7 +295,7 @@ class SettingsDialog(QDialog):
         f.addRow("Timeout", self.a_timeout)
         f.addRow(test, self.a_status)
         guide = QPushButton("How to install Ollama + gemma…")
-        guide.clicked.connect(lambda: OllamaHelpDialog(self.a_model.currentText().strip() or "gemma4:e2b",
+        guide.clicked.connect(lambda: OllamaHelpDialog(self.a_model.currentText().strip() or Settings.ollama_model,
                                                        self.a_host.text().strip(), self).exec())
         f.addRow("", guide)
         self.tabs.addTab(w, "AI")
@@ -293,12 +370,7 @@ class SettingsDialog(QDialog):
         sheets, _ = list_sheets(self._sheet_dir)
         self._sheets = {s.name: s for s in sheets}
         current = pick(sheets, self.d_sheet.currentData() or self.s.rate_sheet)
-        self.d_sheet.blockSignals(True)
-        self.d_sheet.clear()
-        for s in sheets or [current]:
-            self.d_sheet.addItem(s.name, s.name)
-        self.d_sheet.setCurrentIndex(max(0, self.d_sheet.findData(current.name)))
-        self.d_sheet.blockSignals(False)
+        refill_combo(self.d_sheet, [(s.name, s.name) for s in sheets or [current]], current.name)
         self._load_speeds()
 
     def _load_speeds(self):
@@ -306,11 +378,8 @@ class SettingsDialog(QDialog):
         from ..rates import FALLBACK
         sheet = self._sheets.get(self.d_sheet.currentData(), FALLBACK)
         keep = self.d_delivery.currentData() or self.s.default_delivery
-        self.d_delivery.clear()
-        for sp in sheet.speeds:
-            self.d_delivery.addItem(sp.label(), sp.name)
         found = sheet.find(keep)
-        self.d_delivery.setCurrentIndex(max(0, self.d_delivery.findData(found.name if found else "")))
+        refill_combo(self.d_delivery, [(sp.label(), sp.name) for sp in sheet.speeds], found.name if found else None)
 
     def _pick_sheet_dir(self):
         """Lets the user choose another rate sheets folder and reloads the sheet list from it."""
@@ -322,22 +391,14 @@ class SettingsDialog(QDialog):
 
     def _open_sheet_dir(self):
         """Opens the rate sheets folder (the one typed in, or the default) in Explorer."""
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
         from ..rates import sheets_dir
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(sheets_dir(self.d_dir.text().strip()))))
-
-    def _pick_dir(self):
-        """Lets the user choose the folder that filled forms are saved to."""
-        d = QFileDialog.getExistingDirectory(self, "Save filled forms to", self.o_dir.text())
-        if d:
-            self.o_dir.setText(d)
+        open_path(sheets_dir(self.d_dir.text().strip()))
 
     def _load_models(self):
         """Fills the model box with the models Ollama has installed. Silent if Ollama is not running (waits at most 2 seconds)."""
+        from ..extract_llm import OllamaExtractor
         try:
-            import ollama
-            names = [m.model for m in ollama.Client(host=self.s.ollama_host, timeout=2).list().models]
+            names = OllamaExtractor(self.s).installed_models(timeout=2)
         except Exception:
             return
         current = self.a_model.currentText()
@@ -353,12 +414,18 @@ class SettingsDialog(QDialog):
         ok, msg = OllamaExtractor(tmp).status()
         self.a_status.setText(("✓ " if ok else "✗ ") + msg)
 
+    def _pick_into(self, edit: QLineEdit, title: str):
+        d = QFileDialog.getExistingDirectory(self, title, edit.text() or edit.placeholderText())
+        if d:
+            edit.setText(d)
+
     def accept(self):
         """Copies every control into the Settings object, saves it to disk and closes."""
         s, p = self.s, self.s.profile
         p.name, p.title = self.p_name.text().strip(), self.p_title.text().strip()
         p.address1, p.address2 = self.p_addr1.text().strip(), self.p_addr2.text().strip()
         p.phone, p.fax, p.email = self.p_phone.text().strip(), self.p_fax.text().strip(), self.p_email.text().strip()
+        p.website = self.p_web.text().strip()
         s.default_court, s.default_county = self.d_court.text().strip(), self.d_county.text().strip()
         s.default_delivery = self.d_delivery.currentData() or s.default_delivery
         s.default_copies = self.d_copies.text().strip()
@@ -376,6 +443,19 @@ class SettingsDialog(QDialog):
         s.batch_combine_dates = self.o_combine.isChecked()
         s.output_dir, s.filename_pattern = self.o_dir.text().strip(), self.o_pattern.text().strip() or s.filename_pattern
         s.theme = self.o_theme.currentText()
+        s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
+        s.mofr_division = self.o_division.currentData()
+        s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
+        s.invoice_choice = self.i_choice.isChecked()
+        s.invoice_speeds = [k for k, cb in self.i_speeds.items() if cb.isChecked()] or ["Regular"]
+        s.invoice_include_email, s.invoice_include_index = self.i_email.isChecked(), self.i_index.isChecked()
+        s.invoice_index_threshold = self.i_threshold.value()
+        s.invoice_turnaround = {k: e.text().strip() for k, e in self.i_turn.items()}
+        s.invoice_payment_text = self.i_pay.toPlainText().strip()
+        s.invoice_footer = self.i_footer.toPlainText().strip()
+        s.invoice_number_format = self.i_number.text().strip() or s.invoice_number_format
+        s.invoice_filename_pattern = self.i_pattern.text().strip() or s.invoice_filename_pattern
+        s.records_dir = self.i_records.text().strip()
         s.show_djinn = self.o_djinn.isChecked()
         s.use_ai, s.ai_for_text = self.a_use.isChecked(), self.a_text.isChecked()
         s.ollama_model, s.ollama_host = self.a_model.currentText().strip(), self.a_host.text().strip()
@@ -536,7 +616,7 @@ class OllamaHelpDialog(QDialog):
         self.pull_btn = QPushButton(f"Download {model}")
         self.pull_btn.clicked.connect(self._pull)
         site = QPushButton("Open ollama.com/download")
-        site.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://ollama.com/download")))
+        site.clicked.connect(lambda: open_url("https://ollama.com/download"))
         row.addWidget(site)
         row.addWidget(self.pull_btn)
         row.addStretch(1)
@@ -596,6 +676,7 @@ _BACKGROUND: list[QThread] = []
 
 CONTACT_EMAIL = "noahcollincourtreporter@gmail.com"
 SOURCE_URL = "https://github.com/nono638/DjinnItAgreementForm"
+FEEDBACK_URL = f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}"
 COFFEE_URL = "https://buymeacoffee.com/noahcollin"
 
 COMPONENTS = [
@@ -614,7 +695,6 @@ class AboutDialog(QDialog):
         """Builds the window; the version and settings folder shown come from the running program."""
         super().__init__(parent)
         from pathlib import Path
-        from .. import __version__
         from ..settings import settings_dir
         self.setWindowTitle("About DjinnItAgreementForm")
         self.setMinimumWidth(460)
@@ -622,9 +702,8 @@ class AboutDialog(QDialog):
         lay.setSpacing(10)
         pic = Path(__file__).resolve().parent.parent / "assets" / "djinn_done.jpg"
         if pic.exists():
-            from .main_window import _rounded
             img = QLabel()
-            img.setPixmap(_rounded(pic, 420, 12))
+            img.setPixmap(rounded(pic, 420, 12))
             img.setAlignment(Qt.AlignCenter)
             lay.addWidget(img)
         title = QLabel("DjinnItAgreementForm")
@@ -655,10 +734,9 @@ class AboutDialog(QDialog):
         credits = QPushButton("Open-source components")
         credits.clicked.connect(self._credits)
         mail = QPushButton("Email Noah")
-        mail.clicked.connect(lambda: QDesktopServices.openUrl(
-            QUrl(f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}")))
+        mail.clicked.connect(lambda: open_url(FEEDBACK_URL))
         coffee = QPushButton("☕  Buy me a coffee")
-        coffee.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(COFFEE_URL)))
+        coffee.clicked.connect(lambda: open_url(COFFEE_URL))
         ok = QPushButton("Close")
         ok.clicked.connect(self.accept)
         row.addWidget(credits)

@@ -24,7 +24,7 @@ version_info = VSVersionInfo(
     ],
 )
 
-hidden = collect_submodules("winrt")
+hidden = collect_submodules("winrt") + ["openpyxl"]  # openpyxl: imported only when exporting
 
 a = Analysis(
     ["minute_filler/main.py"],
@@ -34,6 +34,7 @@ a = Analysis(
         ("minute_filler/assets/app.ico", "minute_filler/assets"),
         ("minute_filler/assets/djinn_*.jpg", "minute_filler/assets"),
         ("minute_filler/rate_sheets/*.csv", "minute_filler/rate_sheets"),
+        ("minute_filler/templates/*.xlsx", "minute_filler/templates"),
     ],
     hiddenimports=hidden,
     excludes=["tkinter", "matplotlib", "numpy", "pandas", "PySide6.QtWebEngineCore", "PySide6.Qt3DCore",

@@ -139,6 +139,9 @@ def guess_year(month: int, day: int, today: date | None = None) -> int | None:
     return None
 
 
+DATE_JOIN_WORDS = r"(,|and|&|-|through|thru|to)"  # between the days of a list: "9/14, 9/15 and 9/16"
+
+
 def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, str]]:
     """Returns (start, end, M/D/YYYY) for every date in text."""
     found = []
@@ -158,7 +161,7 @@ def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, 
         # From the last to the first, so that in "9/14, 9/15 and 9/16/2025" every day gets the year 2025.
         for start, end, mo, d in sorted(bare, reverse=True):
             after = min((f for f in found if f[0] >= end), default=None)
-            if after and re.fullmatch(r"\s*(,|and|&|-|through|thru|to)\s*(and\s*)?", text[end:after[0]], re.I):
+            if after and re.fullmatch(rf"\s*{DATE_JOIN_WORDS}\s*(and\s*)?", text[end:after[0]], re.I):
                 y = int(after[2].rsplit("/", 1)[1])
             else:
                 y = guess_year(mo, d) if 1 <= mo <= 12 and 1 <= d <= 31 else None
@@ -170,6 +173,50 @@ def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, 
 
 
 # --------------------------------------------------------------- extractor
+
+def tidy_name(s: str, title_case: bool = True) -> str:
+    """Collapses spaces and, with title_case, turns ALL CAPS into Title Case (see smart_title)."""
+    s = " ".join(s.split())
+    return smart_title(s) if title_case and is_mostly_upper(s) else s
+
+
+def normalize_caption(s: str, tidy=lambda part: part) -> str:
+    """Writes 'X vs Y' and 'X -against- Y' as 'X v. Y', passing each side through tidy."""
+    s = " ".join(s.split())
+    s = re.sub(r"\s+(?:v|vs)\.?\s+", " v. ", s, flags=re.I)
+    s = re.sub(r"\s+-?\s*against\s*-?\s+", " v. ", s, flags=re.I)
+    return " v. ".join(tidy(p.strip(" ,")) for p in s.split(" v. "))
+
+
+def mentions_reporter(profile: Profile | None, text: str) -> bool:
+    """The reporter's own name appears in text (their signature block, not an attorney's)."""
+    return bool(profile and profile.name) and profile.name.lower() in (text or "").lower()
+
+
+def is_reporter(profile: Profile | None, name: str = "", email: str = "") -> bool:
+    """name or email is exactly the reporter's own."""
+    if not profile:
+        return False
+    return bool(profile.name and name and name.lower() == profile.name.lower()) or \
+        bool(profile.email and email and email.lower() == profile.email.lower())
+
+
+def norm_index(num, yr) -> str | None:
+    """An index number as 'num/year' ('712345', '24' -> '712345/2024'); None unless the year is 1950-2100."""
+    yr = int(yr)
+    yr = yr + 2000 if yr < 100 else yr
+    return f"{int(num)}/{yr}" if 1950 <= yr <= 2100 else None
+
+
+# Words that show a delivery speed was asked for. The rules read the stricter phrases in _order_terms; the AI's
+# answer is only kept when one of these is in the text.
+DELIVERY_WORDS = {
+    "Regular": r"regular|standard|normal",
+    "Expedited": r"expedit|rush|asap|urgent",
+    "Daily": r"daily|overnight|next[- ]day",
+    "Immediate": r"immediate|same[- ]day|hourly",
+}
+
 
 class RegexExtractor:
     """Proposes values for the form fields from the text of one document, using patterns only.
@@ -190,9 +237,8 @@ class RegexExtractor:
         self.own_phones = {re.sub(r"\D", "", self.profile.phone or "")[-10:]} - {""}
 
     def tc(self, s: str) -> str:
-        """Collapses spaces and, if title_case is on and the text is ALL CAPS, makes it Title Case (see smart_title)."""
-        s = " ".join(s.split())
-        return smart_title(s) if self.title_case and is_mostly_upper(s) else s
+        """tidy_name with this extractor's title_case setting."""
+        return tidy_name(s, self.title_case)
 
     # ----- entry point
     def extract(self, ing: Ingested) -> Extraction:
@@ -210,6 +256,8 @@ class RegexExtractor:
         self.is_caption_doc = bool(re.search(r"(?i)\bappearances\b|a p p e a r|b e f o r e|\bBEFORE:|-against-|"
                                              r"\bindex\s+n", text))
         head = text.split("\f")[0][:2500]
+        ex.doc_kind = ("invoice" if self.is_invoice else "transcript" if self.is_transcript
+                       else "email" if ing.kind == "email" else "text")
 
         self._index(text, ex)
         self._court_county(head, text, ex)
@@ -251,28 +299,22 @@ class RegexExtractor:
         Confidence: 0.95 when labelled ('Index No. 712345-2024', 'Docket ...'), 0.8 after a bare 'No.',
         and unlabeled_conf for a lone number-year pair (ZIP+4 codes after a state are skipped).
         """
-        def norm(num, yr):
-            """'num/year' if the year is 1950-2100, else None."""
-            yr = int(yr)
-            yr = yr + 2000 if yr < 100 else yr
-            return f"{int(num)}/{yr}" if 1950 <= yr <= 2100 else None
-
         labeled = re.compile(
             r"\b(?:index|ind\.?|docket|file|calendar\s+index)\s*(?:no\.?|number|num\.?|#)?\s*[:.#]?\s*"
             r"(\d{3,7})\s*(?:[-/]|\s+of\s+)\s*(\d{4}|\d{2})\b", re.I)
         for m in labeled.finditer(text):
-            v = norm(m.group(1), m.group(2))
+            v = norm_index(m.group(1), m.group(2))
             if v:
                 ex.add("index_no", v, SRC_REGEX, 0.95)
         for m in re.finditer(r"\bNo\.?\s*:?\s*(\d{4,7})\s*[-/]\s*((?:19|20)\d{2})\b", text):
-            v = norm(m.group(1), m.group(2))
+            v = norm_index(m.group(1), m.group(2))
             if v:
                 ex.add("index_no", v, SRC_REGEX, 0.8)
         for m in re.finditer(r"(?<![\d$.,-])(\d{5,7})\s*[-/]\s*((?:19|20)\d{2})(?![\d-])", text):
             before = text[max(0, m.start() - 6): m.start()]
             if re.search(r"\b[A-Z]{2}\s*$", before):  # ZIP+4 after a state
                 continue
-            v = norm(m.group(1), m.group(2))
+            v = norm_index(m.group(1), m.group(2))
             if v:
                 ex.add("index_no", v, SRC_REGEX, unlabeled_conf)
 
@@ -396,12 +438,8 @@ class RegexExtractor:
                     ex.add("case_name", f"{smart_title(left.upper())} v. {smart_title(right.upper())}", SRC_REGEX, 0.4)
 
     def _norm_case(self, s: str) -> str:
-        """Writes 'X vs Y' and 'X -against- Y' as 'X v. Y', tidying each side with tc."""
-        s = " ".join(s.split())
-        s = re.sub(r"\s+(?:v|vs)\.?\s+", " v. ", s, flags=re.I)
-        s = re.sub(r"\s+-?against-?\s+", " v. ", s, flags=re.I)
-        parts = s.split(" v. ")
-        return " v. ".join(self.tc(p.strip(" ,")) for p in parts)
+        """normalize_caption, tidying each side with tc."""
+        return normalize_caption(s, self.tc)
 
     def _inline_case(self, text: str, ex: Extraction, conf: float) -> None:
         """Finds 'Party v. Party' in running text or a file name and adds each hit at confidence conf.
@@ -520,7 +558,7 @@ class RegexExtractor:
         # "on 9/14 and 9/15/2026", "March 3, 4 & 5": runs of dates joined by and / , / & / through
         run: list[str] = []
         for k, (start, end, v) in enumerate(all_dates + [(len(body) + 99, 0, "")]):
-            joined = k and re.fullmatch(r"\s*(,|and|&|-|through|thru|to)?\s*(and\s*)?",
+            joined = k and re.fullmatch(rf"\s*{DATE_JOIN_WORDS}?\s*(and\s*)?",
                                         body[all_dates[k - 1][1]:start], re.I)
             if run and joined:
                 run.append(v)
@@ -676,7 +714,7 @@ class RegexExtractor:
 
         heading = ""
         for block in blocks:
-            if self.profile.name and any(self.profile.name.lower() in b.lower() for b in block) and \
+            if any(mentions_reporter(self.profile, b) for b in block) and \
                     not any(re.search(r"(?i)\besq\b", b) for b in block):
                 continue
             upper = is_mostly_upper(" ".join(block))
@@ -779,10 +817,8 @@ def dedupe_attorneys(atts: list[Attorney], profile: Profile | None = None) -> li
     filled from the duplicate, and the merged entry stays ticked if either one was.
     """
     out: list[Attorney] = []
-    own_name = (profile.name.lower() if profile and profile.name else "\0")
-    own_email = (profile.email.lower() if profile and profile.email else "\0")
     for a in atts:
-        if a.name.lower() == own_name or (a.email and a.email.lower() == own_email):
+        if is_reporter(profile, a.name, a.email):
             continue
         match = None
         for b in out:

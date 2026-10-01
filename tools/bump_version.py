@@ -1,11 +1,11 @@
 """Changes the version number (the one place it lives: minute_filler/__init__.py).
 
-    python bump_version.py            show the current version
-    python bump_version.py patch      1.2.3 -> 1.2.4   (small fixes; what build_installer.bat does)
-    python bump_version.py minor      1.2.3 -> 1.3.0   (new features)
-    python bump_version.py major      1.2.3 -> 2.0.0
-    python bump_version.py 1.4.0      set it exactly
-    python bump_version.py auto       patch bump, but only if an installer for the current
+    python tools/bump_version.py            show the current version
+    python tools/bump_version.py patch      1.2.3 -> 1.2.4   (small fixes; what build_installer.bat does)
+    python tools/bump_version.py minor      1.2.3 -> 1.3.0   (new features)
+    python tools/bump_version.py major      1.2.3 -> 2.0.0
+    python tools/bump_version.py 1.4.0      set it exactly
+    python tools/bump_version.py auto       patch bump, but only if an installer for the current
                                       version was already built (so a version that was never
                                       built or released is not skipped)
 """
@@ -13,7 +13,7 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
 INIT = ROOT / "minute_filler" / "__init__.py"
 PATTERN = re.compile(r'(__version__\s*=\s*")(\d+)\.(\d+)\.(\d+)(")')
 

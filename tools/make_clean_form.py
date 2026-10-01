@@ -4,7 +4,7 @@ Same wording and order as the 1999 scanned form, but with named AcroForm fields,
 a three-line case name, checkboxes, and fields for the signature lines, date of
 agreement, fax and email. Run this file directly to regenerate the PDF:
 
-    python -m minute_filler.forms.clean_form
+    python tools/make_clean_form.py
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pymupdf
 
-OUT = Path(__file__).with_name("minute_agreement_clean.pdf")
+OUT = Path(__file__).resolve().parent.parent / "minute_filler" / "forms" / "minute_agreement_clean.pdf"
 
 W, H = 612, 792
 LEFT, RIGHT = 60, 552

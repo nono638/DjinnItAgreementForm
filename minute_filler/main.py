@@ -34,9 +34,10 @@ def selftest(out_dir: str, files: list[str]) -> int:
     return 0
 
 
-def batch(out_dir: str, paths: list[str]) -> int:
-    """Headless batch: --batch OUTDIR files/folders... fills one set of forms per case and date
-    with the saved settings, and writes batch.json (what was grouped, saved or unreadable)."""
+def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> int:
+    """Headless batch: --batch OUTDIR [--outputs agreement,mofr,invoice] files/folders... fills one set of
+    forms per case and date with the saved settings, and writes batch.json (what was grouped, saved or
+    unreadable). Without --outputs, the outputs ticked in the window are made."""
     import json
     from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
     from minute_filler.settings import Settings
@@ -47,7 +48,7 @@ def batch(out_dir: str, paths: list[str]) -> int:
     s.output_dir = str(out)
     docs, errors = read_docs(expand_paths(paths), s)
     jobs = group(docs, s)
-    fill_jobs([j for j in jobs if j.include], s)  # not the documents that name no case
+    fill_jobs([j for j in jobs if j.include], s, outputs=outputs)  # not the documents that name no case
     report = {"documents": len(docs), "unreadable": errors, "jobs": [
         {"case": j.case.get("case_name"), "index": j.case.get("index_no"), "dates": j.case.get("dates"),
          "documents": [d.path for d in j.docs], "problems": j.problems(),
@@ -96,7 +97,10 @@ def main() -> int:
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         return selftest(sys.argv[2], sys.argv[3:])
     if len(sys.argv) > 3 and sys.argv[1] == "--batch":
-        return batch(sys.argv[2], sys.argv[3:])
+        rest, outputs = sys.argv[3:], None
+        if len(rest) > 1 and rest[0] == "--outputs":
+            outputs, rest = [o.strip().lower() for o in rest[1].split(",") if o.strip()], rest[2:]
+        return batch(sys.argv[2], rest, outputs)
 
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication

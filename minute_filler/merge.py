@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import re
-import sys
 from datetime import date, timedelta
 
+from .dates import next_weekday, us_date
 from .extract_regex import dedupe_attorneys
 from .models import (CaseInfo, Candidate, Extraction, FIELD_KEYS, FieldState, SRC_DEFAULT, SRC_DERIVED,
                      SRC_USER, SRC_AI)
@@ -12,10 +12,6 @@ from .rates import speed_key
 from .settings import Settings
 
 CHECK_THRESHOLD = 0.6
-
-
-def _fmt(d: date) -> str:
-    return d.strftime("%#m/%#d/%Y") if sys.platform == "win32" else d.strftime("%-m/%-d/%Y")
 
 
 def _norm(v: str) -> str:
@@ -123,7 +119,7 @@ def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]
     if s.fill_delivery_date:
         refresh_delivery_date(case, s)
     if s.agreement_today:
-        default("agreement_date", _fmt(date.today()), SRC_DEFAULT, 0.9)
+        default("agreement_date", us_date(), SRC_DEFAULT, 0.9)
 
 
 def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
@@ -134,10 +130,8 @@ def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
     days = s.days_for(case.get("delivery"))
     if days is None:
         return
-    d = date.today() + timedelta(days=days)
-    while d.weekday() >= 5:  # skip to a weekday
-        d += timedelta(days=1)
-    case.fields["delivery_date"] = FieldState(_fmt(d), SRC_DERIVED, 0.8, [_fmt(d)])
+    d = us_date(next_weekday(date.today() + timedelta(days=days)))
+    case.fields["delivery_date"] = FieldState(d, SRC_DERIVED, 0.8, [d])
 
 
 def refresh_rate(case: CaseInfo, s: Settings) -> None:

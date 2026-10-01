@@ -71,6 +71,14 @@ class Attorney:
         return asdict(self)
 
 
+def to_int(v, default: int = 0) -> int:
+    """'30' -> 30; blank or unreadable -> default."""
+    try:
+        return int(str(v).strip())
+    except ValueError:
+        return default
+
+
 @dataclass
 class Extraction:
     """Raw output of one extractor over one input."""
@@ -78,6 +86,7 @@ class Extraction:
     proc_types: dict[str, float] = field(default_factory=dict)  # type -> confidence
     attorneys: list[Attorney] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    doc_kind: str = ""  # "transcript", "invoice", "email" or "text" (set by the rules extractor)
 
     def add(self, key: str, value: str, source: str, confidence: float, note: str = "") -> None:
         value = (value or "").strip()
@@ -120,6 +129,10 @@ class CaseInfo:
     def set(self, key: str, value: str, source: str = SRC_USER) -> None:
         fs = self.fields[key]
         fs.value, fs.source, fs.confidence = value, source, 1.0
+
+    def orderers(self) -> list[Attorney | None]:
+        """The ticked attorneys - one agreement and one invoice each - or [None] (one with a blank attorney)."""
+        return [a for a in self.attorneys if a.checked] or [None]
 
     def missing_required(self) -> list[str]:
         return [k for k in REQUIRED_KEYS if not self.get(k).strip()]

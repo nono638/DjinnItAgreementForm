@@ -1,0 +1,56 @@
+"""Makes what the user asked for - minute agreements, a MOFR, invoices - and records each file.
+
+Both the window's Generate button and the batch use generate(), so the records see every file made.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from .fill import fill
+from .invoice import InvoiceOpts, job_quotes, make_invoice
+from .log import error as log_error
+from .models import Attorney, CaseInfo, to_int
+from .mofr import fill_mofr
+from .records import Ledger
+from .settings import OUTPUTS, Settings
+
+NO_TRANSCRIPT = "an invoice needs a transcript PDF (for the page count)"
+
+
+def ledger_for(s: Settings) -> Ledger:
+    """The records database, with its CSV copies kept in the user's records folder."""
+    return Ledger(mirror_dir=s.records_folder())
+
+
+def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | set[str],
+             invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False) -> list[Path]:
+    """Writes the chosen outputs (keys of settings.OUTPUTS) into out_dir and logs them in the records.
+    An invoice needs `invoice` with the page count; raises ValueError otherwise."""
+    outputs = [o for o in OUTPUTS if o in outputs]
+    if "invoice" in outputs and (invoice is None or invoice.pages <= 0):
+        raise ValueError(NO_TRANSCRIPT)
+    ledger = ledger or ledger_for(s)
+    pages = invoice.pages if invoice else to_int(case.get("est_pages"))
+    made: list[Path] = []
+
+    def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "") -> None:
+        made.append(path)
+        try:
+            ledger.log_activity(kind, case_name=case.get("case_name"), index_no=case.get("index_no"),
+                                dates=case.get("dates"), judge=case.get("judge"), part=case.get("part"),
+                                attorney=atty.name if atty else "", firm=atty.firm if atty else "", pages=pages,
+                                file_path=str(path), invoice_no=number)
+        except Exception as e:  # the files are made; a records problem must not lose them
+            log_error("could not add to the records", e)
+
+    if "agreement" in outputs:
+        for atty in case.orderers():
+            record("agreement", fill(case, atty, s, out_dir, dated), atty)
+    if "mofr" in outputs:
+        record("mofr", fill_mofr(case, s, out_dir, dated, pages=str(pages) if invoice else ""))
+    if "invoice" in outputs:
+        quotes = job_quotes(case, s, invoice)
+        for atty in case.orderers():
+            path, number = make_invoice(case, atty, s, out_dir, invoice, ledger, dated, quotes)
+            record("invoice", path, atty, number)
+    return made

@@ -2,20 +2,13 @@
 
 Real documents go in samples_internal/ (git-ignored) and are covered by test_private_samples.py.
 """
-from pathlib import Path
 
 from minute_filler.extract_regex import RegexExtractor, smart_title
 from minute_filler.ingest import Ingested, ingest_text
 from minute_filler.merge import merge
-from minute_filler.settings import Profile, Settings
+from minute_filler.settings import Settings
 
-SAMPLES = Path(__file__).parent / "samples"
-PROFILE = Profile(name="Pat Reporter", email="preporter@example.com", phone="(555) 010-0000")
-
-
-def best(ex, key):
-    cands = sorted(ex.fields.get(key, []), key=lambda c: -c.confidence)
-    return cands[0].value if cands else ""
+from helpers import PAT as PROFILE, SAMPLES, best
 
 
 def run(name, as_pdf=False, **pdf):

@@ -1,7 +1,7 @@
 """Rate sheet parsing, the template, and how the active sheet drives the form."""
 from minute_filler.merge import merge
 from minute_filler.models import Extraction
-from minute_filler.rates import BUNDLED_DIR, list_sheets, load_sheet, speed_key
+from minute_filler.rates import BUNDLED_DIR, list_sheets, speed_key
 from minute_filler.settings import Settings
 
 SAMPLE = "Sample Rates"

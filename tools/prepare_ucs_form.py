@@ -7,7 +7,7 @@ The copy shipped with the app is the same form with:
 - the orange Adobe "SIGN" tags above the signature lines removed,
 - document metadata (author, producer, dates, XMP) cleared.
 
-    python -m minute_filler.forms.prepare_ucs_form "path\\to\\Private_Minute_Agreement_Form1999.pdf"
+    python tools/prepare_ucs_form.py "path\\to\\Private_Minute_Agreement_Form1999.pdf"
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pymupdf
 
-OUT = Path(__file__).with_name("minute_agreement_ucs.pdf")
+OUT = Path(__file__).resolve().parent.parent / "minute_filler" / "forms" / "minute_agreement_ucs.pdf"
 
 
 def prepare(src: Path, out: Path = OUT) -> Path:

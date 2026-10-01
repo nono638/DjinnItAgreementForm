@@ -1,0 +1,445 @@
+"""The Records window: the invoice ledger (totals, filters, mark paid) and the history of everything made."""
+from __future__ import annotations
+
+import calendar
+from datetime import date
+from pathlib import Path
+
+from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
+    QTabWidget, QVBoxLayout, QWidget,
+)
+
+from ..deliver import ledger_for
+from ..invoice_calc import fmt, money
+from ..log import error as log_error
+from ..records import KINDS, Invoice, _month_name, summarize, us_date
+from ..settings import Settings
+from .widgets import open_path, plural, refill_combo, show_save_error
+
+INV_COLS = ["Paid", "No.", "Date", "Case", "Index No.", "Bill to", "Pages", "Offered (each party)", "Billed",
+            "Status", "Date paid"]
+ACT_COLS = ["Date", "Time", "Made", "Case", "Index No.", "Attorney", "Firm", "Pages", "Invoice No.", "File"]
+SUM_COLS = ["", "Invoices", "Billed", "Paid", "Outstanding"]
+STATUS_FILTERS = [("All", ""), ("Unpaid", "open"), ("Paid", "paid"), ("Void", "void")]
+STATUS_COLORS = {"open": "#d97706", "paid": "#16a34a", "void": "#8a8797"}  # readable on light and dark
+
+
+def _item(text, align_right: bool = False, data=None) -> QTableWidgetItem:
+    it = QTableWidgetItem("" if text is None else str(text))
+    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+    if align_right:
+        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    if data is not None:
+        it.setData(Qt.UserRole, data)
+    return it
+
+
+def _money_item(d) -> QTableWidgetItem:
+    it = _item(fmt(d), True)
+    it.setData(Qt.UserRole + 1, float(d))
+    return it
+
+
+def _table(cols: list[str]) -> QTableWidget:
+    t = QTableWidget(0, len(cols))
+    t.setHorizontalHeaderLabels(cols)
+    t.verticalHeader().setVisible(False)
+    t.setSelectionBehavior(QAbstractItemView.SelectRows)
+    t.setAlternatingRowColors(True)
+    t.setWordWrap(False)
+    t.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+    t.horizontalHeader().setStretchLastSection(True)
+    return t
+
+
+class PaidDialog(QDialog):
+    """Asks which speed was paid for, how much and when."""
+
+    def __init__(self, inv: Invoice, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Invoice {inv.invoice_no} paid")
+        self.inv = inv
+        f = QFormLayout(self)
+        f.addRow(QLabel(f"<b>{inv.case_name or inv.invoice_no}</b><br>{inv.client}"))
+        self.speed = QComboBox()
+        for sp, amt in inv.amounts.items():
+            self.speed.addItem(f"{sp}  —  {fmt(money(amt))}", sp)
+        self.speed.setCurrentIndex(max(0, self.speed.findData(inv.billed_speed)))
+        self.amount = QLineEdit()
+        self.amount.setPlaceholderText("0.00")
+        self.speed.currentIndexChanged.connect(self._speed_changed)
+        self.when = QDateEdit(QDate.currentDate())
+        self.when.setCalendarPopup(True)
+        self.when.setDisplayFormat("M/d/yyyy")
+        f.addRow("Paid for:", self.speed)
+        f.addRow("Amount received:", self.amount)
+        f.addRow("Date paid:", self.when)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+        self._speed_changed()
+
+    def _speed_changed(self, _=None):
+        self.amount.setText(str(money(self.inv.amounts.get(self.speed.currentData(), "0"))))
+
+    def values(self) -> tuple[str, str, str]:
+        d = self.when.date()
+        return self.speed.currentData() or "", str(money(self.amount.text())), \
+            date(d.year(), d.month(), d.day()).isoformat()
+
+
+class RecordsWindow(QDialog):
+    def __init__(self, s: Settings, parent=None):
+        super().__init__(parent)
+        self.s = s
+        self.ledger = ledger_for(s)
+        self.shown: list[Invoice] = []
+        self.setWindowTitle("Records")
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        self.resize(1180, 760)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self.tabs.addTab(self._build_invoices(), "Invoices")
+        self.tabs.addTab(self._build_activity(), "Everything made")
+
+        bottom = QHBoxLayout()
+        for label, slot, tip in (
+                ("Report (HTML)…", self.export_html, "A report of the invoices shown, opened in your browser"),
+                ("Excel…", self.export_xlsx, "Invoices, everything made, and totals by firm and month"),
+                ("CSV…", self.export_csv, "invoices.csv and activity.csv"),
+                ("Open records folder", self.open_folder, "Where the CSV copies are kept up to date")):
+            b = QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            bottom.addWidget(b)
+        bottom.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        bottom.addWidget(close)
+        root.addLayout(bottom)
+
+    # ------------------------------------------------------------ building
+    def _filters(self, lay: QHBoxLayout, with_client: bool) -> tuple[QComboBox, QComboBox, QComboBox | None]:
+        year, month = QComboBox(), QComboBox()
+        month.addItem("All months", 0)
+        for m in range(1, 13):
+            month.addItem(calendar.month_name[m], m)
+        lay.addWidget(QLabel("Year:"))
+        lay.addWidget(year)
+        lay.addWidget(QLabel("Month:"))
+        lay.addWidget(month)
+        client = None
+        if with_client:
+            client = QComboBox()
+            client.setMinimumWidth(220)
+            lay.addWidget(QLabel("Firm:"))
+            lay.addWidget(client)
+        return year, month, client
+
+    def _build_invoices(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(12, 12, 12, 12)
+        fl = QHBoxLayout()
+        self.i_year, self.i_month, self.i_client = self._filters(fl, True)
+        self.i_status = QComboBox()
+        for label, key in STATUS_FILTERS:
+            self.i_status.addItem(label, key)
+        fl.addWidget(QLabel("Status:"))
+        fl.addWidget(self.i_status)
+        self.i_text = QLineEdit()
+        self.i_text.setPlaceholderText("Search case, index no., attorney…")
+        self.i_text.setClearButtonEnabled(True)
+        fl.addWidget(self.i_text, 1)
+        v.addLayout(fl)
+        for c in (self.i_year, self.i_month, self.i_client, self.i_status):
+            c.currentIndexChanged.connect(self.show_invoices)
+        self.i_text.textChanged.connect(self.show_invoices)
+
+        tiles = QHBoxLayout()
+        self.kpi: dict[str, QLabel] = {}
+        for key, label in (("billed", "Billed"), ("paid", "Paid"), ("outstanding", "Outstanding"),
+                           ("count", "Invoices")):
+            f = QFrame()
+            f.setObjectName("card")
+            fv = QVBoxLayout(f)
+            fv.setContentsMargins(14, 8, 14, 8)
+            cap = QLabel(label)
+            cap.setObjectName("muted")
+            val = QLabel("—")
+            val.setObjectName("kpiValue")
+            if key in ("paid", "outstanding"):
+                val.setProperty("tone", "ok" if key == "paid" else "warn")
+            fv.addWidget(cap)
+            fv.addWidget(val)
+            self.kpi[key] = val
+            tiles.addWidget(f)
+        v.addLayout(tiles)
+
+        inner = QTabWidget()
+        self.inv_table = _table(INV_COLS)
+        self.inv_table.itemChanged.connect(self._paid_toggled)
+        self.inv_table.itemDoubleClicked.connect(lambda it: self._open_invoice(it.row()))
+        self.inv_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.inv_table.customContextMenuRequested.connect(self._invoice_menu)
+        self.inv_table.setToolTip("Tick Paid when an invoice is paid · double-click opens the PDF · "
+                                  "right-click for more")
+        self.firm_table = _table(["Firm / attorney"] + SUM_COLS[1:])
+        self.month_table = _table(["Month"] + SUM_COLS[1:])
+        inner.addTab(self.inv_table, "Invoices")
+        inner.addTab(self.firm_table, "By firm")
+        inner.addTab(self.month_table, "By month")
+        v.addWidget(inner, 1)
+        return w
+
+    def _build_activity(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(12, 12, 12, 12)
+        fl = QHBoxLayout()
+        self.a_kind = QComboBox()
+        self.a_kind.addItem("Everything", "")
+        for k, label in KINDS.items():
+            self.a_kind.addItem(label + "s", k)
+        fl.addWidget(QLabel("Show:"))
+        fl.addWidget(self.a_kind)
+        self.a_year, self.a_month, _ = self._filters(fl, False)
+        self.a_text = QLineEdit()
+        self.a_text.setPlaceholderText("Search case, index no., attorney, firm…")
+        self.a_text.setClearButtonEnabled(True)
+        fl.addWidget(self.a_text, 1)
+        v.addLayout(fl)
+        for c in (self.a_kind, self.a_year, self.a_month):
+            c.currentIndexChanged.connect(self.show_activity)
+        self.a_text.textChanged.connect(self.show_activity)
+        self.a_count = QLabel("")
+        self.a_count.setObjectName("muted")
+        v.addWidget(self.a_count)
+        self.act_table = _table(ACT_COLS)
+        self.act_table.itemDoubleClicked.connect(
+            lambda it: open_path(self.act_table.item(it.row(), len(ACT_COLS) - 1).text()))
+        self.act_table.setToolTip("Double-click opens the file")
+        v.addWidget(self.act_table, 1)
+        return w
+
+    # ------------------------------------------------------------ data
+    def reload(self) -> None:
+        """Re-reads the records (after new files were made) and keeps the filters chosen."""
+        years = self.ledger.years()
+        this_year = date.today().year
+        year_items = [("All years", 0)] + [(str(y), y) for y in sorted(set(years) | {this_year}, reverse=True)]
+        for combo in (self.i_year, self.a_year):
+            keep = combo.currentData()
+            refill_combo(combo, year_items, this_year if keep is None else keep)
+        refill_combo(self.i_client, [("All firms", "")] + [(c, c) for c in self.ledger.clients()],
+                     self.i_client.currentData() or "")
+        self.show_invoices()
+        self.show_activity()
+
+    def _invoice_filters(self) -> dict:
+        return dict(year=self.i_year.currentData() or None, month=self.i_month.currentData() or None,
+                    client=self.i_client.currentData() or "", status=self.i_status.currentData() or "",
+                    text=self.i_text.text().strip())
+
+    def show_invoices(self, _=None) -> None:
+        self.shown = self.ledger.invoices(**self._invoice_filters())
+        t = self.inv_table
+        t.blockSignals(True)
+        t.setSortingEnabled(False)
+        t.setRowCount(0)
+        for inv in self.shown:
+            r = t.rowCount()
+            t.insertRow(r)
+            paid = QTableWidgetItem()
+            paid.setFlags((paid.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable)
+            if inv.status == "void":
+                paid.setFlags(paid.flags() & ~Qt.ItemIsEnabled)
+            paid.setCheckState(Qt.Checked if inv.status == "paid" else Qt.Unchecked)
+            paid.setData(Qt.UserRole, inv.invoice_no)
+            t.setItem(r, 0, paid)
+            status = inv.status.title() if inv.status != "open" else "Unpaid"
+            if inv.status == "paid" and inv.paid_speed:
+                status += f" ({inv.paid_speed})"
+            cells = [_item(inv.invoice_no), _item(us_date(inv.created)), _item(inv.case_name), _item(inv.index_no),
+                     _item(inv.client if not inv.firm else f"{inv.firm} ({inv.bill_to})" if inv.bill_to else inv.firm),
+                     _item(inv.pages, True), _item(inv.offered_text()), _money_item(inv.billed), _item(status),
+                     _item(us_date(inv.paid_date))]
+            cells[8].setForeground(QColor(STATUS_COLORS[inv.status]))
+            for c, it in enumerate(cells, 1):
+                t.setItem(r, c, it)
+        t.blockSignals(False)
+        t.resizeColumnsToContents()
+        t.setColumnWidth(3, min(t.columnWidth(3), 300))
+        t.setColumnWidth(5, min(t.columnWidth(5), 260))
+
+        total, by_client, by_month = summarize(self.shown)
+        self.kpi["billed"].setText(fmt(total.billed))
+        self.kpi["paid"].setText(fmt(total.paid))
+        self.kpi["outstanding"].setText(fmt(total.outstanding))
+        self.kpi["count"].setText(str(total.count))
+        self._fill_summary(self.firm_table, [(k, v) for k, v in by_client.items()], total)
+        self._fill_summary(self.month_table, [(_month_name(k), v) for k, v in reversed(list(by_month.items()))],
+                           total)
+
+    @staticmethod
+    def _fill_summary(t: QTableWidget, rows, total) -> None:
+        t.setRowCount(0)
+        for name, sm in rows + [("Total", total)]:
+            r = t.rowCount()
+            t.insertRow(r)
+            for c, it in enumerate([_item(name), _item(sm.count, True), _money_item(sm.billed),
+                                    _money_item(sm.paid), _money_item(sm.outstanding)]):
+                if name == "Total" and r == len(rows):
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
+                t.setItem(r, c, it)
+        t.resizeColumnsToContents()
+
+    def show_activity(self, _=None) -> None:
+        y, m = self.a_year.currentData() or 0, self.a_month.currentData() or 0
+        since = until = ""
+        if y:
+            since, until = f"{y}-{m or 1:02}-01", f"{y}-{m or 12:02}-{calendar.monthrange(y, m or 12)[1]:02}"
+        rows = self.ledger.activity(self.a_kind.currentData() or "", since, until, self.a_text.text().strip())
+        if m and not y:
+            rows = [a for a in rows if a.ts[5:7] == f"{m:02}"]
+        t = self.act_table
+        t.setRowCount(0)
+        for a in rows:
+            r = t.rowCount()
+            t.insertRow(r)
+            for c, it in enumerate([_item(us_date(a.ts)), _item(a.ts[11:16]), _item(KINDS.get(a.kind, a.kind)),
+                                    _item(a.case_name), _item(a.index_no), _item(a.attorney), _item(a.firm),
+                                    _item(a.pages or "", True), _item(a.invoice_no), _item(a.file_path)]):
+                t.setItem(r, c, it)
+        t.resizeColumnsToContents()
+        t.setColumnWidth(3, min(t.columnWidth(3), 300))
+        counts = {k: sum(1 for a in rows if a.kind == k) for k in KINDS}
+        self.a_count.setText("  ·  ".join([plural(len(rows), "file")] +
+                                          [plural(n, KINDS[k].lower()) for k, n in counts.items()]))
+
+    # ------------------------------------------------------------ actions
+    def _inv_at(self, row: int) -> Invoice | None:
+        it = self.inv_table.item(row, 0)
+        no = it.data(Qt.UserRole) if it else None
+        return next((i for i in self.shown if i.invoice_no == no), None)
+
+    def _paid_toggled(self, item: QTableWidgetItem) -> None:
+        if item.column() != 0:
+            return
+        inv = self._inv_at(item.row())
+        if inv is None:
+            return
+        try:
+            if item.checkState() == Qt.Checked and inv.status != "paid":
+                dlg = PaidDialog(inv, self)
+                if dlg.exec() == QDialog.Accepted:
+                    self.ledger.mark_paid(inv.invoice_no, *dlg.values())
+            elif item.checkState() == Qt.Unchecked and inv.status == "paid":
+                if QMessageBox.question(self, "Not paid", f"Mark invoice {inv.invoice_no} as not paid?") \
+                        == QMessageBox.Yes:
+                    self.ledger.mark_unpaid(inv.invoice_no)
+        except Exception as e:
+            log_error("could not update an invoice", e)
+            QMessageBox.warning(self, "Could not save", f"{type(e).__name__}: {e}")
+        self.show_invoices()
+
+    def _open_invoice(self, row: int) -> None:
+        inv = self._inv_at(row)
+        if inv is None:
+            return
+        if inv.file_path and Path(inv.file_path).exists():
+            open_path(inv.file_path)
+        else:
+            QMessageBox.information(self, "File not found", f"The PDF of invoice {inv.invoice_no} is no longer at\n"
+                                    f"{inv.file_path or '(unknown)'}")
+
+    def _invoice_menu(self, pos) -> None:
+        row = self.inv_table.rowAt(pos.y())
+        inv = self._inv_at(row)
+        if inv is None:
+            return
+        m = QMenu(self)
+        m.addAction("Open the PDF", lambda: self._open_invoice(row))
+        m.addAction("Show in folder", lambda: open_path(str(Path(inv.file_path).parent)) if inv.file_path else None)
+        m.addSeparator()
+        if inv.status != "paid":
+            m.addAction("Mark paid…", lambda: self.inv_table.item(row, 0).setCheckState(Qt.Checked))
+        else:
+            m.addAction("Mark not paid", lambda: self.inv_table.item(row, 0).setCheckState(Qt.Unchecked))
+        if inv.status != "void":
+            m.addAction("Void (cancelled, not counted)", lambda: self._set_void(inv))
+        else:
+            m.addAction("Restore (not void)", lambda: (self.ledger.mark_unpaid(inv.invoice_no), self.show_invoices()))
+        m.addAction("Notes…", lambda: self._notes(inv))
+        m.exec(self.inv_table.viewport().mapToGlobal(pos))
+
+    def _set_void(self, inv: Invoice) -> None:
+        if QMessageBox.question(self, "Void invoice", f"Void invoice {inv.invoice_no}? It stays in the list but is "
+                                "no longer counted in the totals.") == QMessageBox.Yes:
+            self.ledger.void(inv.invoice_no)
+            self.show_invoices()
+
+    def _notes(self, inv: Invoice) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(self, f"Invoice {inv.invoice_no}", "Notes:", text=inv.notes)
+        if ok:
+            self.ledger.set_notes(inv.invoice_no, text)
+            self.show_invoices()
+
+    # ------------------------------------------------------------ exports
+    def _filter_title(self) -> str:
+        f = self._invoice_filters()
+        bits = []
+        if f["month"]:
+            bits.append(calendar.month_name[f["month"]])
+        if f["year"]:
+            bits.append(str(f["year"]))
+        title = "Invoices" + (" - " + " ".join(bits) if bits else "")
+        if f["client"]:
+            title += f" - {f['client']}"
+        if f["status"]:
+            title += f" ({dict((k, l) for l, k in STATUS_FILTERS)[f['status']].lower()})"
+        return title
+
+    def _ask_path(self, title: str, name: str, filt: str) -> Path | None:
+        folder = self.s.records_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        p, _ = QFileDialog.getSaveFileName(self, title, str(folder / name), filt)
+        return Path(p) if p else None
+
+    def export_html(self) -> None:
+        title = self._filter_title()
+        p = self._ask_path("Save the report", f"{title}.html", "Web page (*.html)")
+        if p:
+            self._try(lambda: open_path(str(self.ledger.export_html(p, self.shown, title))))
+
+    def export_xlsx(self) -> None:
+        p = self._ask_path("Export to Excel", f"{self._filter_title()}.xlsx", "Excel workbook (*.xlsx)")
+        if p:
+            self._try(lambda: open_path(str(self.ledger.export_xlsx(p, self.shown))))
+
+    def export_csv(self) -> None:
+        folder = self.s.records_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        d = QFileDialog.getExistingDirectory(self, "Folder for invoices.csv and activity.csv", str(folder))
+        if d:
+            self._try(lambda: (self.ledger.export_csv(Path(d)), open_path(d)))
+
+    def open_folder(self) -> None:
+        folder = self.s.records_folder()
+        self._try(lambda: (self.ledger.export_csv(folder), open_path(str(folder))))
+
+    def _try(self, fn) -> None:
+        try:
+            fn()
+        except Exception as e:
+            show_save_error(self, e, "Could not export the records")

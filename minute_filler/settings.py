@@ -36,6 +36,30 @@ class Profile:
     phone: str = ""
     fax: str = ""
     email: str = ""
+    website: str = ""
+
+
+OUTPUTS = {  # what Generate can make: key -> label
+    "agreement": "Minute agreement",
+    "mofr": "MOFR",
+    "invoice": "Invoice",
+}
+SPEEDS = ("Regular", "Expedited", "Daily", "Immediate")  # the delivery speeds, as named in Settings
+MOFR_FILENAME_PATTERN = "MOFR - {case} - {index} - {today}"
+INVOICE_FILENAME_PATTERN = "Invoice {number} - {case} - {attorney}"
+INVOICE_TURNAROUND = {
+    "Immediate": "Delivered at the time of trial.",
+    "Daily": "1 business day from receipt of payment.",
+    "Expedited": "1 week from receipt of payment.",
+    "Regular": "2-4 weeks from receipt of payment.",
+}
+INVOICE_PAYMENT_TEXT = (
+    "Zelle: (555) 555-0100\n"
+    "Check: payable to Pat Reporter, mailed to\n"
+    "    Pat Reporter, Court Reporter, 123 Example Street, Room 100, Anytown, NY 10000\n"
+    "The transcript is sent after the check clears.")
+INVOICE_FOOTER = ("I am in the courtroom during the day, so e-mail is the best way to reach me. "
+                  "Please send a short e-mail after paying so I can start on your transcript.")
 
 
 @dataclass
@@ -69,10 +93,28 @@ class Settings:
     # Output
     form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
     include_instructions: bool = True  # keep the UCS form's instructions page (page 2)
-    settings_version: int = 3         # bumped when a default changes for existing users
+    settings_version: int = 4         # bumped when a default changes for existing users
     output_dir: str = ""              # blank = next to first input file, else Documents
     filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
     batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
+    outputs: list = field(default_factory=lambda: ["agreement"])  # ticked by default: keys of OUTPUTS
+
+    # MOFR (Minute Order Form/Receipt)
+    mofr_division: str = "civil"      # "civil" or "criminal" box
+    mofr_filename_pattern: str = MOFR_FILENAME_PATTERN
+
+    # Invoices (made from transcripts only: they need the page count)
+    invoice_choice: bool = True       # list every offered speed so the attorney can choose
+    invoice_speeds: list = field(default_factory=lambda: ["Regular", "Expedited", "Daily"])
+    invoice_include_email: bool = True  # each party also gets an e-mailed copy (Email column of the rate sheet)
+    invoice_include_index: bool = True  # long transcripts get an index (Index column), plus one for the judge
+    invoice_index_threshold: int = 50
+    invoice_turnaround: dict = field(default_factory=lambda: dict(INVOICE_TURNAROUND))
+    invoice_payment_text: str = INVOICE_PAYMENT_TEXT
+    invoice_footer: str = INVOICE_FOOTER
+    invoice_number_format: str = "{year}-{seq:04}"
+    invoice_filename_pattern: str = INVOICE_FILENAME_PATTERN
+    records_dir: str = ""             # blank = Documents\DjinnIt Records (CSV copies and exports)
 
     # AI
     use_ai: bool = True
@@ -112,8 +154,7 @@ class Settings:
         sp = self.sheet().find(delivery)
         if sp is not None and sp.days is not None:
             return sp.days
-        return {"immediate": self.days_immediate, "daily": self.days_daily,
-                "expedited": self.days_expedited, "regular": self.days_regular}.get(speed_key(delivery))
+        return getattr(self, f"days_{speed_key(delivery)}", None)  # days_regular, days_expedited, ...
 
     def delivery_name(self, delivery: str) -> str:
         """The active sheet's spelling of a speed ('Expedited' -> 'Expedite')."""
@@ -124,6 +165,14 @@ class Settings:
         """The signature picture to put on the forms, or "" (not signing, none chosen, or the file is gone)."""
         ok = self.sign_reporter and self.signature_image and Path(self.signature_image).is_file()
         return self.signature_image if ok else ""
+
+    def records_folder(self) -> Path:
+        return Path(self.records_dir) if self.records_dir else Path.home() / "Documents" / "DjinnIt Records"
+
+    def turnaround(self, speed: str) -> str:
+        """The invoice's turnaround wording for a speed ('Expedite' finds 'Expedited')."""
+        from .rates import speed_key
+        return next((v for k, v in self.invoice_turnaround.items() if speed_key(k) == speed_key(speed)), "")
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
@@ -153,5 +202,6 @@ class Settings:
             s.include_instructions = True
             if s.filename_pattern == OLD_FILENAME_PATTERN:
                 s.filename_pattern = FILENAME_PATTERN
+        s.outputs = [o for o in s.outputs if o in OUTPUTS]  # v4 added outputs; drop unknown ones
         s.settings_version = cls.settings_version
         return s

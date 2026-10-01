@@ -8,8 +8,10 @@ from PIL import Image, ImageDraw
 
 from minute_filler.fill import fill_all
 from minute_filler.models import CaseInfo
-from minute_filler.settings import Profile, Settings
+from minute_filler.settings import Settings
 from minute_filler.signature import prepare, signature_path
+
+from helpers import pat_settings
 
 
 def photo(path, paper=(205, 200, 190), size=(900, 500)):
@@ -24,8 +26,7 @@ def photo(path, paper=(205, 200, 190), size=(900, 500)):
 
 @pytest.fixture
 def settings(tmp_path):
-    s = Settings()
-    s.profile = Profile(name="Pat Reporter")
+    s = pat_settings()
     s.signature_image = str(prepare(photo(tmp_path / "photo.jpg"), signature_path()))
     s.sign_reporter = True
     return s
@@ -84,29 +85,22 @@ def test_quick_dates():
     assert quick_date(0, 1, today=date(2026, 12, 15)) == "1/15/2027"
 
 
-def test_quick_date_button_fills_the_field():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
-    from minute_filler.gui.main_window import MainWindow, quick_date
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    s = Settings()
-    s.profile = Profile(name="Pat Reporter")
+def test_quick_date_button_fills_the_field(qt, make_window):
+    from minute_filler.dates import quick_date
+    s = pat_settings()
     s.use_ai = False
-    win = MainWindow(s, app)
-    button = next(b for b in win.findChildren(QtWidgets.QToolButton) if b.text() == "1 week")
+    win = make_window(s)
+    button = next(b for b in win.findChildren(qt.QToolButton) if b.text() == "1 week")
     button.click()
     assert win.rows["delivery_date"].text() == quick_date(7)
     assert win.cur.case.fields["delivery_date"].source == "you"
     win.delivery.setCurrentIndex(1)  # another speed must not overwrite a date the user chose
     assert win.rows["delivery_date"].text() == quick_date(7)
-    win.deleteLater()
 
 
-def test_settings_dialog_stores_the_signature(tmp_path, monkeypatch):
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+def test_settings_dialog_stores_the_signature(tmp_path, monkeypatch, qt):
+    QtWidgets = qt
     from minute_filler.gui.dialogs import SettingsDialog
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])  # noqa: F841
     s = Settings()
     s.use_ai = False
     src = str(photo(tmp_path / "photo.png"))

@@ -33,6 +33,8 @@ from minute_filler.ingest import ingest_file, ocr_available
 from minute_filler.merge import merge
 from minute_filler.settings import Profile, Settings
 
+from helpers import best
+
 PRIVATE = Path(__file__).resolve().parent.parent / "samples_internal"
 SUPPORTED = {".pdf", ".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".bmp", ".webp", ".eml", ".txt", ".docx"}
 IMAGES = {".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".bmp", ".webp"}
@@ -48,11 +50,6 @@ def _files():
 def _expected() -> dict:
     f = PRIVATE / "expected.json"
     return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
-
-
-def _best(ex, key):
-    cands = sorted(ex.fields.get(key, []), key=lambda c: -c.confidence)
-    return cands[0].value if cands else ""
 
 
 FILES = _files()
@@ -80,9 +77,9 @@ def test_private_sample(path, tmp_path):
     if not exp:
         return
     for key, want in exp.get("fields", {}).items():
-        assert _best(ex, key) == want, key
+        assert best(ex, key) == want, key
     for key, want in exp.get("fields_startswith", {}).items():
-        assert _best(ex, key).startswith(want), key
+        assert best(ex, key).startswith(want), key
     for ptype in exp.get("proc_types", []):
         assert ex.proc_types.get(ptype, 0) >= 0.6, ptype
     real = [a for a in ex.attorneys if not a.is_placeholder()]

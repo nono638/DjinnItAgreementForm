@@ -6,13 +6,15 @@ from datetime import date
 import pymupdf
 import pytest
 
-from minute_filler.batch import Job, fill_jobs, group, make_doc
+from minute_filler.batch import Job, fill_jobs, group
 from minute_filler.extract_llm import OllamaExtractor
 from minute_filler.extract_regex import EMAIL_RE, RegexExtractor, guess_year
 from minute_filler.fill import fill_all, form_text
 from minute_filler.ingest import ingest_file, ingest_text
 from minute_filler.models import Attorney, CaseInfo
 from minute_filler.settings import Profile, Settings, settings_dir
+
+from helpers import text_doc
 
 SOURCE = ("Smith v. Jones, Index 712345/2024, Part MDP, judge Lopez, 5/22/2026, expedited. "
           "John Doe, Esq. jdoe@example.com (212) 555-1212")
@@ -127,9 +129,9 @@ def test_form_is_filled_with_plain_letters(tmp_path):
 
 
 def doc(s, title, index, day, name):
-    text = f"Invoice\nTitle: {title}\nIndex No. {index}\nDate of proceedings: {day}\nJudge: Lopez\n"
-    ing = ingest_text(text, name)
-    return make_doc(ing, RegexExtractor(s.profile).extract(ing), s)
+    # no To: line, so no attorney
+    return text_doc(s, f"Invoice\nTitle: {title}\nIndex No. {index}\nDate of proceedings: {day}\nJudge: Lopez\n",
+                    name)
 
 
 def test_caption_matching_is_not_too_loose():
@@ -138,8 +140,7 @@ def test_caption_matching_is_not_too_loose():
 
     def jobs_for(caption_a, caption_b):
         a = doc(s, caption_a, "712222-2024", "5-22-2026", "a")
-        ing = ingest_text(request.format(caption_b), "b")
-        return group([a, make_doc(ing, RegexExtractor(s.profile).extract(ing), s)], s)
+        return group([a, text_doc(s, request.format(caption_b), "b")], s)
 
     assert len(jobs_for("Garcia v. Metro Transit Authority", "Garcia v. Metro Transit Auth.")) == 1
     assert len(jobs_for("Smithson v. Jones", "Smith v. Jones")) == 2
@@ -173,3 +174,12 @@ def test_job_with_attorneys_but_none_ticked_is_flagged():
     typed = Job()
     typed.case.attorneys = [Attorney(name="Alex Counsel")]
     assert not typed.is_empty() and Job().is_empty()
+
+
+def test_ai_and_rules_agree_on_index_numbers_and_speeds():
+    # the AI's index number gets the same 1950-2100 year check as the rules'
+    assert ai({"index_number": "712345/1890"}, "Index No. 712345/1890").fields.get("index_no") is None
+    assert ai({"index_number": "712345/24"}, "Index No. 712345/24").fields["index_no"][0].value == "712345/2024"
+    # "same day" means Immediate to the rules, so the AI may not call it Daily
+    assert "delivery" not in ai({"delivery": "Daily"}, "Please send it same-day.").fields
+    assert ai({"delivery": "Daily"}, "Daily copy please").fields["delivery"][0].value == "Daily"

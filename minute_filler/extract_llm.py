@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 import re
 
-from .extract_regex import (COURTS, PHONE_RE, PLACEHOLDER_RE, RegexExtractor, find_dates, fmt_phone,
-                            is_mostly_upper, smart_title)
+from .extract_regex import (COURTS, DELIVERY_WORDS, PHONE_RE, PLACEHOLDER_RE, RegexExtractor, find_dates, fmt_phone,
+                            mentions_reporter, norm_index, normalize_caption, smart_title, tidy_name)
 from .ingest import Ingested
 from .models import Attorney, Extraction, PROC_TYPES, SRC_AI
 from .settings import Settings
@@ -112,12 +112,15 @@ class OllamaExtractor:
             self._client = ollama.Client(host=self.s.ollama_host, timeout=self.s.ai_timeout)
         return self._client
 
+    def installed_models(self, timeout: float = 3) -> list[str]:
+        """The models Ollama has installed; raises when Ollama doesn't answer within `timeout` seconds."""
+        import ollama
+        return [m.model for m in ollama.Client(host=self.s.ollama_host, timeout=timeout).list().models]
+
     def status(self) -> tuple[bool, str]:
         """(ok, message) - checks that Ollama runs and the model is installed."""
         try:
-            import ollama
-            quick = ollama.Client(host=self.s.ollama_host, timeout=3)
-            models = [m.model for m in quick.list().models]
+            models = self.installed_models()
         except Exception:
             return False, "Ollama is not running - using rules only."
         want = self.s.ollama_model
@@ -177,7 +180,7 @@ class OllamaExtractor:
             v = " ".join(str(v or "").split()).strip(" ,;")
             if v.islower() and len(v) > 2:
                 v = smart_title(v.upper())
-            return smart_title(v) if is_mostly_upper(v) else v
+            return tidy_name(v)
 
         courts = {name.lower(): name for _, name in COURTS}
         for key, field in (("court", "court"), ("county", "county"), ("judge", "judge"), ("case_name", "case_name"),
@@ -191,7 +194,7 @@ class OllamaExtractor:
             if key == "judge":
                 v = re.sub(r"(?i)^(hon\.?|honorable|justice|judge)\s+|,?\s*j\.?s\.?c\.?$", "", v).strip()
             if key == "case_name":
-                v = re.sub(r"(?i)\s+-?\s*against\s*-?\s+|\s+vs?\.?\s+", " v. ", v)
+                v = normalize_caption(v)
             if v and seen(v):  # small models invent counties/courts - only keep what the text says
                 ex.add(field, v, SRC_AI, AI_CONF)
         part = re.sub(r"(?i)^part\s*", "", tidy(d.get("part"))).strip().upper()
@@ -200,9 +203,9 @@ class OllamaExtractor:
                 (not check or re.search(rf"(?<![a-z0-9]){re.escape(part.lower())}(?![a-z0-9])", src_lower)):
             ex.add("part", part, SRC_AI, AI_CONF)
         m = re.search(r"(\d{3,7})\s*[-/]\s*(\d{4}|\d{2})", tidy(d.get("index_number")))
-        if m and (not check or m.group(1).lstrip("0") in src_digits):
-            yr = int(m.group(2))
-            ex.add("index_no", f"{int(m.group(1))}/{yr + 2000 if yr < 100 else yr}", SRC_AI, AI_CONF)
+        v = norm_index(m.group(1), m.group(2)) if m else None
+        if v and (not check or m.group(1).lstrip("0") in src_digits):
+            ex.add("index_no", v, SRC_AI, AI_CONF)
         dates = []
         for raw in items(d.get("proceeding_dates")):
             dates += [v for _, _, v in find_dates(str(raw))]
@@ -213,22 +216,19 @@ class OllamaExtractor:
             if isinstance(t, str) and t in PROC_TYPES:
                 ex.add_proc(t, 0.55)
         # Only trust delivery/copies when the text actually talks about them.
-        delivery_words = {"Regular": r"regular|standard|normal", "Expedited": r"expedit|rush|asap|urgent",
-                          "Daily": r"daily|overnight|next[- ]day|same[- ]day"}
         dv = d.get("delivery")
-        if isinstance(dv, str) and dv in delivery_words and re.search(delivery_words[dv], src_lower):
+        if isinstance(dv, str) and dv in DELIVERY_WORDS and re.search(DELIVERY_WORDS[dv], src_lower):
             ex.add("delivery", dv, SRC_AI, 0.45)
         if tidy(d.get("copies")).isdigit() and "cop" in src_lower:
             ex.add("copies", tidy(d["copies"]), SRC_AI, 0.45)
 
-        own = (self.s.profile.name or "\0").lower()
         for a in items(d.get("attorneys")):
             if isinstance(a, str):
                 a = {"name": a}
             if not isinstance(a, dict):
                 continue
             name, firm = tidy(a.get("name")), tidy(a.get("firm"))
-            if not (name or firm) or PLACEHOLDER_RE.match(name or firm) or own in name.lower():
+            if not (name or firm) or PLACEHOLDER_RE.match(name or firm) or mentions_reporter(self.s.profile, name):
                 continue
             if not seen(f"{name} {firm}"):
                 continue

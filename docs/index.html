@@ -44,7 +44,7 @@
 <header class="hero">
   <div class="wrap">
     <h1>DjinnItAgreementForm</h1>
-    <p class="lead">Fills in the UCS <b>Court Reporter Minute Agreement Form</b> for you. Drop in what the attorney sent, check the details, and get a finished PDF.</p>
+    <p class="lead">Fills in the UCS <b>Court Reporter Minute Agreement Form</b> and the <b>MOFR</b> for you, makes invoices from your transcripts, and keeps track of what you billed and what was paid. Drop in what the attorney sent, check the details, and get finished PDFs.</p>
     <a class="btn" href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Download for Windows</a>
     <a class="btn ghost" href="https://github.com/nono638/DjinnItAgreementForm">View on GitHub</a>
     <p class="note">Free and open source (AGPL). Windows 10 or 11. No administrator rights needed.</p>
@@ -69,7 +69,7 @@
       <li><b>Drop it in</b>A PDF (transcript, invoice), a photo, or paste the e-mail text or a screenshot with Ctrl+V.</li>
       <li><b>Check the details</b>Every field shows where it came from. Guesses are highlighted, and a list offers other candidates.</li>
       <li><b>Pick speed and attorney</b>Rates and the estimated delivery date follow your rate sheet. Buttons fill today, tomorrow, 1 to 3 weeks or 1 month.</li>
-      <li><b>Fill Form</b>The PDF is saved and opened, one per attorney you tick. Ctrl+Enter does it from the keyboard.</li>
+      <li><b>Generate</b>Tick what to make (minute agreement, MOFR, invoice). The PDFs are saved and opened, one per attorney you tick. Ctrl+Enter does it from the keyboard.</li>
     </ol>
   </div>
 </section>
@@ -78,7 +78,7 @@
   <div class="wrap two">
     <div>
       <h2>A hundred orders? Drop the whole folder.</h2>
-      <p>Batch mode reads any number of documents and sorts them into one job per case and date. A transcript and its invoice make one form, not two. Two days of the same case make two forms (or one, if you prefer). Tick the jobs you want and press <b>Fill all</b>.</p>
+      <p>Batch mode reads any number of documents and sorts them into one job per case and date. A transcript and its invoice make one form, not two. Two days of the same case make two forms (or one, if you prefer). Tick the jobs you want and press <b>Generate all</b>.</p>
     </div>
     <img class="shot" src="batch.png" alt="Batch mode with five jobs listed on the left">
   </div>
@@ -91,6 +91,26 @@
       <h2>The result</h2>
       <p>The court's own fillable form, filled in, with "per email" on the attorney line if you like, and your signature picture on the court reporter line. A clean re-typeset version and the original scan are available too. Sample shown uses made-up names.</p>
     </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap two">
+    <img class="shot" src="invoice.png" alt="An invoice listing Regular, Expedite and Daily prices">
+    <div>
+      <h2>Invoices from your transcripts</h2>
+      <p>Drop a transcript PDF and tick <b>Invoice</b>. The page count and your rate sheet price the original, each party's copy and e-mailed copy, and an index for long transcripts, split between the ordering parties. By default the invoice lists Regular, Expedited and Daily so the attorney can choose, with your turnaround times and how to pay you. Each invoice gets its own number. Sample shown uses made-up names.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap two">
+    <div>
+      <h2>See what you billed, and what was paid</h2>
+      <p><b>Records</b> keeps every invoice and form the app made. See totals billed, paid and outstanding for any month, year or firm, with breakdowns by firm and by month. Tick <b>Paid</b> when the money comes in. Export a report, an Excel workbook or CSV files whenever you like; a CSV copy is always kept up to date in your Documents folder.</p>
+    </div>
+    <img class="shot" src="records.png" alt="The Records window with invoice totals and a list of invoices">
   </div>
 </section>
 

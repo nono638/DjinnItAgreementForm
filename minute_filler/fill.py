@@ -8,7 +8,6 @@ Forms (Settings.form_choice):
 from __future__ import annotations
 
 import re
-import sys
 import unicodedata
 from datetime import date
 from pathlib import Path
@@ -16,6 +15,7 @@ from pathlib import Path
 import pymupdf
 
 from . import signature
+from .dates import us_date
 from .forms import original_map, ucs_map
 from .models import CaseInfo, Attorney, PROC_TYPES
 from .rates import speed_key
@@ -23,6 +23,7 @@ from .settings import Settings
 
 FIELD_FONT = "helv"
 MAX_FS, MIN_FS = 10.0, 5.5
+FORM_SPEEDS = ("regular", "expedited", "daily")  # the speeds with a box of their own on the form
 
 
 def forms_dir() -> Path:
@@ -102,9 +103,9 @@ def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str
         v[f"proc_{p.lower()}"] = p in case.proc_types
     delivery = g("delivery").strip()
     key = speed_key(delivery)
-    for d in ("regular", "expedited", "daily"):
+    for d in FORM_SPEEDS:
         v[f"delivery_{d}"] = key == d
-    if delivery and key not in ("regular", "expedited", "daily"):  # e.g. "Immediate"
+    if delivery and key not in FORM_SPEEDS:  # e.g. "Immediate"
         v["delivery_other_check"] = True
         v["delivery_other"] = "" if key == "other" else delivery
 
@@ -141,7 +142,7 @@ def form_text(s: str) -> str:
     return "".join(out)
 
 
-def _set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
+def set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
     w.field_value = text
     w.text_font = "Helv"
     w.text_fontsize = (fs or fit_size(text, w.rect)) if text else 0
@@ -149,7 +150,7 @@ def _set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
     w.update()
 
 
-def _set_check(w: pymupdf.Widget, on: bool) -> None:
+def set_check(w: pymupdf.Widget, on: bool) -> None:
     w.field_value = w.on_state() if on else "Off"
     w.update()
 
@@ -173,9 +174,9 @@ def _fill_clean(doc: pymupdf.Document, v: dict) -> None:
     for name, w in widgets.items():
         val = v.get(name, "")
         if w.field_type == pymupdf.PDF_WIDGET_TYPE_CHECKBOX:
-            _set_check(w, bool(val))
+            set_check(w, bool(val))
         else:
-            _set_text(w, "" if isinstance(val, bool) else str(val), fixed.get(name))
+            set_text(w, "" if isinstance(val, bool) else str(val), fixed.get(name))
 
 
 def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
@@ -204,7 +205,7 @@ def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
             val = "X"
         if key == "delivery_other" and v.get("delivery_other_check"):
             val = v.get("delivery_other") or "X"
-        _set_text(w, str(val), fixed.get(key))
+        set_text(w, str(val), fixed.get(key))
     for key, rect in fmap.OVERLAYS.items():
         text = str(v.get(key) or "")
         if not text:
@@ -231,26 +232,64 @@ def short_caption(name: str, limit: int = 60) -> str:
     return short if len(short) <= limit else short[:limit].rsplit(" ", 1)[0]
 
 
-def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool = False) -> str:
-    """dated: add the date of the minutes, to tell apart the forms for several days of one case."""
+def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool = False,
+                pattern: str | None = None, fallback: str = "Minute Agreement", **extra: str) -> str:
+    """dated: add the date of the minutes, to tell apart the forms for several days of one case.
+    pattern: another file name pattern (MOFR, invoice) than the agreement's; extra: more placeholders."""
+    pattern = s.filename_pattern if pattern is None else pattern
     day = case.get("dates").split(",")[0].strip().replace("/", "-")
     today = date.today()
     caption = short_caption(case.get("case_name")) or "Case"
-    if dated and day and "{case}" in s.filename_pattern and "{date}" not in s.filename_pattern:
+    if dated and day and "{case}" in pattern and "{date}" not in pattern:
         caption, dated = f"{caption} ({day})", False
     try:
-        name = s.filename_pattern.format(
+        name = pattern.format(
             case=caption, today=f"{today.month}-{today.day}-{today.year}",
             index=case.get("index_no").replace("/", "-") or "no index",
             attorney=(atty.name or atty.firm) if atty else "",
-            date=day,
+            date=day, **extra,
         )
     except (KeyError, IndexError, ValueError):  # a bad custom pattern
-        name = f"Minute Agreement - {case.get('index_no').replace('/', '-')}"
-    if dated and day and "{date}" not in s.filename_pattern:
+        name = f"{fallback} - {case.get('index_no').replace('/', '-')}"
+    if dated and day and "{date}" not in pattern:
         name += f" - {day}"
     name = re.sub(r"(\s-\s*)+$", "", re.sub(r"\s-\s+-\s", " - ", name)).strip()
-    return safe_filename(name) + ".pdf"
+    return (safe_filename(name) if name.strip(" .-") else fallback) + ".pdf"
+
+
+MARK = "DjinnIt"  # PDF "creator" of every file this app makes: such files are skipped as inputs
+
+
+def mark(doc: pymupdf.Document, kind: str) -> None:
+    """Labels a PDF as made by this app ("DjinnIt agreement", "DjinnIt MOFR", "DjinnIt invoice")."""
+    meta = dict(doc.metadata or {})
+    meta["creator"] = f"{MARK} {kind}"
+    doc.set_metadata(meta)
+
+
+def save_output(doc: pymupdf.Document, kind: str, path: Path, flatten: bool = False) -> Path:
+    """Saves a PDF this app made: labels it (see mark), optionally flattens the fields, never overwrites
+    (adds " (2)" etc.), closes it and returns where it went."""
+    mark(doc, kind)
+    if flatten:
+        doc.bake()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = unique_path(path)
+    doc.save(out, garbage=3, deflate=True)
+    doc.close()
+    return out
+
+
+def is_generated(path: Path) -> bool:
+    """True for a PDF that this app made (see mark)."""
+    if path.suffix.lower() != ".pdf":
+        return False
+    try:
+        with pymupdf.open(path) as doc:
+            return (doc.metadata or {}).get("creator", "").startswith(MARK)
+    except Exception:
+        return False
+
 
 
 def unique_path(p: Path) -> Path:
@@ -265,8 +304,7 @@ def unique_path(p: Path) -> Path:
 
 def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, dated: bool = False) -> Path:
     if s.agreement_today and not case.get("agreement_date"):
-        case.set("agreement_date", date.today().strftime("%-m/%-d/%Y") if sys.platform != "win32"
-                 else date.today().strftime("%#m/%#d/%Y"))
+        case.set("agreement_date", us_date())
     v = build_values(case, atty, s)
     v["case_name_raw"] = " ".join(case.get("case_name").split())
     choice = s.form_choice if s.form_choice in FORMS else DEFAULT_FORM
@@ -285,16 +323,9 @@ def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, date
         else:
             line = pymupdf.Rect((original_map if choice == "original" else ucs_map).OVERLAYS["sig_reporter"])
         signature.place(doc[0], line, s.signature())
-    if s.flatten:
-        doc.bake()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = unique_path(out_dir / output_name(case, atty, s, dated))
-    doc.save(out, garbage=3, deflate=True)
-    doc.close()
-    return out
+    return save_output(doc, "agreement", out_dir / output_name(case, atty, s, dated), s.flatten)
 
 
 def fill_all(case: CaseInfo, s: Settings, out_dir: Path, dated: bool = False) -> list[Path]:
     """One PDF per checked attorney (or a single form with a blank attorney block)."""
-    chosen = [a for a in case.attorneys if a.checked]
-    return [fill(case, a, s, out_dir, dated) for a in chosen or [None]]
+    return [fill(case, a, s, out_dir, dated) for a in case.orderers()]

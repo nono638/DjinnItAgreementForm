@@ -1,4 +1,4 @@
-"""Field map for the UCS fillable form (minute_agreement_ucs.pdf, made by prepare_ucs_form.py).
+"""Field map for the UCS fillable form (minute_agreement_ucs.pdf, made by tools/prepare_ucs_form.py).
 
 Several of the form's own field names don't match the label they sit on, so each is mapped by
 its position on the page:

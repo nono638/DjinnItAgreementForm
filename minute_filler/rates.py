@@ -23,6 +23,7 @@ from __future__ import annotations
 import csv
 import re
 import shutil
+from decimal import ROUND_HALF_UP, Decimal
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,9 +80,15 @@ def speed_key(name: str) -> str:
     return n
 
 
+def parse_money(v) -> Decimal | None:
+    """'$1,234.5' / 4.3 / 'about 4.30 a page' -> Decimal('1234.50') etc.; None when there is no number."""
+    m = re.search(r"\d+(?:\.\d+)?", str(v if v is not None else "").replace(",", ""))
+    return Decimal(m.group()).quantize(Decimal("0.01"), ROUND_HALF_UP) if m else None
+
+
 def _money(v: str) -> str:
-    m = re.search(r"\d+(?:\.\d+)?", (v or "").replace(",", ""))
-    return f"{float(m.group()):.2f}" if m else ""
+    d = parse_money(v)
+    return "" if d is None else str(d)
 
 
 def load_sheet(path: Path) -> RateSheet:

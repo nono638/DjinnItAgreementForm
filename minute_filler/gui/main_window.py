@@ -1,81 +1,39 @@
 """Main window: drop zone + paste box on the left, editable extracted fields on the right."""
 from __future__ import annotations
 
-import calendar
-import os
 import re
-from datetime import date, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QByteArray, Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTableWidget,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import __version__, log as logfile
-from ..log import error as log_error, log
-from ..batch import Job, expand_paths, fill_jobs, group, make_doc, out_dir_for, remerge
+from .. import log as logfile
+from ..log import log
+from ..batch import Job, expand_paths, fill_jobs, group, out_dir_for, read_loaders, remerge
 from ..extract_llm import OllamaExtractor
-from ..extract_regex import RegexExtractor
-from ..fill import fill_all
+from ..dates import quick_date
+from ..deliver import generate
 from ..ingest import ingest_file, ingest_pil, ingest_text
 from ..merge import refresh_delivery_date, refresh_rate
-from ..models import (Attorney, CaseInfo, DELIVERY_TYPES, FIELD_LABELS, FieldState, PROC_TYPES, REQUIRED_KEYS,
-                      SRC_AI, SRC_USER)
-from ..settings import Settings
+from ..models import (Attorney, CaseInfo, FIELD_LABELS, FieldState, PROC_TYPES, REQUIRED_KEYS, SRC_AI,
+                      SRC_USER)
+from ..settings import OUTPUTS, Settings
 from .dialogs import ClarifyDialog, SettingsDialog
 from .theme import apply_theme
+from .widgets import (ASSETS, check_row, open_path, open_url, plural, refill_combo, repolish, rounded, set_checks,
+                      show_save_error)
 from .workers import Runner
 
 FILE_FILTER = ("Documents (*.pdf *.jpg *.jpeg *.png *.heic *.tif *.tiff *.bmp *.webp *.eml *.txt *.docx);;"
                "All files (*.*)")
 ATT_COLS = ["", "Name", "Firm", "Address", "Phone", "Fax", "Email", "Party / role", "Source"]
 ATT_FIELDS = [None, "name", "firm", "address", "phone", "fax", "email", "party", "source"]
-
-
-ASSETS = Path(__file__).resolve().parent.parent / "assets"
-
-
-def quick_date(days: int = 0, months: int = 0, today: date | None = None) -> str:
-    """Today plus days/months as M/D/YYYY; a day on the weekend becomes the Monday after."""
-    d = today or date.today()
-    if months:
-        y, m = divmod(d.month - 1 + months, 12)
-        d = d.replace(year=d.year + y, month=m + 1, day=min(d.day, calendar.monthrange(d.year + y, m + 1)[1]))
-    d += timedelta(days=days)
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return f"{d.month}/{d.day}/{d.year}"
-
-
-def repolish(w: QWidget) -> None:
-    w.style().unpolish(w)
-    w.style().polish(w)
-
-
-def _rounded(path: Path, width: int, radius: int):
-    """Scaled pixmap with rounded corners (HiDPI aware)."""
-    from PySide6.QtGui import QPainter, QPainterPath, QPixmap
-    src = QPixmap(str(path))
-    if src.isNull():
-        return src
-    dpr = QApplication.instance().devicePixelRatio() if QApplication.instance() else 1.0
-    src = src.scaledToWidth(int(width * dpr), Qt.SmoothTransformation)
-    out = QPixmap(src.size())
-    out.fill(Qt.transparent)
-    p = QPainter(out)
-    p.setRenderHint(QPainter.Antialiasing)
-    clip = QPainterPath()
-    clip.addRoundedRect(0, 0, src.width(), src.height(), radius * dpr, radius * dpr)
-    p.setClipPath(clip)
-    p.drawPixmap(0, 0, src)
-    p.end()
-    out.setDevicePixelRatio(dpr)
-    return out
 
 
 # ------------------------------------------------------------------ widgets
@@ -212,7 +170,7 @@ class DropZone(QFrame):
         if (mood, width) == self.mood and self.djinn.pixmap() and not self.djinn.pixmap().isNull():
             return
         self.mood = (mood, width)
-        self.djinn.setPixmap(_rounded(ASSETS / f"djinn_{mood}.jpg", width, 12))
+        self.djinn.setPixmap(rounded(ASSETS / f"djinn_{mood}.jpg", width, 12))
         self.djinn.setToolTip({"working": "The djinn is on it…", "done": "Ready to fill!",
                                "stumped": "Something needs your attention"}.get(mood, ""))
 
@@ -349,6 +307,10 @@ class MainWindow(QMainWindow):
         new_btn.clicked.connect(self.new_job)
         set_btn = QPushButton("⚙  Settings")
         set_btn.clicked.connect(self.open_settings)
+        rec_btn = QPushButton("Records")
+        rec_btn.setToolTip("Invoices (mark them paid) and everything made so far (Ctrl+R)")
+        rec_btn.clicked.connect(self.open_records)
+        head.addWidget(rec_btn)
         head.addWidget(new_btn)
         head.addWidget(set_btn)
         root.addLayout(head)
@@ -566,8 +528,35 @@ class MainWindow(QMainWindow):
         # footer / fill bar
         foot = QFrame()
         foot.setObjectName("card")
-        fl = QHBoxLayout(foot)
-        fl.setContentsMargins(16, 10, 16, 10)
+        fv = QVBoxLayout(foot)
+        fv.setContentsMargins(16, 10, 16, 10)
+        fv.setSpacing(8)
+        ol = QHBoxLayout()
+        make = QLabel("Make:")
+        make.setObjectName("section")
+        ol.addWidget(make)
+        boxes, self.output_boxes = check_row(OUTPUTS, self.s.outputs, self._outputs_changed)
+        ol.addLayout(boxes)
+        self.output_boxes["mofr"].setToolTip("The court's Minute Order Form/Receipt (your parts of it)")
+        ol.addSpacing(12)
+        self.inv_choice = QCheckBox("Offer every speed")
+        self.inv_choice.setToolTip("List the price of each speed (Settings → Invoice) so the attorney can choose;\n"
+                                   "untick to bill only the speed chosen under Order.")
+        self.inv_choice.toggled.connect(self._invoice_opts_changed)
+        self.inv_parties_label = QLabel("Parties:")
+        self.inv_parties = QSpinBox()
+        self.inv_parties.setRange(1, 20)
+        self.inv_parties.setToolTip("How many parties ordered: the original is split between them,\n"
+                                    "and each gets their own copy (normally the number of ticked attorneys)")
+        self.inv_parties.valueChanged.connect(self._invoice_opts_changed)
+        self.inv_info = QLabel("")
+        self.inv_info.setObjectName("muted")
+        for w in (self.inv_choice, self.inv_parties_label, self.inv_parties, self.inv_info):
+            ol.addWidget(w)
+        ol.addStretch(1)
+        fv.addLayout(ol)
+        fl = QHBoxLayout()
+        fv.addLayout(fl)
         self.per_email = QCheckBox("Write \"per email\" in attorney signature spot")
         self.per_email.setChecked(self.s.per_email)
         self.per_email.toggled.connect(lambda v: self._set_opt("per_email", v))
@@ -590,13 +579,13 @@ class MainWindow(QMainWindow):
         fl.addWidget(QLabel("Form:"))
         fl.addWidget(self.form_choice)
         fl.addSpacing(12)
-        self.fill_btn = QPushButton("Fill Form")
+        self.fill_btn = QPushButton("Generate")
         self.fill_btn.setObjectName("primary")
         self.fill_btn.clicked.connect(self.fill)
         fl.addWidget(self.fill_btn)
-        self.fill_all_btn = QPushButton("Fill all")
+        self.fill_all_btn = QPushButton("Generate all")
         self.fill_all_btn.setObjectName("primary")
-        self.fill_all_btn.setToolTip("Fill the forms of every ticked job (Ctrl+Shift+Enter)")
+        self.fill_all_btn.setToolTip("Make the ticked outputs for every ticked job (Ctrl+Shift+Enter)")
         self.fill_all_btn.clicked.connect(self.fill_all_jobs)
         fl.addWidget(self.fill_all_btn)
         root.addWidget(foot)
@@ -608,9 +597,10 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.browse)
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.fill)
         QShortcut(QKeySequence("Ctrl+Shift+Return"), self, activated=self.fill_all_jobs)
+        QShortcut(QKeySequence("Ctrl+R"), self, activated=self.open_records)
 
     def _build_menu(self):
-        from .dialogs import AboutDialog, CONTACT_EMAIL
+        from .dialogs import AboutDialog, FEEDBACK_URL
         mb = self.menuBar()
         m = mb.addMenu("&File")
         m.addAction("&New job", self.new_job)          # Ctrl+N handled by the window shortcut
@@ -620,11 +610,13 @@ class MainWindow(QMainWindow):
         m.addAction("Open &rate sheets folder", self._open_sheets_folder)
         m.addAction("&Settings…", self.open_settings)
         m.addSeparator()
+        m.addAction("&Records (invoices and history)…", self.open_records)
+        m.addAction("Save the invoice &spreadsheet template…", self._save_invoice_template)
+        m.addSeparator()
         m.addAction("E&xit", self.close)
         m = mb.addMenu("&Help")
         m.addAction("Set up the &AI helper (Ollama)…", self._ai_help)
-        m.addAction("Send &feedback…", lambda: QDesktopServices.openUrl(
-            QUrl(f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}")))
+        m.addAction("Send &feedback…", lambda: open_url(FEEDBACK_URL))
         m.addAction("Open the &log folder", self._open_log_folder)
         m.addAction("&Copy details for a problem report", self._copy_diagnostics)
         m.addSeparator()
@@ -737,22 +729,11 @@ class MainWindow(QMainWindow):
 
     def _ingest(self, loaders, names, paths=None, batch=False):
         gen, target, s = self.gen, self.cur, self.s
-        paths = paths or [""] * len(loaders)
         self._set_status(f"Reading {names[0]}…" if len(names) == 1 else f"Reading {len(names)} documents…", "busy")
         self.busy.setVisible(True)
-        extractor = RegexExtractor(s.profile, s.title_case_names)
 
         def work(progress):
-            docs, errors = [], []
-            for i, (load, name, path) in enumerate(zip(loaders, names, paths)):
-                progress(i, len(loaders), name)
-                try:
-                    ing = load()
-                    docs.append(make_doc(ing, extractor.extract(ing), s, path))
-                except Exception as e:  # one bad file must not stop the rest
-                    errors.append(f"{name}: {e}")
-                    log.info("skipped a document that could not be read")
-            return docs, errors
+            return read_loaders(loaders, names, s, paths, progress)
 
         def step(i, n, name):
             if gen == self.gen and n > 1:
@@ -764,8 +745,7 @@ class MainWindow(QMainWindow):
             if gen != self.gen:
                 return
             docs, errors = result
-            self.busy.setRange(0, 0)
-            self.busy.setVisible(self.ai_pending > 0)
+            self._idle()
             for d in docs:
                 for w in d.ing.warnings:
                     self._toast(w)
@@ -796,8 +776,7 @@ class MainWindow(QMainWindow):
                 self._unreadable(errors, len(loaders))
 
         def failed(msg):
-            self.busy.setRange(0, 0)
-            self.busy.setVisible(self.ai_pending > 0)
+            self._idle()
             self._set_status("Could not read that input", "warn")
             QMessageBox.warning(self, "Could not read input", msg)
 
@@ -895,7 +874,7 @@ class MainWindow(QMainWindow):
 
     def _job_tip(self, job: Job) -> str:
         tip = [d.ing.name for d in job.docs] or ["(no documents)"]
-        tip += ["⚠ " + p for p in job.problems()]
+        tip += ["⚠ " + p for p in job.output_problems(self.s.outputs)]
         who = [a.name or a.firm for a in job.case.attorneys if a.checked]
         tip.append("Form for: " + ("; ".join(who) if who else "(blank attorney block)"))
         if job.error:
@@ -911,7 +890,7 @@ class MainWindow(QMainWindow):
         self.drop.set_compact(multi)
         self.input_list.setMaximumHeight(72 if multi else 110)
         self.paste.setMaximumHeight(64 if multi else 16777215)
-        self.fill_btn.setText("Fill this form" if multi else "Fill Form")
+        self.fill_btn.setText("Generate this job" if multi else "Generate")
         self.fill_btn.setObjectName("" if multi else "primary")
         repolish(self.fill_btn)
         self.job_list.blockSignals(True)
@@ -935,7 +914,7 @@ class MainWindow(QMainWindow):
             item.setCheckState(Qt.Checked if job.include else Qt.Unchecked)
         self.job_list.blockSignals(False)
         chosen = [j for j in self.jobs if j.include and not j.is_empty()]
-        need = sum(1 for j in self.jobs if j.problems() and not j.saved)
+        need = sum(1 for j in self.jobs if j.output_problems(self.s.outputs) and not j.saved)
         saved = sum(1 for j in self.jobs if j.saved)
         text = f"Jobs: {len(self.jobs)}"
         if need:
@@ -943,9 +922,9 @@ class MainWindow(QMainWindow):
         if saved:
             text += f"  ·  {saved} saved (✓)"
         self.jobs_label.setText(text)
-        forms = sum(j.form_count() for j in chosen)
-        self.fill_all_btn.setText(f"Fill all  ({forms} form{'s' if forms != 1 else ''})")
-        self.fill_all_btn.setEnabled(bool(chosen))
+        files = sum(j.file_count(self.s.outputs) for j in chosen)
+        self.fill_all_btn.setText(f"Generate all  ({plural(files, 'file')})")
+        self.fill_all_btn.setEnabled(bool(chosen) and bool(self.s.outputs))
 
     def _show_job(self):
         """Puts the current job in the editor."""
@@ -991,6 +970,8 @@ class MainWindow(QMainWindow):
                 j.include = act == tick
             self._refresh_job_labels()
             return
+        if act is not rem:
+            return
         self._sync_from_ui()
         del self.jobs[self.job_list.row(item)]
         if not self.jobs:
@@ -1018,6 +999,7 @@ class MainWindow(QMainWindow):
             cb.setChecked(p in self.case.proc_types)
             cb.blockSignals(False)
         self._show_attorneys()
+        self._refresh_outputs()
 
     def _show_attorneys(self):
         self.att.blockSignals(True)
@@ -1097,17 +1079,10 @@ class MainWindow(QMainWindow):
     def _fill_sheet_box(self):
         sheets, problems = self.s.sheets()
         current = self.s.sheet()
-        self.sheet_box.blockSignals(True)
-        self.sheet_box.clear()
-        for sh in sheets or [current]:
-            self.sheet_box.addItem(sh.name, sh.name)
-            tip = "\n".join(sp.label() + (f"  ·  {sp.days} days" if sp.days is not None else "")
-                            for sp in sh.speeds)
-            if sh.updated:
-                tip += f"\nRates last updated {sh.updated}"
-            self.sheet_box.setItemData(self.sheet_box.count() - 1, tip, Qt.ToolTipRole)
-        self.sheet_box.setCurrentIndex(max(0, self.sheet_box.findData(current.name)))
-        self.sheet_box.blockSignals(False)
+        shown = sheets or [current]
+        tips = ["\n".join(sp.label() + (f"  ·  {sp.days} days" if sp.days is not None else "") for sp in sh.speeds)
+                + (f"\nRates last updated {sh.updated}" if sh.updated else "") for sh in shown]
+        refill_combo(self.sheet_box, [(sh.name, sh.name) for sh in shown], current.name, tips)
         for p in problems:
             self._toast(f"Rate sheet skipped - {p}")
         self._fill_speeds()
@@ -1115,14 +1090,11 @@ class MainWindow(QMainWindow):
     def _fill_speeds(self):
         keep = self.delivery.currentData() or self.case.get("delivery")
         sheet = self.s.sheet()
-        self.delivery.blockSignals(True)
-        self.delivery.clear()
+        items = []
         for sp in sheet.speeds:
             days = self.s.days_for(sp.name)
-            label = sp.label() + (f"  ·  {days} day{'s' if days != 1 else ''}" if days is not None else "")
-            self.delivery.addItem(label, sp.name)
-        self.delivery.addItem("Other (type the rate yourself)", "Other")
-        self.delivery.blockSignals(False)
+            items.append((sp.label() + (f"  ·  {plural(days, 'day')}" if days is not None else ""), sp.name))
+        refill_combo(self.delivery, items + [("Other (type the rate yourself)", "Other")])
         self._select_speed(keep or self.s.delivery_name(self.s.default_delivery))
 
     def _select_speed(self, name: str):
@@ -1181,7 +1153,7 @@ class MainWindow(QMainWindow):
         self._show_rate_info()
 
     def _open_log_folder(self):
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(logfile.log_dir())))
+        open_path(logfile.log_dir())
 
     def _copy_diagnostics(self):
         QApplication.clipboard().setText(logfile.diagnostics(self.s))
@@ -1189,7 +1161,7 @@ class MainWindow(QMainWindow):
 
     def _open_sheets_folder(self):
         from ..rates import sheets_dir
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(sheets_dir(self.s.rate_sheets_dir))))
+        open_path(sheets_dir(self.s.rate_sheets_dir))
 
     def _reload_sheets(self):
         self.s.reload_rates()
@@ -1213,6 +1185,7 @@ class MainWindow(QMainWindow):
             self.drop.set_mood(None)
 
     def _update_status(self):
+        self._refresh_outputs()
         self._job_status()
         if len(self.jobs) > 1:
             self._refresh_job_labels()
@@ -1241,6 +1214,26 @@ class MainWindow(QMainWindow):
             self._set_status("✓  Ready to fill", "ok")
             self.status.setToolTip("")
 
+    def _idle(self):
+        """Background work is done: the progress bar goes back to 'busy' style, shown only while the AI works."""
+        self.busy.setRange(0, 0)
+        self.busy.setVisible(self.ai_pending > 0)
+
+    def _saved_box(self, title: str, text: str, folders: list, details: str = "", warn: bool = False):
+        """The 'files saved' message, with a button that opens the folder(s)."""
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Warning if warn else QMessageBox.Information)
+        box.setText(text)
+        if details:
+            box.setDetailedText(details)
+        open_folder = box.addButton("Open folder", QMessageBox.ActionRole) if folders else None
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if open_folder is not None and box.clickedButton() == open_folder:
+            for f in folders[:3]:
+                open_path(f)
+
     def _toast(self, msg: str):
         self.statusBar().showMessage(msg, 8000)
 
@@ -1248,9 +1241,22 @@ class MainWindow(QMainWindow):
     def fill(self):
         self._sync_from_ui()
         case = self.case
+        outputs = list(self.s.outputs)
+        if not outputs:
+            QMessageBox.information(self, "Nothing to make", "Tick what to make first: minute agreement, MOFR "
+                                    "and/or invoice (at the bottom of the window).")
+            return
+        if self.cur.makeable(outputs) != outputs:
+            if QMessageBox.question(
+                    self, "No invoice", "An invoice needs a transcript PDF (for the page count), and this job has "
+                    "none.\n\nMake the other outputs without the invoice?") != QMessageBox.Yes:
+                return
+            outputs = self.cur.makeable(outputs)
+            if not outputs:
+                return
         # Ask about required fields that are blank, and fields with competing values
         questions = []
-        for key in REQUIRED_KEYS:
+        for key in REQUIRED_KEYS if {"agreement", "mofr"} & set(outputs) else ["case_name"]:
             fs = case.fields[key]
             if not fs.value or (fs.source != SRC_USER and len([a for a in fs.alternatives if a != fs.value]) > 0
                                 and fs.confidence < 0.8):
@@ -1272,31 +1278,20 @@ class MainWindow(QMainWindow):
 
         out_dir = out_dir_for(self.cur, self.s)
         try:
-            paths = fill_all(case, self.s, out_dir)
-        except PermissionError as e:
-            QMessageBox.warning(self, "Could not save", f"{e}\n\nIs the PDF open in another program?")
-            return
+            paths = generate(case, self.s, out_dir, outputs, self.cur.invoice_opts())
         except Exception as e:
-            log_error("could not fill the form", e)
-            QMessageBox.critical(self, "Could not fill the form", f"{type(e).__name__}: {e}")
+            show_save_error(self, e, "Could not make the files")
             return
-        log.info("filled %d form(s), form type %s", len(paths), self.s.form_choice)
+        log.info("made %d file(s): %s, form type %s", len(paths), "+".join(outputs), self.s.form_choice)
         if self.s.open_after:
             for p in paths:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
-        box = QMessageBox(self)
-        box.setWindowTitle("Saved")
-        box.setIcon(QMessageBox.Information)
-        box.setText(f"Saved {len(paths)} form{'s' if len(paths) != 1 else ''}:\n\n" +
-                    "\n".join(p.name for p in paths) + f"\n\nin {out_dir}")
-        open_folder = box.addButton("Open folder", QMessageBox.ActionRole)
-        box.addButton(QMessageBox.Ok)
-        box.exec()
-        if box.clickedButton() == open_folder:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out_dir)))
+                open_path(p)
+        self._saved_box("Saved", f"Saved {plural(len(paths), 'file')}:\n\n" + "\n".join(p.name for p in paths)
+                        + f"\n\nin {out_dir}", [out_dir])
         self.cur.saved, self.cur.error = paths, ""
         self._update_status()
-        self._set_status(f"✓  Saved {len(paths)} form(s)", "ok")
+        self._set_status(f"✓  Saved {len(paths)} file(s)", "ok")
+        self._records_changed()
 
     def fill_all_jobs(self):
         """Fills the forms of every ticked job without asking questions."""
@@ -1306,21 +1301,25 @@ class MainWindow(QMainWindow):
         chosen = [j for j in self.jobs if j.include and not j.is_empty()]
         if not chosen:
             return
-        gaps = [j for j in chosen if j.problems()]
+        outputs = list(self.s.outputs)
+        if not outputs:
+            return
+        gaps = [j for j in chosen if j.output_problems(outputs)]
         if gaps:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Question)
             box.setWindowTitle("Some jobs are incomplete")
-            box.setText(f"{len(gaps)} of {len(chosen)} jobs (marked ⚠) would have blanks on the form:\n\n"
-                        + "\n".join(f"•  {j.title()}:  {', '.join(j.problems())}" for j in gaps[:8])
+            box.setText(f"{len(gaps)} of {len(chosen)} jobs (marked ⚠) are incomplete:\n\n"
+                        + "\n".join(f"•  {j.title()}:  {', '.join(j.output_problems(outputs))}" for j in gaps[:8])
                         + ("\n…" if len(gaps) > 8 else ""))
-            ready = box.addButton(f"Fill the {len(chosen) - len(gaps)} complete ones", QMessageBox.AcceptRole)
-            everything = box.addButton("Fill all, leave blanks", QMessageBox.ActionRole)
+            ready = box.addButton(f"Do the {len(chosen) - len(gaps)} complete ones", QMessageBox.AcceptRole)
+            everything = box.addButton("Do all (blanks left, no invoice without a transcript)",
+                                       QMessageBox.ActionRole)
             box.addButton(QMessageBox.Cancel)
             ready.setEnabled(len(chosen) > len(gaps))
             box.exec()
             if box.clickedButton() == ready:
-                chosen = [j for j in chosen if not j.problems()]
+                chosen = [j for j in chosen if not j.output_problems(outputs)]
             elif box.clickedButton() != everything:
                 return
         gen = self.gen
@@ -1331,37 +1330,32 @@ class MainWindow(QMainWindow):
         def step(i, n, name):
             self.busy.setRange(0, n)
             self.busy.setValue(i)
-            self._set_status(f"Filling {i + 1} of {n}…", "busy")
+            self._set_status(f"Making {i + 1} of {n}…", "busy")
 
         def done(paths):
             self.busy.setRange(0, 0)
             self.fill_btn.setEnabled(True)
             if gen != self.gen:
                 return
-            failed = [j for j in chosen if j.error]
+            failed = [j for j in chosen if j.error and not j.saved]
+            partial = [j for j in chosen if j.error and j.saved]
             for j in chosen:
                 if j.saved and not j.error:
                     j.include = False  # "Fill all" again only does what is left
             self._update_status()
             folders = list(dict.fromkeys(str(p.parent) for p in paths))
-            text = f"Saved {len(paths)} form{'s' if len(paths) != 1 else ''} for " \
+            text = f"Saved {len(paths)} file{'s' if len(paths) != 1 else ''} for " \
                    f"{len(chosen) - len(failed)} job{'s' if len(chosen) - len(failed) != 1 else ''}"
             text += f" in\n{folders[0]}" if len(folders) == 1 else f" in {len(folders)} folders." if folders else "."
             if failed:
                 text += f"\n\n{len(failed)} could not be saved (is a PDF open in another program?):\n" + \
                         "\n".join(f"•  {j.title()}: {j.error[:90]}" for j in failed[:6])
-            box = QMessageBox(self)
-            box.setWindowTitle("Batch finished")
-            box.setIcon(QMessageBox.Warning if failed else QMessageBox.Information)
-            box.setText(text)
-            box.setDetailedText("\n".join(str(p) for p in paths))
-            open_folder = box.addButton("Open folder", QMessageBox.ActionRole) if folders else None
-            box.addButton(QMessageBox.Ok)
-            box.exec()
-            if open_folder is not None and box.clickedButton() == open_folder:
-                for f in folders[:3]:
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(f))
-            self._set_status(f"✓  Saved {len(paths)} form(s)", "warn" if failed else "ok")
+            if partial:
+                text += f"\n\n{len(partial)} job(s) got no invoice (no transcript PDF):\n" + \
+                        "\n".join(f"•  {j.title()}" for j in partial[:6])
+            self._saved_box("Batch finished", text, folders, "\n".join(str(p) for p in paths), warn=bool(failed))
+            self._set_status(f"✓  Saved {len(paths)} file(s)", "warn" if failed else "ok")
+            self._records_changed()
 
         def crashed(msg):
             self.busy.setRange(0, 0)
@@ -1369,7 +1363,7 @@ class MainWindow(QMainWindow):
             self._update_status()
             QMessageBox.critical(self, "Could not fill the forms", msg)
 
-        self.runner.start(fill_jobs, chosen, self.s, batch=list(self.jobs),
+        self.runner.start(fill_jobs, chosen, self.s, batch=list(self.jobs), outputs=outputs,
                           on_done=done, on_error=crashed, on_progress=step)
 
     # ------------------------------------------------------- misc
@@ -1397,6 +1391,7 @@ class MainWindow(QMainWindow):
             self.per_email.setChecked(self.s.per_email)
             self.sign_rep.setChecked(self.s.sign_reporter)
             self.form_choice.setCurrentIndex(max(0, self.form_choice.findData(self.s.form_choice)))
+            set_checks(self.output_boxes, self.s.outputs)
             self.s.reload_rates()
             self._fill_sheet_box()
             self._check_ai()
@@ -1405,6 +1400,84 @@ class MainWindow(QMainWindow):
             self._apply_speed()
             self._remerge_others()
             self._update_status()
+
+    # ------------------------------------------------------- outputs and records
+    def _outputs_changed(self, _=None):
+        """The Make: boxes are saved straight away, as the default for next time."""
+        self._set_opt("outputs", [k for k, cb in self.output_boxes.items() if cb.isChecked()])
+        self._refresh_outputs()
+        if len(self.jobs) > 1:
+            self._refresh_job_labels()
+
+    def _refresh_outputs(self):
+        """Shows the invoice controls for the current job; an invoice needs a transcript."""
+        if not hasattr(self, "output_boxes"):
+            return
+        job = self.cur
+        pages = job.invoice_pages()
+        box = self.output_boxes["invoice"]
+        box.setToolTip("An invoice for each ticked attorney, priced from the rate sheet" if pages else
+                       "Needs a transcript PDF among the inputs (for the page count).\n"
+                       "Jobs without one get no invoice.")
+        on = box.isChecked()
+        for w in (self.inv_choice, self.inv_parties_label, self.inv_parties, self.inv_info):
+            w.setVisible(on)
+        if not on:
+            return
+        for w, v in ((self.inv_choice, self.s.invoice_choice if job.invoice_choice is None else job.invoice_choice),
+                     (self.inv_parties, job.parties or job.form_count())):
+            w.blockSignals(True)
+            w.setChecked(v) if isinstance(w, QCheckBox) else w.setValue(v)
+            w.blockSignals(False)
+        if not pages:
+            self.inv_info.setText("⚠ no transcript PDF: no invoice for this job")
+            return
+        try:
+            from ..invoice_calc import fmt, quotes_for
+            qs = quotes_for(pages, self.inv_parties.value(), self.s.sheet(), self.s,
+                            self.case.get("delivery") or self.s.default_delivery, self.inv_choice.isChecked())
+            self.inv_info.setText(f"{pages} pp.  ·  " + "  ·  ".join(f"{q.speed} {fmt(q.per_party)}" for q in qs)
+                                  + ("  each" if self.inv_parties.value() > 1 else ""))
+        except Exception as e:  # a broken rate sheet must not break the window
+            self.inv_info.setText(f"⚠ {e}")
+
+    def _invoice_opts_changed(self, _=None):
+        job = self.cur
+        job.invoice_choice = self.inv_choice.isChecked()
+        job.parties = self.inv_parties.value()
+        self._refresh_outputs()
+
+    def open_records(self):
+        from .records_window import RecordsWindow
+        win = getattr(self, "_records_win", None)
+        if win is None:
+            win = self._records_win = RecordsWindow(self.s, self)
+        win.reload()
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _records_changed(self):
+        win = getattr(self, "_records_win", None)
+        if win is not None and win.isVisible():
+            win.reload()
+
+    def _save_invoice_template(self):
+        from ..invoice import TEMPLATE
+        if not TEMPLATE.is_file():
+            QMessageBox.warning(self, "Not found", "The invoice spreadsheet template is missing from this install.")
+            return
+        dest, _ = QFileDialog.getSaveFileName(self, "Save the invoice spreadsheet template",
+                                              str(Path.home() / "Documents" / TEMPLATE.name),
+                                              "Excel workbook (*.xlsx)")
+        if dest:
+            import shutil
+            try:
+                shutil.copyfile(TEMPLATE, dest)
+            except OSError as e:
+                QMessageBox.warning(self, "Could not save", str(e))
+                return
+            open_path(Path(dest).parent)
 
     def closeEvent(self, e):
         self.s.window_geometry = bytes(self.saveGeometry().toBase64()).decode()

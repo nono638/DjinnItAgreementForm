@@ -6,32 +6,18 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+from PySide6 import QtCore  # noqa: E402
 
-from minute_filler.gui.main_window import MainWindow  # noqa: E402
-from minute_filler.settings import Profile, Settings  # noqa: E402
-
-INVOICE = """Invoice
-To: Example Firm LLP, attn: billing@examplefirm.com
-Title: {title}
-Index No. {index}
-Date of proceedings: {date}
-Judge: Lopez
-Part: 53
-"""
+from helpers import invoice_text, pat_settings, transcript_pdf  # noqa: E402
 
 
 @pytest.fixture
-def window(tmp_path, monkeypatch):
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+def window(tmp_path, monkeypatch, make_window):
     monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda self: 0)  # no dialogs waiting for a click
-    s = Settings()
-    s.profile = Profile(name="Pat Reporter")
+    s = pat_settings()
     s.use_ai = s.open_after = False
     s.output_dir = str(tmp_path / "out")
-    win = MainWindow(s, app)
-    yield win
-    win.gen += 1
-    win.deleteLater()
+    return make_window(s)
 
 
 def wait(win, until, seconds=20):
@@ -46,7 +32,7 @@ def wait(win, until, seconds=20):
 
 def write(folder, name, **kw):
     p = folder / name
-    p.write_text(INVOICE.format(**kw))
+    p.write_text(invoice_text(**kw))
     return str(p)
 
 
@@ -105,3 +91,48 @@ def test_folder_and_split(window, tmp_path):
     assert len(window.jobs) == 1
     window.new_job()
     assert window.cur.is_empty() and window.input_list.count() == 0 and window.rows["index_no"].text() == ""
+
+
+def test_outputs_and_invoice_need_a_transcript(window, tmp_path):
+    window.s.records_dir = str(tmp_path / "records")
+    window.output_boxes["invoice"].setChecked(True)
+    window.output_boxes["mofr"].setChecked(True)
+    assert window.s.outputs == ["agreement", "mofr", "invoice"]  # saved as the default straight away
+
+    window.add_files([write(tmp_path, "a.txt", title="Smith v Jones", index="712222-2024", date="5-22-2026")])
+    wait(window, lambda: len(window.cur.docs) == 1)
+    assert "no transcript" in window.inv_info.text()
+    assert window.cur.output_problems(window.s.outputs)
+
+    window.new_job()
+    window.add_files([str(transcript_pdf(tmp_path / "t.pdf", pages=12))])
+    wait(window, lambda: len(window.cur.docs) == 1)
+    assert window.cur.invoice_pages() == 12
+    assert "12 pp." in window.inv_info.text() and "Regular" in window.inv_info.text()
+    for a in window.case.attorneys:
+        a.checked = "Counsel" in (a.firm or "")
+    window._show_attorneys()
+    window.fill()
+    kinds = [p.name.split(" - ")[0].split(" 20")[0] for p in window.cur.saved]
+    assert kinds == ["Minute Agreement", "MOFR", "Invoice"]
+
+
+def test_records_window_marks_paid(window, tmp_path, monkeypatch):
+    from minute_filler.gui import records_window as rw
+    from minute_filler.records import Invoice
+    window.s.records_dir = str(tmp_path / "records")
+    from minute_filler.deliver import ledger_for
+    lg = ledger_for(window.s)
+    lg.add_invoice(Invoice("2026-0001", "2026-03-04", "Roe v. Doe", firm="Example Firm LLP",
+                           amounts={"Regular": "63.00", "Daily": "91.00"}, billed_speed="Regular"))
+    window.open_records()
+    win = window._records_win
+    win.i_year.setCurrentIndex(0)  # all years
+    assert win.inv_table.rowCount() == 1 and win.kpi["outstanding"].text() == "$63.00"
+    monkeypatch.setattr(rw.PaidDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
+    monkeypatch.setattr(rw.PaidDialog, "values", lambda self: ("Daily", "91.00", "2026-03-10"))
+    win.inv_table.item(0, 0).setCheckState(QtCore.Qt.Checked)
+    assert lg.invoice("2026-0001").status == "paid"
+    assert win.kpi["paid"].text() == "$91.00" and win.kpi["outstanding"].text() == "$0.00"
+    assert win.firm_table.item(0, 0).text() == "Example Firm LLP"
+    win.close()

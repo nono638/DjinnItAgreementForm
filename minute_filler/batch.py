@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Callable
 
 from .extract_regex import RegexExtractor, dedupe_attorneys, find_dates
-from .fill import fill_all, short_caption
+from .deliver import NO_TRANSCRIPT, generate, ledger_for
+from .fill import is_generated, short_caption
+from .invoice import InvoiceOpts
 from .ingest import IMAGE_EXT, Ingested, ingest_file
 from .log import error as log_error, log
 from .merge import merge, refresh_delivery_date, refresh_rate
-from .models import CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_REGEX, SRC_USER
+from .models import CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_REGEX, SRC_USER, to_int
 from .settings import Settings
 
 BATCH_EXT = {".pdf", ".eml", ".docx", ".txt", ".htm", ".html"} | IMAGE_EXT  # taken from a dropped folder
@@ -115,6 +117,8 @@ class Job:
     include: bool = True         # ticked for "Fill all"
     saved: list[Path] = field(default_factory=list)
     error: str = ""
+    parties: int = 0             # ordering parties on the invoice; 0 = the number of ticked attorneys
+    invoice_choice: bool | None = None  # list every speed on the invoice; None = the setting
 
     def is_empty(self) -> bool:
         """Nothing dropped and nothing typed."""
@@ -148,6 +152,34 @@ class Job:
 
     def form_count(self) -> int:
         return max(1, sum(1 for a in self.case.attorneys if a.checked))
+
+    def transcript_pages(self) -> int:
+        """Pages of the transcript PDFs among the inputs; 0 when there is none (then no invoice can be made)."""
+        return sum(d.ing.page_count for d in self.docs if d.regex.doc_kind == "transcript" and d.ing.kind == "pdf")
+
+    def invoice_pages(self) -> int:
+        """The pages to bill: the Pages field (editable), else the transcript's own count; 0 = no transcript."""
+        pages = self.transcript_pages()
+        return to_int(self.case.get("est_pages"), pages) if pages else 0
+
+    def invoice_opts(self) -> InvoiceOpts:
+        return InvoiceOpts(self.invoice_pages(), self.parties or self.form_count(), self.invoice_choice)
+
+    def output_problems(self, outputs) -> list[str]:
+        """What stops the chosen outputs: the agreement's missing fields, or no transcript for an invoice."""
+        out = self.problems() if {"agreement", "mofr"} & set(outputs) else []
+        if "invoice" in outputs and not self.invoice_pages():
+            out.append(NO_TRANSCRIPT)
+        return out
+
+    def makeable(self, outputs) -> list[str]:
+        """The outputs this job can have: all of them, less the invoice when there is no transcript."""
+        return [o for o in outputs if o != "invoice" or self.invoice_pages()]
+
+    def file_count(self, outputs) -> int:
+        """How many files generate() will make for this job."""
+        per = {"agreement": self.form_count(), "mofr": 1, "invoice": self.form_count()}
+        return sum(per[o] for o in self.makeable(outputs))
 
 
 def make_doc(ing: Ingested, regex: Extraction, s: Settings, path: str = "") -> Doc:
@@ -250,7 +282,8 @@ def expand_paths(paths: list[str]) -> list[str]:
         if p.is_dir():
             for f in sorted(p.rglob("*")):
                 # forms this app filled earlier are not source documents
-                if f.is_file() and f.suffix.lower() in BATCH_EXT and not f.name.startswith(("Minute Agreement", "~$")):
+                if (f.is_file() and f.suffix.lower() in BATCH_EXT
+                        and not f.name.startswith(("Minute Agreement", "MOFR", "~$")) and not is_generated(f)):
                     add(f)
         elif p.is_file():
             add(p)
@@ -259,16 +292,26 @@ def expand_paths(paths: list[str]) -> list[str]:
 
 def read_docs(paths: list[str], s: Settings, progress: Progress | None = None) -> tuple[list[Doc], list[str]]:
     """Reads and extracts every file. Returns the documents and a message per unreadable file."""
+    return read_loaders([lambda p=p: ingest_file(p) for p in paths], [Path(p).name for p in paths], s, paths,
+                        progress)
+
+
+def read_loaders(loaders: list[Callable[[], Ingested]], names: list[str], s: Settings,
+                 paths: list[str] | None = None, progress: Progress | None = None) -> tuple[list[Doc], list[str]]:
+    """read_docs for any inputs (files, pasted text, images): each loader returns the Ingested document.
+    One input that can't be read doesn't stop the others; it gets a message instead."""
     extractor = RegexExtractor(s.profile, s.title_case_names)
+    paths = paths or [""] * len(loaders)
     docs, errors = [], []
-    for i, p in enumerate(paths):
+    for i, (load, name, path) in enumerate(zip(loaders, names, paths)):
         if progress:
-            progress(i, len(paths), Path(p).name)
+            progress(i, len(loaders), name)
         try:
-            ing = ingest_file(p)
-            docs.append(make_doc(ing, extractor.extract(ing), s, p))
+            ing = load()
+            docs.append(make_doc(ing, extractor.extract(ing), s, path))
         except Exception as e:
-            errors.append(f"{Path(p).name}: {e}")
+            errors.append(f"{name}: {e}")
+            log.info("skipped a document that could not be read")
     return docs, errors
 
 
@@ -282,18 +325,23 @@ def out_dir_for(job: Job, s: Settings) -> Path:
 
 
 def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
-              batch: list[Job] | None = None) -> list[Path]:
-    """Fills the forms of every job; problems are recorded in job.error instead of stopping the batch.
+              batch: list[Job] | None = None, outputs: list[str] | None = None) -> list[Path]:
+    """Makes the outputs (default: Settings.outputs) of every job; problems are recorded in job.error
+    instead of stopping the batch. A job without a transcript gets no invoice (noted in job.error).
     `batch` is the whole batch when only some of its jobs are filled: jobs for several days of one
     case get the date in their file names."""
+    outputs = list(s.outputs if outputs is None else outputs)
+    ledger = ledger_for(s)
     names = [j.name_key() for j in batch or jobs]
     done: list[Path] = []
     for i, job in enumerate(jobs):
         if progress:
             progress(i, len(jobs), job.title())
         try:
-            job.saved = fill_all(job.case, s, out_dir_for(job, s), dated=names.count(job.name_key()) > 1)
-            job.error = ""
+            want = job.makeable(outputs)
+            job.saved = generate(job.case, s, out_dir_for(job, s), want, job.invoice_opts(), ledger,
+                                 dated=names.count(job.name_key()) > 1)
+            job.error = "" if want == outputs else "no invoice: no transcript PDF among the inputs"
             done += job.saved
         except Exception as e:
             job.error = f"{type(e).__name__}: {e}"

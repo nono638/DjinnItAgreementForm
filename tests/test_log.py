@@ -110,18 +110,11 @@ def test_no_log_when_the_folder_cannot_be_written(tmp_path, monkeypatch):
         log.shutdown()
 
 
-def test_menu_has_the_log_items(tmp_path, monkeypatch):
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
-    monkeypatch.setenv("APPDATA", str(tmp_path))
-    from minute_filler.gui.main_window import MainWindow
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+def test_menu_has_the_log_items(qt, make_window):
     s = Settings()
     s.use_ai = False
-    win = MainWindow(s, app)
-    names = [a.text() for m in win.menuBar().findChildren(QtWidgets.QMenu) for a in m.actions()]
+    win = make_window(s)
+    names = [a.text() for m in win.menuBar().findChildren(qt.QMenu) for a in m.actions()]
     assert "Open the &log folder" in names and "&Copy details for a problem report" in names
     win._copy_diagnostics()
-    assert "DjinnItAgreementForm" in app.clipboard().text()
-    win.deleteLater()
+    assert "DjinnItAgreementForm" in qt.QApplication.clipboard().text()

@@ -3,37 +3,24 @@ from pathlib import Path
 
 import pytest
 
-from minute_filler.batch import expand_paths, fill_jobs, group, make_doc, read_docs
-from minute_filler.extract_regex import RegexExtractor
-from minute_filler.ingest import ingest_text
-from minute_filler.settings import Profile, Settings
+from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
+from minute_filler.settings import Settings
 
-SAMPLES = Path(__file__).parent / "samples"
-
-INVOICE = """Invoice
-To: Example Firm LLP, attn: billing@examplefirm.com
-Title: {title}
-Index No. {index}
-Date of proceedings: {date}
-Judge: Lopez
-Part: 53
-"""
+from helpers import PAT, SAMPLES, invoice_text, text_doc
 
 
 @pytest.fixture
 def settings():
     s = Settings()
-    s.profile = Profile(name="Pat Reporter", email="preporter@example.com", phone="(555) 010-0000")
+    s.profile = PAT
     return s
 
 
-def doc(s, text, name="doc.txt"):
-    ing = ingest_text(text, name)
-    return make_doc(ing, RegexExtractor(s.profile).extract(ing), s)
+doc = text_doc
 
 
 def invoice(s, title="Smith v Jones", index="712222-2024", date="5-22-2026", name="invoice.txt"):
-    return doc(s, INVOICE.format(title=title, index=index, date=date), name)
+    return doc(s, invoice_text(title, index, date), name)
 
 
 def names(job):
@@ -107,9 +94,9 @@ def test_new_documents_join_existing_jobs_and_keep_edits(settings):
 def test_folder_in_forms_out(settings, tmp_path):
     src = tmp_path / "in"
     (src / "sub").mkdir(parents=True)
-    (src / "1.txt").write_text(INVOICE.format(title="Smith v Jones", index="712222-2024", date="5-22-2026"))
-    (src / "sub" / "2.txt").write_text(INVOICE.format(title="Smith v Jones", index="712222/2024", date="5/22/2026"))
-    (src / "3.txt").write_text(INVOICE.format(title="Roe v Doe", index="700001-2025", date="6-1-2026"))
+    (src / "1.txt").write_text(invoice_text(title="Smith v Jones", index="712222-2024", date="5-22-2026"))
+    (src / "sub" / "2.txt").write_text(invoice_text(title="Smith v Jones", index="712222/2024", date="5/22/2026"))
+    (src / "3.txt").write_text(invoice_text(title="Roe v Doe", index="700001-2025", date="6-1-2026"))
     (src / "Minute Agreement - old.pdf").write_bytes(b"")  # an earlier output, not a source
     (src / "notes.xyz").write_text("ignored")
     paths = expand_paths([str(src), str(src / "1.txt")])
