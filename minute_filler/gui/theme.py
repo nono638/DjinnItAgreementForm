@@ -39,6 +39,7 @@ QCheckBox:disabled, QLabel:disabled, QComboBox:disabled, QSpinBox:disabled { col
 QLabel#kpiValue { font-size: 17pt; font-weight: 700; }
 QLabel#kpiValue[tone="ok"] { color: {ok}; }
 QLabel#kpiValue[tone="warn"] { color: {review}; }
+QLabel#problem { color: {review}; font-weight: 600; }
 
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
   background: {input}; border: 1px solid {input_border}; border-radius: 6px; padding: 5px 8px;

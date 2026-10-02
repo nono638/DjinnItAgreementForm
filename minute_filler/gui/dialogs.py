@@ -1,5 +1,6 @@
 """The app's dialogs: Settings, the "please clarify" questions before filling, the run sheet choice, a job's
-invoice Extras and granular detail, the Ollama setup help (with a model download) and About."""
+invoice Extras, granular detail and who ordered which pages, the Ollama setup help (with a model download) and
+About."""
 from __future__ import annotations
 
 import re
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..models import Attorney, FIELD_LABELS
 from ..runsheet import runsheets_folder
-from ..settings import DETAIL_ITEMS, INDEX_RULES, OUTPUTS, SPEEDS, Settings, reporter_key
+from ..settings import DETAIL_ITEMS, INDEX_RULES, INDEX_SHARED, OUTPUTS, SPEEDS, Settings, reporter_key
 from .widgets import check_row, open_path, open_url, refill_combo, rounded
 
 
@@ -233,10 +234,6 @@ class SettingsDialog(QDialog):
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         f.addRow("", hint)
-        self.i_detail = QCheckBox("Show granular detail")
-        self.i_detail.setToolTip("The same box as Show granular detail in the Outputs box (Invoice panel)")
-        self.i_detail.setChecked(settings.invoice_detail)
-        f.addRow("", self.i_detail)
         shows = QGridLayout()
         shows.setHorizontalSpacing(16)
         shows.setVerticalSpacing(6)
@@ -251,7 +248,7 @@ class SettingsDialog(QDialog):
         self.i_email.setChecked(settings.invoice_include_email)
         f.addRow("", self.i_email)
         idx = QHBoxLayout()
-        self.i_index = QCheckBox("Add an index for each party and the judge from")
+        self.i_index = QCheckBox("Add an index (and one for the judge) from")
         self.i_index.setChecked(settings.invoice_include_index)
         self.i_threshold = QSpinBox()
         self.i_threshold.setRange(1, 10000)
@@ -269,6 +266,14 @@ class SettingsDialog(QDialog):
         self.i_rule.setToolTip("For an invoice covering several days. A job's Extras… can still turn the index\n"
                                "on or off for that job.")
         f.addRow("Index on several days", self.i_rule)
+        self.i_shared = QComboBox()
+        for key, label in INDEX_SHARED.items():
+            self.i_shared.addItem(label, key)
+        self.i_shared.setCurrentIndex(max(0, self.i_shared.findData(settings.invoice_index_shared)))
+        self.i_shared.setToolTip("When several attorneys ordered the same pages: one index, its price split between\n"
+                                 "them like the original's, or an index for each of them. The judge's index is\n"
+                                 "always split.")
+        f.addRow("Index on shared pages", self.i_shared)
         self.i_joint = QComboBox()
         self.i_joint.addItem("One joint invoice for all the days of a case", True)
         self.i_joint.addItem("An invoice for each day", False)
@@ -568,7 +573,6 @@ class SettingsDialog(QDialog):
         s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
         s.mofr_division = self.o_division.currentData()
         s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
-        s.invoice_detail = self.i_detail.isChecked()
         # speeds named otherwise on a rate sheet (ticked in the Outputs box) have no box here: they stay
         from ..rates import speed_key
         keep = [x for x in s.invoice_speeds if speed_key(x) not in {speed_key(n) for n in SPEEDS}]
@@ -576,6 +580,7 @@ class SettingsDialog(QDialog):
         s.invoice_include_email, s.invoice_include_index = self.i_email.isChecked(), self.i_index.isChecked()
         s.invoice_index_threshold = self.i_threshold.value()
         s.invoice_index_rule = self.i_rule.currentData()
+        s.invoice_index_shared = self.i_shared.currentData()
         s.invoice_joint = bool(self.i_joint.currentData())
         s.invoice_detail_items = [k for k, cb in self.i_items.items() if cb.isChecked()]
         s.invoice_turnaround = {k: e.text().strip() for k, e in self.i_turn.items()}
@@ -709,7 +714,7 @@ class InvoiceExtrasDialog(QDialog):
         self.email.setChecked(self.default_email if email is None else email)
         lay.addWidget(self.email)
         lay.addSpacing(6)
-        lay.addWidget(QLabel("Index for each party and the judge:"))
+        lay.addWidget(QLabel("Index (and one for the judge):"))
         rule = INDEX_RULES.get(s.invoice_index_rule, "").lower()
         self.index = QButtonGroup(self)
         for key, label in (("auto", f"Automatic: from {s.invoice_index_threshold} pages ({rule})"),
@@ -774,6 +779,170 @@ class InvoiceShowDialog(QDialog):
         """The items ticked; None when they are the same as Settings, so the job follows them."""
         items = [k for k, cb in self.boxes.items() if cb.isChecked()]
         return None if set(items) == set(self.default) else items
+
+
+class PortionsDialog(QDialog):
+    """Who ordered…: which attorney ordered which pages of one day. Each row is a stretch of pages, from the
+    page after the row above up to the page chosen (the last row ends at the day's pages), with a box per
+    attorney. values() gives the rows as Job.portions keeps them, or None when every attorney ticked on the
+    day ordered every page."""
+
+    def __init__(self, attorneys: list[Attorney], pages: int, rows: list | None, ticked: list[str], parent=None):
+        """attorneys: the columns (the attorneys ticked on the day); pages: the day's pages; rows: the job's
+        Job.portions (None = everyone ordered every page; ticks of attorneys not among the columns are left
+        out); ticked: the Attorney.key()s ticked on the day (the default row)."""
+        super().__init__(parent)
+        self.setWindowTitle("Who ordered which pages")
+        self.setMinimumWidth(460)
+        self.pages = max(1, pages)
+        self.keys = list(dict.fromkeys(a.key() for a in attorneys))
+        self.default = [k for k in self.keys if k in ticked] or list(self.keys)  # nobody ticked: everyone
+        self.result_rows: list | None = None
+        self.lines: list[tuple[QLabel, QSpinBox, list[QCheckBox]]] = []
+        lay = QVBoxLayout(self)
+        intro = QLabel(f"This day has {self.pages} pages. Each row is a stretch of them: tick who ordered it.")
+        intro.setObjectName("subtitle")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        box = QWidget()
+        self.grid = QGridLayout(box)
+        self.grid.setContentsMargins(0, 6, 0, 6)
+        self.grid.setHorizontalSpacing(14)
+        self.grid.setVerticalSpacing(6)
+        named = {}  # one column per attorney (the same one written two ways is one)
+        for a in attorneys:
+            named.setdefault(a.key(), a)
+        for c, a in enumerate(named.values()):
+            name = a.name or a.firm
+            head = QLabel(name if len(name) <= 24 else name[:23] + "…")
+            head.setToolTip(" - ".join(x for x in (a.name, a.firm) if x))
+            self.grid.addWidget(head, 0, 2 + c, Qt.AlignHCenter | Qt.AlignBottom)
+        lay.addWidget(box)
+        buttons = QHBoxLayout()
+        for text, slot, tip in (("Add row", self._add_row, "Splits the last row in two"),
+                                ("Remove row", self._remove_row, "The row above then runs to the last page"),
+                                ("Everyone ordered every page", self._everyone,
+                                 "Back to the default: every attorney ticked on the day ordered all of it")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        lay.addLayout(buttons)
+        lay.addWidget(_tip("Pages ordered by several attorneys share the original and the judge's index; each "
+                           "attorney pays for their own copy (Settings → Invoice says who pays the index). The "
+                           "Parties number doesn't apply to a day split here."))
+        self.error = QLabel("")
+        self.error.setObjectName("problem")
+        self.error.setWordWrap(True)
+        self.error.setVisible(False)
+        lay.addWidget(self.error)
+        ok = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok.accepted.connect(self.accept)
+        ok.rejected.connect(self.reject)
+        lay.addWidget(ok)
+        self._show_rows(rows or [(self.pages, self.default)])
+
+    def _show_rows(self, rows: list) -> None:
+        """Puts these rows ((last page, keys) each) in the grid, in place of the ones shown."""
+        for label, spin, boxes in self.lines:
+            for w in [label, spin] + boxes:
+                self.grid.removeWidget(w)
+                w.deleteLater()
+        self.lines = []
+        for r, (last, keys) in enumerate(rows, 1):
+            label = QLabel("")
+            spin = QSpinBox()
+            spin.setRange(1, self.pages)
+            spin.setValue(min(max(1, int(last)), self.pages))
+            spin.setToolTip("The last page of this stretch")
+            spin.valueChanged.connect(self._update_starts)
+            boxes = []
+            for c, k in enumerate(self.keys):
+                cb = QCheckBox()
+                cb.setChecked(k in keys)
+                boxes.append(cb)
+                self.grid.addWidget(cb, r, 2 + c, Qt.AlignHCenter)
+            self.grid.addWidget(label, r, 0, Qt.AlignRight)
+            self.grid.addWidget(spin, r, 1)
+            self.lines.append((label, spin, boxes))
+        last_spin = self.lines[-1][1]
+        last_spin.setValue(self.pages)
+        last_spin.setEnabled(False)  # the last row always runs to the day's last page
+        last_spin.setToolTip("The last row runs to the day's last page")
+        self._update_starts()
+
+    def _update_starts(self, _=None) -> None:
+        """Each row's label says where its pages start: the page after the row above ends."""
+        start = 1
+        for label, spin, _ in self.lines:
+            label.setText(f"Pages {start} to")
+            start = spin.value() + 1
+
+    def rows(self) -> list[tuple[int, list[str]]]:
+        """The rows as shown: (last page, keys of the attorneys ticked) each."""
+        return [(spin.value(), [k for k, cb in zip(self.keys, boxes) if cb.isChecked()])
+                for _, spin, boxes in self.lines]
+
+    def _add_row(self) -> None:
+        """Splits the last row in two halves with the same attorneys ticked (no row of a single page is split)."""
+        rows = self.rows()
+        start = rows[-2][0] + 1 if len(rows) > 1 else 1
+        if start >= self.pages:
+            return
+        mid = min(self.pages - 1, max(start, start - 1 + (self.pages - start + 1) // 2))
+        rows[-1] = (mid, rows[-1][1])
+        rows.append((self.pages, list(rows[-1][1])))
+        self._show_rows(rows)
+
+    def _remove_row(self) -> None:
+        """Removes the last row; the row above then runs to the last page."""
+        rows = self.rows()
+        if len(rows) > 1:
+            rows.pop()
+            rows[-1] = (self.pages, rows[-1][1])
+            self._show_rows(rows)
+
+    def _everyone(self) -> None:
+        """Everyone ordered every page: the job goes back to the default, and the window closes with OK."""
+        self.result_rows = None
+        super().accept()
+
+    def problem(self) -> str:
+        """What is wrong with the rows ("" when nothing is): a row nobody ordered, or a row that doesn't end
+        after the one above."""
+        prev = 0
+        for last, keys in self.rows():
+            if not keys:
+                return f"Pages {prev + 1} to {last}: tick who ordered them."
+            if last <= prev:
+                return f"The row after page {prev} must end on a later page than the row above."
+            prev = last
+        if prev != self.pages:
+            return f"The last row must end on page {self.pages}."
+        return ""
+
+    def accept(self):
+        """Closes with OK when the rows make sense (else says what is wrong). Rows next to each other with the
+        same attorneys are joined; one row of everyone ticked on the day is the default (None)."""
+        why = self.problem()
+        self.error.setText(why)
+        self.error.setVisible(bool(why))
+        if why:
+            return
+        rows: list[tuple[int, list[str]]] = []
+        for last, keys in self.rows():
+            if rows and set(rows[-1][1]) == set(keys):
+                rows[-1] = (last, rows[-1][1])
+            else:
+                rows.append((last, keys))
+        default = len(rows) == 1 and set(rows[0][1]) == set(self.default)
+        self.result_rows = None if default else rows
+        super().accept()
+
+    def values(self) -> list | None:
+        """The rows for Job.portions ((last page, keys) each), or None for everyone ordering every page."""
+        return self.result_rows
 
 
 class RunSheetDialog(QDialog):

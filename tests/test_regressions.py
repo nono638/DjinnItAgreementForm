@@ -305,3 +305,19 @@ def test_settings_ok_keeps_speeds_named_otherwise_on_a_rate_sheet(qt):
     s.invoice_speeds = ["Regular", "2-Day Rush Plus"]
     SettingsDialog(s, None).accept()
     assert s.invoice_speeds == ["2-Day Rush Plus", "Regular"]
+
+
+def test_the_invoice_spreadsheet_prices_as_the_app_does():
+    """The shipped template charges one index (and judge's index) split between the parties, as the app does by
+    default (a Setup option charges an index to each), and rounds each party's share up to the cent."""
+    from openpyxl import load_workbook
+    from minute_filler.invoice import TEMPLATE
+    wb = load_workbook(TEMPLATE)
+    calc, setup = wb["Calculation"], wb["Setup"]
+    index, each = calc["I2"].value, calc["L2"].value
+    assert "IF(IndexEach,Parties,1)" in index and each.startswith("=ROUNDUP(") and "ROUND(K2/Parties" in each
+    names = {n: wb.defined_names[n].attr_text for n in ("IndexEach", "Turnaround")}
+    row = int(names["IndexEach"].rsplit("$", 1)[1])
+    assert setup[f"B{row}"].value is False  # one index, split, unless the user says otherwise
+    first, last = (int(x.rsplit("$", 1)[1]) for x in names["Turnaround"].split(":"))
+    assert setup[f"A{first - 1}"].value == "TURNAROUND WORDING" and last - first == 3

@@ -1,4 +1,5 @@
-"""The records database: activity log, invoice ledger, totals, paid status and exports."""
+"""The records database: activity log, invoice ledger, totals, paid status, amounts changed after the PDF was
+corrected, and exports."""
 import csv
 from decimal import Decimal
 
@@ -57,6 +58,38 @@ def test_paid_at_another_speed_and_void(ledger):
     assert len(ledger.invoices(status="paid")) == 1 and len(ledger.invoices(status="void")) == 1
     ledger.mark_unpaid("2026-0001")
     assert ledger.invoice("2026-0001").status == "open" and ledger.invoice("2026-0001").paid == 0
+
+
+def test_amounts_changed_after_the_pdf_was_corrected(ledger, tmp_path):
+    ledger.set_amounts("2026-0001", {"Regular": "$58.50", "Daily": "84"})
+    i = ledger.invoice("2026-0001")
+    assert i.amounts == {"Regular": "58.50", "Daily": "84.00"} and i.billed == Decimal("58.50")
+    total, by_client, _ = summarize(ledger.invoices(year=2026))
+    assert total.billed == Decimal("198.50") and by_client["Example Firm LLP"].outstanding == Decimal("98.50")
+    with open(tmp_path / "mirror" / "invoices.csv", encoding="utf-8-sig", newline="") as f:
+        row = next(r for r in csv.DictReader(f) if r["Invoice No."] == "2026-0001")
+    assert row["Offered (per party)"] == "Regular $58.50; Daily $84.00" and row["Billed"] == "58.5"
+    for bad in ({"Regular": ""}, {"Regular": "sixty"}, {"Regular": "58.50", "Daily": "  "}):
+        with pytest.raises(ValueError):
+            ledger.set_amounts("2026-0001", bad)
+    assert ledger.invoice("2026-0001").amounts == {"Regular": "58.50", "Daily": "84.00"}  # left as it was
+    ledger.mark_paid("2026-0001", "Daily", "84", "2026-02-01")
+    ledger.set_amounts("2026-0001", {"Regular": "60", "Daily": "80"})  # a payment entered stays as it was
+    i = ledger.invoice("2026-0001")
+    assert (i.status, i.amount_paid, i.billed, i.amounts["Daily"]) == ("paid", "84.00", Decimal("84.00"), "80.00")
+
+
+def test_changed_amounts_must_be_amounts_and_nothing_else(ledger):
+    """A number read out of other text is refused: a minus sign, a letter O for a zero, a decimal comma, two
+    amounts. Thousands commas and a dollar sign are fine."""
+    for bad in ("-5", "6O.00", "12,50", "63 or 70", "1.2.3", "$", "63.505"):
+        with pytest.raises(ValueError):
+            ledger.set_amounts("2026-0002", {"Regular": bad})
+    assert ledger.invoice("2026-0002").amounts == {"Regular": "100.00"}
+    ledger.set_amounts("2026-0002", {"Regular": " $1,250.00 "})
+    assert ledger.invoice("2026-0002").amounts == {"Regular": "1250.00"}
+    ledger.set_amounts("2026-0002", {"Regular": "63"})
+    assert ledger.invoice("2026-0002").amounts == {"Regular": "63.00"}
 
 
 def test_activity_log(ledger):

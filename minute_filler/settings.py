@@ -2,8 +2,8 @@
 
 Settings holds every choice (the defaults are what a new user gets) and load() brings older files up to date.
 The tables here name the choices the window and the Settings dialog offer: the outputs (OUTPUTS), the speeds
-(SPEEDS), which days of an invoice get an index (INDEX_RULES) and what "Show granular detail" adds to an
-invoice (DETAIL_ITEMS).
+(SPEEDS), which days of an invoice get an index (INDEX_RULES), who pays the index of pages several firms
+ordered together (INDEX_SHARED) and what "Show granular detail" adds to an invoice (DETAIL_ITEMS).
 """
 from __future__ import annotations
 
@@ -75,6 +75,11 @@ INDEX_RULES = {
     "each": "Each day that reaches the threshold gets one",
     "total": "Every day gets one when the days together reach the threshold",
 }
+# Who pays for the index of pages several firms ordered together: key -> label (see invoice_calc)
+INDEX_SHARED = {
+    "split": "Split between the firms",
+    "each": "Each firm pays its own",
+}
 # What "Show granular detail" can add to an invoice: key -> label
 DETAIL_ITEMS = {
     "pages": "Page count",
@@ -125,7 +130,7 @@ class Settings:
     # Output
     form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
     include_instructions: bool = True  # keep the UCS form's instructions page (page 2)
-    settings_version: int = 6         # bumped when a default changes for existing users
+    settings_version: int = 7         # bumped when a default changes for existing users
     output_dir: str = ""              # blank = next to the first input file, else Documents\Minute Agreements
     filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
     batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
@@ -138,11 +143,14 @@ class Settings:
     # Invoices (made from transcripts only: they need the page count)
     # the speeds an invoice lists so the attorney can choose (one alone: a single-speed invoice)
     invoice_speeds: list = field(default_factory=lambda: ["Regular", "Expedited"])
-    invoice_detail: bool = False      # "Show granular detail": also show what invoice_detail_items lists
     invoice_include_email: bool = True  # each party also gets an e-mailed copy (Email column of the rate sheet)
     invoice_include_index: bool = True  # long transcripts get an index (Index column), plus one for the judge
     invoice_index_threshold: int = 50  # pages from which an index is charged (see invoice_index_rule)
     invoice_index_rule: str = "any"   # one of INDEX_RULES: which days of a several-day invoice get an index
+    # one of INDEX_SHARED: the index of pages ordered by several firms is split between them (the practice:
+    # 100 pages, B orders 10 of them -> A pays 90 at the full rate and 10 at the split rate, B 10 at the split
+    # rate), or each pays its own
+    invoice_index_shared: str = "split"
     invoice_joint: bool = True        # Generate all bills the days of one case on one invoice (False: one per day)
     invoice_detail_items: list = field(default_factory=lambda: list(DETAIL_ITEMS))  # what granular detail adds
     invoice_turnaround: dict = field(default_factory=lambda: dict(INVOICE_TURNAROUND))
@@ -269,6 +277,11 @@ class Settings:
                        if isinstance(k, str) and isinstance(v, str) and reporter_key(k)}
         if s.invoice_index_rule not in INDEX_RULES:
             s.invoice_index_rule = "any"
+        # v7: "Show granular detail" moved from the settings to each job (batch.Job.invoice_detail, off for every
+        # new job; an old invoice_detail setting is ignored) and invoice_index_shared was added, so there is nothing
+        # to convert: a missing or unknown value is "split"
+        if s.invoice_index_shared not in INDEX_SHARED:
+            s.invoice_index_shared = "split"
         s.invoice_detail_items = [k for k in s.invoice_detail_items if isinstance(k, str) and k in DETAIL_ITEMS]
         if s.runsheet_existing not in RUNSHEET_EXISTING:
             s.runsheet_existing = "ask"

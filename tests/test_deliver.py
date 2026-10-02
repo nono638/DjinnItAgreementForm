@@ -89,7 +89,6 @@ def test_settings_v3_upgrade(tmp_path):
     assert loaded.outputs == ["agreement", "mofr"] and loaded.settings_version == Settings.settings_version
     assert loaded.invoice_speeds == ["Regular", "Expedited"]  # wrong type keeps the default
     assert loaded.turnaround("Expedite") == "1 week from receipt of payment."
-    assert loaded.invoice_detail is False  # invoices show the amounts only, unless asked for detail
 
 
 def test_settings_v4_offer_every_speed_off(tmp_path):

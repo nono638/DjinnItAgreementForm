@@ -62,7 +62,8 @@ class Attorney:
     checked: bool = True
 
     def key(self) -> str:
-        """Name (or firm) for comparing entries: 'Dana Smith, Esq.' -> 'dana smith esq'."""
+        """Name (or firm) for comparing entries: 'Dana Smith, Esq.' -> 'dana smith esq'. Who ordered which
+        pages of a day (batch.Job.portions) names attorneys by it."""
         return (self.name or self.firm).lower().replace(".", "").replace(",", "").strip()
 
     def is_placeholder(self) -> bool:
@@ -143,8 +144,20 @@ class CaseInfo:
         fs.value, fs.source, fs.confidence = value, source, 1.0
 
     def orderers(self) -> list[Attorney | None]:
-        """The ticked attorneys - one agreement and one invoice each - or [None] (one with a blank attorney)."""
+        """The ticked attorneys - one agreement each - or [None] (one with a blank attorney). Invoices go to
+        invoice_orderers()."""
         return [a for a in self.attorneys if a.checked] or [None]
+
+    def invoice_orderers(self) -> list[Attorney | None]:
+        """Who gets an invoice: the ticked attorneys, one per Attorney.key() (the same attorney entered twice
+        is billed once) and without placeholders ("Unrepresented", a blank row being typed in), or [None]
+        (one invoice with a blank Bill To)."""
+        out, seen = [], set()
+        for a in self.attorneys:
+            if a.checked and not a.is_placeholder() and a.key() and a.key() not in seen:
+                seen.add(a.key())
+                out.append(a)
+        return out or [None]
 
     def missing_required(self) -> list[str]:
         """The REQUIRED_KEYS that are still blank."""

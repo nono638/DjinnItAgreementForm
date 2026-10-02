@@ -10,7 +10,8 @@ they are the user's own business records and never leave the computer.
 
 An invoice's "billed" amount is what it was paid at once paid, else the price of the first speed it
 offers: the job's own speed, or on a choice invoice the first (slowest, cheapest) of the speeds it offers
-(the attorney picks; that is what they owe at the least). Void ones count 0.
+(the attorney picks; that is what they owe at the least). Void ones count 0. The amounts are the ones the
+invoice was made with, until they are changed here (Ledger.set_amounts: an amount corrected in the PDF).
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from pathlib import Path
 from .dates import us_date
 from .invoice_calc import fmt, money
 from .log import error as log_error
+from .rates import parse_amount
 
 # One writer at a time: the CSV copies are rewritten whole, and an invoice's number is taken and its row
 # added in one step (the batch runs on another thread than the window).
@@ -300,6 +302,19 @@ class Ledger:
     def set_notes(self, invoice_no: str, notes: str) -> None:
         """Replaces the invoice's notes."""
         self._run("UPDATE invoices SET notes=? WHERE invoice_no=?", (notes, invoice_no))
+
+    def set_amounts(self, invoice_no: str, amounts: dict) -> None:
+        """Replaces what each speed of the invoice costs ({"Regular": "$63.00"}), for when an amount was
+        corrected in the invoice's PDF: the records would still show the one first made. Each amount is
+        kept as "63.00"; ValueError when one is blank or not an amount ("-5", "63 or 70": see rates.parse_amount;
+        nothing is changed then). A payment already entered is left as it was."""
+        clean = {}
+        for speed, value in amounts.items():
+            d = parse_amount(value)
+            if d is None:
+                raise ValueError(f"the amount for {speed or 'a speed'} is not an amount: {value!r}")
+            clean[speed] = str(d)
+        self._run("UPDATE invoices SET amounts=? WHERE invoice_no=?", (json.dumps(clean), invoice_no))
 
     # ------------------------------------------------------------------ reading
     def invoices(self, year: int | None = None, month: int | None = None, client: str = "",

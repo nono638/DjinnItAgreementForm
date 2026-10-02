@@ -1,5 +1,9 @@
 """Builds minute_filler/templates/Invoice Template.xlsx: a spreadsheet for making transcript invoices by
-hand, with the same arithmetic as the app (minute_filler/invoice_calc.py). All its data is fictional.
+hand, with the app's arithmetic (minute_filler/invoice_calc.quote, as Settings have it by default) for an
+invoice where every party ordered every page: one original, index and judge's index, each split between the
+parties (the index one per party when Setup says so, as Settings.invoice_index_shared "each" does), a copy and
+an e-mailed copy for each, and each party's share rounded up to the cent. (Pages ordered
+by some of the parties only - the app's Who ordered... - are not in it.) All its data is fictional.
 
     .venv/Scripts/python.exe tools/make_invoice_template.py
 
@@ -88,8 +92,9 @@ def build() -> Workbook:
         ("Offer Expedite", True, "OfferExpedite", True),
         ("Offer Daily", True, "OfferDaily", True),
         ("E-mailed copy for each party", True, "EmailCopies", True),
-        ("Index for each party + judge", True, "Indexes", True),
+        ("Index + judge's index", True, "Indexes", True),
         ("...from this many pages", 50, "IndexFrom", True),
+        ("Index for each party (FALSE: one, split)", False, "IndexEach", True),
         ("", "", None, False),
         ("TURNAROUND WORDING", None, None, False),
         *[(sp, next(v for k, v in INVOICE_TURNAROUND.items() if speed_key(k) == speed_key(sp)), None, True)
@@ -99,11 +104,13 @@ def build() -> Workbook:
     for r, (_, _, nm, _) in enumerate(setup, 1):
         if nm:
             name(wb, nm, f"Setup!$B${r}")
-    name(wb, "Turnaround", "Setup!$A$27:$B$30")
+    first = next(r for r, row in enumerate(setup, 1) if row[0] == "TURNAROUND WORDING") + 1
+    name(wb, "Turnaround", f"Setup!$A${first}:$B${first + len(SPEEDS) - 1}")
     tf = DataValidation(type="list", formula1='"TRUE,FALSE"', allow_blank=False)
     ws.add_data_validation(tf)
-    for r in range(19, 24):
-        tf.add(f"B{r}")
+    for r, row in enumerate(setup, 1):
+        if isinstance(row[1], bool):  # the TRUE/FALSE options
+            tf.add(f"B{r}")
 
     # ---------------------------------------------------------------- Rates
     ws = wb.create_sheet("Rates")
@@ -162,7 +169,7 @@ def build() -> Workbook:
     # ---------------------------------------------------------------- Calculation
     ws = wb.create_sheet("Calculation")
     cols = ["Speed", "Original rate", "Copy rate", "Email rate", "Index rate", "Original", "Copies",
-            "E-mailed copies", "Indexes", "Judge's index", "Total", "Each party pays", "Per page (each)"]
+            "E-mailed copies", "Index", "Judge's index", "Total", "Each party pays", "Per page (each)"]
     ws.append(cols)
     for c in ws[1]:
         c.font, c.fill = HEAD, HEAD_FILL
@@ -175,10 +182,11 @@ def build() -> Workbook:
             f"=Pages*B{i}",                                            # one original, shared
             f"=Pages*C{i}*Parties",                                    # a copy for each party
             f"=IF(EmailCopies,Pages*D{i}*Parties,0)",
-            f"=IF(AND(Indexes,Pages>=IndexFrom),Pages*E{i}*Parties,0)",
-            f"=IF(I{i}>0,Pages*E{i},0)",
+            # one, shared (one per party when Setup's IndexEach is TRUE)
+            f"=IF(AND(Indexes,Pages>=IndexFrom),Pages*E{i}*IF(IndexEach,Parties,1),0)",
+            f"=IF(I{i}>0,Pages*E{i},0)",                               # one, shared
             f"=SUM(F{i}:J{i})",
-            f"=ROUND(K{i}/Parties,2)",
+            f"=ROUNDUP(ROUND(K{i}/Parties,6),2)",  # rounded up to the cent (ROUND first: no float dust)
             f"=ROUND(L{i}/Pages,2)",
         ])
         for c in range(2, 14):
@@ -187,7 +195,9 @@ def build() -> Workbook:
     for c in "BCDEFGHIJKLM":
         ws.column_dimensions[c].width = 13
     ws.row_dimensions[1].height = 32
-    ws["A7"] = "Each party pays one share of the original plus their own copy (and e-mailed copy and index)."
+    ws["A7"] = ("Each party pays one share of the original, the index and the judge's index (the index in full "
+                "when Setup says each party gets one), plus their own copy and e-mailed copy, rounded up to the "
+                "cent. Every party orders every page.")
     ws["A7"].font = MUTED
     name(wb, "CalcSpeeds", "Calculation!$A$2:$A$5")
     name(wb, "CalcEach", "Calculation!$L$2:$L$5")

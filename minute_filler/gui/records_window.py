@@ -1,7 +1,9 @@
-"""The Records window: the invoice ledger (totals, filters, mark paid) and the history of everything made."""
+"""The Records window: the invoice ledger (totals, filters, mark paid, amounts corrected after the PDF was
+changed) and the history of everything made."""
 from __future__ import annotations
 
 import calendar
+import html
 from datetime import date
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from ..deliver import ledger_for
 from ..fill import safe_filename
 from ..invoice_calc import fmt, money
 from ..log import error as log_error
+from ..rates import parse_amount
 from ..records import KINDS, Invoice, _month_name, summarize, us_date
 from ..settings import Settings
 from .widgets import open_path, plural, refill_combo, show_save_error
@@ -68,7 +71,7 @@ class PaidDialog(QDialog):
         self.setWindowTitle(f"Invoice {inv.invoice_no} paid")
         self.inv = inv
         f = QFormLayout(self)
-        f.addRow(QLabel(f"<b>{inv.case_name or inv.invoice_no}</b><br>{inv.client}"))
+        f.addRow(QLabel(f"<b>{html.escape(inv.case_name or inv.invoice_no)}</b><br>{html.escape(inv.client)}"))
         self.speed = QComboBox()
         for sp, amt in inv.amounts.items():
             self.speed.addItem(f"{sp}  —  {fmt(money(amt))}", sp)
@@ -97,6 +100,54 @@ class PaidDialog(QDialog):
         d =self.when.date()
         return self.speed.currentData() or "", str(money(self.amount.text())), \
             date(d.year(), d.month(), d.day()).isoformat()
+
+
+class AmountsDialog(QDialog):
+    """Change amounts…: a money box per speed of the invoice, starting at what the records have. OK is
+    refused while a box is blank or not a number."""
+
+    def __init__(self, inv: Invoice, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Invoice {inv.invoice_no}: amounts")
+        f = QFormLayout(self)
+        f.addRow(QLabel(f"<b>{html.escape(inv.case_name or inv.invoice_no)}</b><br>{html.escape(inv.client)}"))
+        note = QLabel("Change these when you corrected an amount in the invoice PDF.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        f.addRow(note)
+        self.boxes: dict[str, QLineEdit] = {}
+        for sp, amt in inv.amounts.items():
+            box = QLineEdit(str(money(amt)))
+            box.setPlaceholderText("0.00")
+            self.boxes[sp] = box
+            f.addRow(f"{sp}:", box)
+        self.error = QLabel("")
+        self.error.setObjectName("problem")
+        self.error.setWordWrap(True)
+        self.error.setVisible(False)
+        f.addRow(self.error)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def problem(self) -> str:
+        """What is wrong with the amounts typed ("" when nothing is): each must be an amount and nothing else
+        (see rates.parse_amount)."""
+        bad = [sp for sp, box in self.boxes.items() if parse_amount(box.text()) is None]
+        return f"Type an amount for {', '.join(bad)}, such as 63.00 or $1,250.00." if bad else ""
+
+    def accept(self):
+        """Closes with OK only when every box holds an amount; otherwise says which one doesn't."""
+        why = self.problem()
+        self.error.setText(why)
+        self.error.setVisible(bool(why))
+        if not why:
+            super().accept()
+
+    def values(self) -> dict[str, str]:
+        """{speed: "63.00"}, as Ledger.set_amounts takes them."""
+        return {sp: str(parse_amount(box.text()) or money(box.text())) for sp, box in self.boxes.items()}
 
 
 class RecordsWindow(QDialog):
@@ -388,7 +439,8 @@ class RecordsWindow(QDialog):
                                     f"{inv.file_path or '(unknown)'}")
 
     def _invoice_menu(self, pos) -> None:
-        """The right-click menu on an invoice: open, show in folder, paid / not paid, void / restore, notes."""
+        """The right-click menu on an invoice: open, show in folder, paid / not paid, void / restore, change the
+        amounts, notes."""
         row = self.inv_table.rowAt(pos.y())
         inv = self._inv_at(row)
         if inv is None:
@@ -405,8 +457,24 @@ class RecordsWindow(QDialog):
             m.addAction("Void (cancelled, not counted)", lambda: self._set_void(inv))
         else:
             m.addAction("Restore (not void)", lambda: (self.ledger.mark_unpaid(inv.invoice_no), self.show_invoices()))
+        if inv.amounts:
+            m.addAction("Change amounts…", lambda: self._change_amounts(inv))
         m.addAction("Notes…", lambda: self._notes(inv))
         m.exec(self.inv_table.viewport().mapToGlobal(pos))
+
+    def _change_amounts(self, inv: Invoice) -> None:
+        """Change amounts…: what each speed of the invoice costs, as corrected in its PDF; the list and the
+        totals are shown afresh."""
+        inv = self.ledger.invoice(inv.invoice_no) or inv  # as it is now, whatever the table showed
+        dlg = AmountsDialog(inv, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        try:
+            self.ledger.set_amounts(inv.invoice_no, dlg.values())
+        except Exception as e:
+            log_error("could not change an invoice's amounts", e)
+            QMessageBox.warning(self, "Could not save", f"{type(e).__name__}: {e}")
+        self.show_invoices()
 
     def _set_void(self, inv: Invoice) -> None:
         """Voids the invoice after asking: it stays listed but leaves the totals."""

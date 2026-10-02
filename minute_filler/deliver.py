@@ -2,14 +2,15 @@
 
 Both the window's Generate button and the batch use generate(), so the records see every file made. The
 batch also calls it for a joint invoice: the case of several days, with "invoice" as the only output (see
-batch.fill_jobs).
+batch.fill_jobs). Each ticked attorney (once, however many times it is entered) gets an invoice for the pages
+it ordered (invoice.firm_invoices).
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from .fill import fill
-from .invoice import InvoiceOpts, job_quotes, make_invoice
+from .invoice import InvoiceOpts, firm_invoices, make_invoice
 from .log import error as log_error
 from .models import Attorney, CaseInfo, to_int
 from .mofr import fill_mofr
@@ -27,13 +28,16 @@ def ledger_for(s: Settings) -> Ledger:
 
 def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | set[str],
              invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False,
-             runsheet: RunSheetOpts | None = None, folders: list[Path] | None = None) -> list[Path]:
+             runsheet: RunSheetOpts | None = None, folders: list[Path] | None = None,
+             invoiced: list[str] | None = None) -> list[Path]:
     """Writes the chosen outputs (keys of settings.OUTPUTS) into out_dir and logs them in the records.
     An invoice needs `invoice` with the page count, the run sheet `runsheet` with the takes of the transcripts;
     raises ValueError otherwise. The run sheet goes to the run sheets folder (an existing one of the case is
     looked for there and in `folders`, see runsheet.choose). It is written first: when it is open in Excel,
     nothing is made, and trying again doesn't make the invoices twice. A run sheet that already had every
-    take is left as it was and is not among the files returned.
+    take is left as it was and is not among the files returned. `invoiced`, when given, gets the
+    Attorney.key() ("" for a blank Bill To) of each invoice made, so a run that stops part way can be tried
+    again without billing them twice (see InvoiceOpts.skip).
     When a file can't be made, the error raised carries the files made before it as `made`."""
     outputs = [o for o in OUTPUTS if o in outputs]
     billed = invoice.pages if invoice and invoice.pages > 0 else 0  # 0: no transcript among the inputs
@@ -45,12 +49,14 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
     pages = billed or to_int(case.get("est_pages"))
     made: list[Path] = []
 
-    def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "", count: int = pages) -> None:
-        """Notes a file made and logs it in the records (count: the pages it covers)."""
+    def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "", count: int = pages,
+               on: CaseInfo = case) -> None:
+        """Notes a file made and logs it in the records (count: the pages it covers; on: the case as the file
+        names it, an attorney's invoice naming only its own days)."""
         made.append(path)
         try:
-            ledger.log_activity(kind, case_name=case.get("case_name"), index_no=case.get("index_no"),
-                                dates=case.get("dates"), judge=case.get("judge"), part=case.get("part"),
+            ledger.log_activity(kind, case_name=on.get("case_name"), index_no=on.get("index_no"),
+                                dates=on.get("dates"), judge=on.get("judge"), part=on.get("part"),
                                 attorney=atty.name if atty else "", firm=atty.firm if atty else "", pages=count,
                                 file_path=str(path), invoice_no=number)
         except Exception as e:  # the files are made; a records problem must not lose them
@@ -67,10 +73,11 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
         if "mofr" in outputs:
             record("mofr", fill_mofr(case, s, out_dir, dated, pages=str(billed) if billed else ""))
         if "invoice" in outputs:
-            quotes = job_quotes(case, s, invoice)
-            for atty in case.orderers():
-                path, number = make_invoice(case, atty, s, out_dir, invoice, ledger, dated, quotes)
-                record("invoice", path, atty, number)
+            for f in firm_invoices(case, s, invoice):  # one per attorney, for the pages it ordered
+                path, number = make_invoice(f.case, f.atty, s, out_dir, f.opts, ledger, dated, f.quotes)
+                if invoiced is not None:
+                    invoiced.append(f.atty.key() if f.atty else "")
+                record("invoice", path, f.atty, number, f.opts.pages, f.case)
     except Exception as e:
         e.made = made  # what was saved before the problem, so the caller can say so
         raise

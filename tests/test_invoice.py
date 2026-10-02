@@ -1,4 +1,5 @@
-"""Invoice pricing (same numbers as the reporter's spreadsheet), the speeds an invoice offers
+"""Invoice pricing (same numbers as the reporter's spreadsheet; one index split between the parties, or one for
+each as these tests mostly take it: Settings.invoice_index_shared), the speeds an invoice offers
 (Settings.invoice_speeds: several, one, or none for the job's own speed) and the invoice PDF: the amounts only
 by default or with granular detail, its values as fields that can be changed, locked or flattened, and its
 entry in the records. Invoices for several days are in test_joint_invoice.py."""
@@ -23,6 +24,7 @@ from helpers import ROE, make_case, pat_settings
 def s():
     s = pat_settings(email="pat@example.com")  # with the bundled "Sample Rates" sheet
     s.invoice_speeds = ["Regular", "Expedited", "Daily"]
+    s.invoice_index_shared = "each"  # the numbers below were worked out with an index for each party
     return s
 
 
@@ -46,10 +48,15 @@ def test_index_from_fifty_pages_and_split_between_parties(s):
     sp = s.sheet().find("Regular")
     q49 = quote(49, sp, 2)
     assert [l.label for l in q49.lines] == ["Original", "Copy", "E-mailed copy"]
-    q = quote(60, sp, 2)
+    q = quote(60, sp, 2, index_shared="each")
     # 60 x (4.30 + 2x1.00 + 2x1.00 + 2x1.00 index + 1.00 judge's index) = 678.00
     assert [l.label for l in q.lines] == ["Original", "Copy", "E-mailed copy", "Index", "Judge's index"]
     assert q.total == Decimal("678.00") and q.per_party == Decimal("339.00") and q.per_page == Decimal("5.65")
+    # "split" (the default): one index, its price split like the original's
+    # 60 x (4.30 + 2x1.00 + 2x1.00 + 1.00 index + 1.00 judge's index) = 618.00
+    q = quote(60, sp, 2)
+    assert next(l for l in q.lines if l.label == "Index").qty == 1
+    assert q.total == Decimal("618.00") and q.per_party == Decimal("309.00")
 
 
 def test_options_leave_out_email_and_index(s):
@@ -60,7 +67,8 @@ def test_options_leave_out_email_and_index(s):
 
 def test_per_party_rounds_to_cents(s):
     q = quote(7, s.sheet().find("Regular"), 3)  # 7 x (4.30 + 3 + 3) = 72.10, / 3 = 24.0333
-    assert q.total == Decimal("72.10") and q.per_party == Decimal("24.03")
+    assert q.total == Decimal("72.10") and q.per_party == Decimal("24.04")  # up, so the shares cover the total
+    assert q.per_party * 3 >= q.total
 
 
 def test_single_speed_and_missing_columns(s):
@@ -112,7 +120,7 @@ def test_invoice_pdf_and_record(case, s, tmp_path):
     assert doc.page_count == 1 and doc.metadata["creator"] == "DjinnIt invoice"
     text = page_text(paths[0])
     for want in ("INVOICE", "Pat Reporter", "Regular", "Expedite", "Daily", "2-4 weeks from receipt of payment",
-                 "Please choose one"):
+                 "Please choose one", "delivered once every party has paid"):  # 2 parties, said without detail
         assert want in text, want
     # the amounts only, as on a reporter's own invoice: no page count, rates per page or arithmetic
     for unwanted in ("Pages", "Per page", "pp.", "parties ordered", "$339.00"):
@@ -141,8 +149,8 @@ def test_granular_detail(case, s, tmp_path):
         assert want in text, want
     f = widget_values(path)
     assert f["pages"] == "60" and f["per page Regular"] == "$5.65"
-    s.invoice_detail = True  # the setting, when the job doesn't say
-    assert "Per page" in page_text(make_invoices(case, s, tmp_path, InvoiceOpts(pages=60), Ledger(tmp_path / "r.db"))[0])
+    # off unless the job asks for it (a new job starts with it off)
+    assert "Per page" not in page_text(make_invoices(case, s, tmp_path, InvoiceOpts(pages=60), Ledger(tmp_path / "r.db"))[0])
 
 
 def test_one_speed_and_blank_values(case, s, tmp_path):

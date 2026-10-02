@@ -5,6 +5,13 @@ spreadsheet). With one speed ticked it bills that speed alone; with none, the jo
 cover several days of one case (a joint invoice, see batch.joint_invoice): it is then priced on the pages of
 every day.
 
+Who ordered which pages comes with the job (InvoiceOpts.orders: a DayOrder per day, its pages in portions,
+each with the attorneys who ordered it). firm_invoices then makes each attorney's own invoice: only the days
+and pages it ordered, priced by invoice_calc.quote_shares (the original and the index of pages ordered
+together are split between the firms - the index as Settings.invoice_index_shared says, the judge's index
+always; each pays its own copies). An attorney with no pages gets no invoice, and the same attorney entered
+twice gets one.
+
 By default only each speed's turnaround and amount are shown. "Show granular detail" adds what the job's
 Customize... choice (else Settings.invoice_detail_items) lists: the page count, the pages of each day, the
 price per page, the charges in each amount and the split between parties (settings.DETAIL_ITEMS).
@@ -16,15 +23,17 @@ flattened (see fill.save_output). Every invoice is numbered and entered in the r
 from __future__ import annotations
 
 import html
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 import pymupdf
 
 from .dates import us_date
 from .fill import add_text_field, output_name, save_output
-from .invoice_calc import Quote, fmt, quotes_for
+from .invoice_calc import Quote, Share, fmt, index_days, offered, quote_shares, quotes_for
 from .models import Attorney, CaseInfo
 from .records import NUMBER_LOCK, Invoice, Ledger
 from .settings import Settings
@@ -59,17 +68,41 @@ table.opts td.amt, table.opts th.amt { text-align: right; }
 """
 
 
+class Portion(NamedTuple):
+    """Pages of one day ordered by the same attorneys: how many, their Attorney.key()s (empty = every
+    attorney on the invoice) and how many parties share them (0 = as many as the attorneys)."""
+    pages: int
+    keys: list[str]
+    n: int = 0
+
+
+@dataclass
+class DayOrder:
+    """Who ordered the pages of one day: (date, pages) as in InvoiceOpts.days, and the portions they make up
+    (one, unless the job's Who ordered... grid split them)."""
+    date: str
+    pages: int
+    portions: list[Portion] = field(default_factory=list)
+
+
 @dataclass
 class InvoiceOpts:
     """Choices made for one job's invoices, or for the days of a case on a joint invoice (the Invoice panel of
-    the Outputs box, and its Extras... and Customize... windows). None = as Settings say."""
+    the Outputs box, and its Extras..., Customize... and Who ordered... windows). None = as Settings say."""
     pages: int                   # the pages billed (all the days together)
-    parties: int = 1             # ordering parties: each pays an equal share
-    detail: bool | None = None   # show granular detail (Settings.invoice_detail)
+    # ordering parties: each pays an equal share (on one firm's own invoice, see firm_invoices: the most firms
+    # that shared any of its pages)
+    parties: int = 1
+    detail: bool = False         # show granular detail (the job's own choice, off for every new job)
     days: list[tuple[str, int]] = field(default_factory=list)  # (date, pages) of each day; empty = one day
     email: bool | None = None    # an e-mailed copy for each party (Settings.invoice_include_email)
     index: str | None = None     # "auto", "on" or "off" (see invoice_calc.index_days)
     show: list[str] | None = None  # what granular detail shows: keys of settings.DETAIL_ITEMS
+    # who ordered which pages of each day, as many as `days`; empty = every party ordered every page
+    orders: list[DayOrder] = field(default_factory=list)
+    # Attorney.key()s already invoiced for these days (by a run that stopped on a problem): no invoice for them,
+    # though their pages still count for the others' shares
+    skip: list[str] = field(default_factory=list)
 
     def day_pages(self) -> list[int]:
         """The pages of each day: [120, 80]; one day of `pages` when the days aren't known."""
@@ -104,11 +137,15 @@ def _field_name(name: str, taken: set[str]) -> str:
 
 def _detail(q: Quote) -> str:
     """'Original: 30 pp. × $4.30 + Copy: 2 × 30 pp. × $1.00 = $189.00, split 2 ways' (the arithmetic,
-    small print)."""
+    small print). A firm's own share says which lines it shares instead: 'Original: 65 pp. × $4.30 (shared
+    pages split between the firms) + Copy: 90 pp. × $1.00 = $369.50'."""
     bits = []
     for l in q.lines:
         n = f"{l.qty} × " if l.qty > 1 else ""
-        bits.append(f"{l.label}: {n}{l.pages or q.pages} pp. × {fmt(l.rate)}")
+        split = " (shared pages split between the firms)" if l.shared else ""
+        bits.append(f"{l.label}: {n}{l.pages or q.pages} pp. × {fmt(l.rate)}{split}")
+    if q.share:
+        return " + ".join(bits) + f" = {fmt(q.per_party)}"
     out = " + ".join(bits) + f" = {fmt(q.total)}"
     if q.parties > 1:
         out += f", split {q.parties} ways"
@@ -125,7 +162,7 @@ def invoice_layout(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: l
     charges in each amount and the split between parties."""
     when = when or date.today()
     opts = opts or InvoiceOpts(quotes[0].pages if quotes else 0)
-    detail = s.invoice_detail if opts.detail is None else opts.detail
+    detail = opts.detail
     shown = set(s.invoice_detail_items if opts.show is None else opts.show) if detail else set()
     days = opts.days if len(opts.days) > 1 else []
     p = s.profile
@@ -176,9 +213,15 @@ def invoice_layout(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: l
     if len(quotes) > 1:
         notes.append("Please choose one delivery option and pay the amount shown for it.")
     the = "The transcripts are" if days else "The transcript is"
-    if "split" in shown and parties > 1:
-        notes.append(f"Amounts are per party ({parties} parties ordered). {the} delivered once every party "
-                     "has paid.")
+    if "split" in shown and parties > 1 and quotes[0].share:
+        shared = "the original and the index" if s.invoice_index_shared != "each" else \
+            "the original and the judge's index"  # (each party pays its own index)
+        notes.append(f"Amounts are your share: {shared} of pages ordered together are split between the "
+                     "parties who ordered them.")
+    elif "split" in shown and parties > 1:
+        notes.append(f"Amounts are per party ({parties} parties ordered).")
+    if parties > 1:  # said even without the detail: no party gets it before the others have paid
+        notes.append(f"{the} delivered once every party has paid.")
     else:
         notes.append(f"{the} sent after payment is received.")
     rate_head = '<th class="amt" width="11%">Per page</th>' if "per_page" in shown else ""
@@ -272,7 +315,90 @@ def make_invoice(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Pa
 
 def make_invoices(case: CaseInfo, s: Settings, out_dir: Path, opts: InvoiceOpts, ledger: Ledger | None = None,
                   dated: bool = False) -> list[Path]:
-    """One invoice per ticked attorney (or one with a blank Bill To); each is numbered and recorded."""
+    """One invoice per ticked attorney who ordered pages (or one with a blank Bill To); each is numbered and
+    recorded (see firm_invoices)."""
     ledger = ledger or Ledger()
-    quotes = job_quotes(case, s, opts)
-    return [make_invoice(case, a, s, out_dir, opts, ledger, dated, quotes)[0] for a in case.orderers()]
+    return [make_invoice(f.case, f.atty, s, out_dir, f.opts, ledger, dated, f.quotes)[0]
+            for f in firm_invoices(case, s, opts)]
+
+
+# ------------------------------------------------------------- who ordered which pages
+
+@dataclass
+class FirmInvoice:
+    """One attorney's invoice, ready to make: who is billed, the case and choices as that invoice shows them
+    (only the days and pages it ordered) and its prices."""
+    atty: Attorney | None
+    case: CaseInfo
+    opts: InvoiceOpts
+    quotes: list[Quote]
+
+
+def _key(atty: Attorney | None) -> str:
+    """An orderer as the portions name it: Attorney.key(), "" for the blank Bill To."""
+    return atty.key() if atty is not None else ""
+
+
+def firm_pages(orders: list[DayOrder], keys: list[str]) -> dict[str, dict[int, list[tuple[int, int]]]]:
+    """What each attorney on the invoice (keys) ordered: key -> {day number: [(pages, n), ...]}, n being how
+    many parties share those pages. A portion's attorneys not on the invoice are passed over; a portion
+    with none of them (nobody ticked that day) goes to every attorney on the invoice, so no pages are left
+    unbilled. An attorney who ordered nothing is not in the result."""
+    out: dict[str, dict[int, list[tuple[int, int]]]] = {}
+    for i, day in enumerate(orders):
+        for p in day.portions:
+            firms = [k for k in dict.fromkeys(p.keys) if k in keys] or list(dict.fromkeys(keys))
+            n = p.n or len(firms)
+            for k in firms:
+                if p.pages > 0:
+                    out.setdefault(k, {}).setdefault(i, []).append((p.pages, max(1, n)))
+    return out
+
+
+def invoice_count(case: CaseInfo, opts: InvoiceOpts) -> int:
+    """How many invoices firm_invoices makes: one per ticked attorney (or the blank one) who ordered pages and
+    was not invoiced already (opts.skip)."""
+    orderers = case.invoice_orderers()
+    if opts.orders:
+        got = firm_pages(opts.orders, [_key(a) for a in orderers])
+        orderers = [a for a in orderers if _key(a) in got]
+    return sum(1 for a in orderers if _key(a) not in opts.skip)
+
+
+def firm_invoices(case: CaseInfo, s: Settings, opts: InvoiceOpts) -> list[FirmInvoice]:
+    """The invoices to make for this case: one per ticked attorney (case.invoice_orderers(): the same one
+    entered twice gets one), less those already invoiced (opts.skip). With opts.orders each is the attorney's
+    own: only the days it ordered (their dates on the invoice, and in the records), its pages and its share of
+    the price (invoice_calc.quote_shares); an attorney who ordered no pages gets none. Without them (invoices
+    made the old way), every attorney gets the same prices, split evenly. ValueError without a page count."""
+    orderers = case.invoice_orderers()
+    if not opts.orders:
+        quotes = job_quotes(case, s, opts)
+        return [FirmInvoice(a, case, opts, quotes) for a in orderers if _key(a) not in opts.skip]
+    if opts.pages <= 0:
+        raise ValueError("an invoice needs the transcript's page count")
+    got = firm_pages(opts.orders, [_key(a) for a in orderers])
+    mode = opts.index if opts.index is not None else ("auto" if s.invoice_include_index else "off")
+    indexed = index_days([d.pages for d in opts.orders], mode, s.invoice_index_rule, s.invoice_index_threshold)
+    email = s.invoice_include_email if opts.email is None else opts.email
+    speeds = offered(s.sheet(), s.invoice_speeds, case.get("delivery") or s.default_delivery)
+    out = []
+    for atty in orderers:  # (one per key: see CaseInfo.invoice_orderers)
+        k = _key(atty)
+        if k not in got or k in opts.skip:
+            continue  # ordered no pages, or invoiced already: no invoice
+        days = sorted(got[k].items())
+        shares = [Share(pages, n, indexed[i]) for i, parts in days for pages, n in parts]
+        billed = [(opts.orders[i].date, sum(p for p, _ in parts)) for i, parts in days]
+        fopts = replace(opts, pages=sum(p for _, p in billed), days=billed, orders=[], skip=[],
+                        parties=max(x.n for x in shares))
+        fcase = case
+        if len(days) < len(opts.orders):  # not every day: the invoice and the records name its own
+            fcase = deepcopy(case)
+            # (days without a date: the case's dates, rather than none)
+            fcase.set("dates", ", ".join(d for d, _ in billed if d) or case.get("dates"),
+                      case.fields["dates"].source)
+        quotes = [quote_shares(shares, sp, email, s.invoice_index_shared != "each", [p for _, p in billed])
+                  for sp in speeds]
+        out.append(FirmInvoice(atty, fcase, fopts, quotes))
+    return out

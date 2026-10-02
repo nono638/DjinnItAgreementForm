@@ -96,6 +96,19 @@ def parse_money(v) -> Decimal | None:
     return Decimal(m.group()).quantize(Decimal("0.01"), ROUND_HALF_UP) if m else None
 
 
+_AMOUNT = re.compile(r"\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?")
+
+
+def parse_amount(text) -> Decimal | None:
+    """An amount typed by the user, all of it a money value: '63', '63.5', '$1,250.00' -> Decimal('1250.00').
+    None for anything else: blank, negative ('-5'), a letter in it ('6O.00'), a decimal comma ('12,50') or
+    words ('63 or 70'), which parse_money would read a number out of."""
+    m = _AMOUNT.fullmatch(str(text if text is not None else "").strip())
+    if not m:
+        return None
+    return Decimal(m.group(1).replace(",", "") + "." + (m.group(2) or "0")).quantize(Decimal("0.01"))
+
+
 def _money(v: str) -> str:
     """parse_money as text: '$4.3' -> '4.30'; '' when there is no number."""
     d = parse_money(v)
