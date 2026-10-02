@@ -12,9 +12,8 @@ reporter's signature field there.
 
 Also helpers that the MOFR, invoices and run sheets share: writing form fields (set_text) and adding new
 ones (add_text_field), file names (output_name, safe_filename, unique_path) and saving (save_output, which
-labels every PDF the app makes so it is never read back as an input, and adds the "Lock fields" button of
-add_lock_button unless the PDF is flattened). lock_pdf saves a copy with the fields flattened
-(File → Lock finished PDFs).
+labels every PDF the app makes so it is never read back as an input, and flattens it when Settings say so).
+lock_pdf saves a copy with the fields flattened (File → Lock finished PDFs).
 """
 from __future__ import annotations
 
@@ -193,46 +192,13 @@ def add_text_field(page: pymupdf.Page, name: str, rect, text: str = "", fs: floa
     return w
 
 
-LOCK_BUTTON = "DjinnIt lock"  # name of the "Lock fields" button (see add_lock_button)
-# Acrobat can flatten the page (and drop the button, a non-printing field); Adobe Reader may not, so there
-# the fields are made read-only and the button hidden. Viewers without JavaScript ignore the button.
-LOCK_JS = f"""try {{ this.flattenPages(0, this.numPages - 1, 2); }} catch (e) {{
-  for (var i = 0; i < this.numFields; i++) {{
-    var f = this.getField(this.getNthFieldName(i));
-    if (f && f.name != "{LOCK_BUTTON}") f.readonly = true;
-  }}
-  var b = this.getField("{LOCK_BUTTON}");
-  if (b) b.display = display.hidden;
-}}"""
-
-
-def add_lock_button(doc: pymupdf.Document) -> None:
-    """Adds a small "Lock fields" button (not printed) at the top right of page 1 of a PDF with fields:
-    clicking it in Adobe Acrobat or Reader locks the values typed in. Does nothing without fields."""
-    if not any(True for page in doc for _ in page.widgets()):
-        return
-    page = doc[0]
-    r = page.rect
-    w = pymupdf.Widget()
-    w.field_type = pymupdf.PDF_WIDGET_TYPE_BUTTON
-    w.field_flags = pymupdf.PDF_BTN_FIELD_IS_PUSHBUTTON
-    w.field_name = LOCK_BUTTON
-    w.field_label = "Locks the fields so they can't be changed (Adobe Acrobat or Reader; not printed)"
-    w.rect = pymupdf.Rect(r.x1 - 84, r.y0 + 6, r.x1 - 12, r.y0 + 22)  # the forms leave this corner blank
-    w.button_caption = "Lock fields"
-    w.text_font = "Helv"
-    w.text_fontsize = 8
-    w.text_color = (0.29, 0.25, 0.56)  # MuPDF draws no dark fill behind a caption: dark text on light
-    w.fill_color = (0.93, 0.92, 0.97)
-    w.border_color = (0.29, 0.25, 0.56)
-    w.border_width = 1
-    w.field_display = 2  # shown on screen, not printed
-    w.script = LOCK_JS
-    page.add_widget(w)
+# PDFs made by 1.3.0 had a "Lock fields" button of this name. Most viewers (Firefox, Edge, Chrome) ignore the
+# script behind it, and the attorneys saw it too, so it is no longer added; lock_pdf still takes it out.
+LOCK_BUTTON = "DjinnIt lock"
 
 
 def has_fields(path: Path) -> bool:
-    """True when a PDF has fields to lock (the Lock fields button doesn't count): False for one already
+    """True when a PDF has fields to lock (the old Lock fields button doesn't count): False for one already
     flattened or locked."""
     with pymupdf.open(path) as doc:
         return any(w.field_name != LOCK_BUTTON for page in doc for w in page.widgets())
@@ -377,13 +343,11 @@ def mark(doc: pymupdf.Document, kind: str) -> None:
 
 
 def save_output(doc: pymupdf.Document, kind: str, path: Path, flatten: bool = False) -> Path:
-    """Saves a PDF this app made: labels it (see mark), flattens the fields or else adds the "Lock fields"
-    button (see add_lock_button), never overwrites (adds " (2)" etc.), closes it and returns where it went."""
+    """Saves a PDF this app made: labels it (see mark), optionally flattens the fields, never overwrites
+    (adds " (2)" etc.), closes it and returns where it went."""
     mark(doc, kind)
     if flatten:
         doc.bake()
-    else:
-        add_lock_button(doc)
     path.parent.mkdir(parents=True, exist_ok=True)
     out = unique_path(path)
     doc.save(out, garbage=3, deflate=True)

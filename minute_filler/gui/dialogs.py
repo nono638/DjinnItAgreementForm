@@ -161,8 +161,8 @@ class SettingsDialog(QDialog):
         self.o_per_email = QCheckBox("Write \"per email\" in the attorney signature spot")
         self.o_today = QCheckBox("Use today as the date of agreement")
         self.o_flat = QCheckBox("Flatten the PDF (fields no longer editable)")
-        self.o_flat.setToolTip("Applies to minute agreements, MOFRs and invoices. A flattened PDF has no\n"
-                               "fields left to change, so it gets no \"Lock fields\" button either.")
+        self.o_flat.setToolTip("Applies to minute agreements, MOFRs and invoices: they are locked as they are made.\n"
+                               "Unticked, they stay fillable; File → Lock finished PDFs locks a copy later.")
         self.o_open = QCheckBox("Open the PDF after saving")
         self.o_tc = QCheckBox("Convert ALL-CAPS names to Title Case")
         self.o_djinn = QCheckBox("Show the Djinn (working / done / stumped pictures)")

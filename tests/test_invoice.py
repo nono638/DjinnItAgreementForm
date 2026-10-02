@@ -123,7 +123,7 @@ def test_invoice_pdf_and_record(case, s, tmp_path):
     assert f["bill_to"].splitlines()[:2] == ["Alex Example", "Example Firm LLP"]
     assert f["case"].startswith("Jane Roe v. X.Y.")
     assert (f["amount Regular"], f["amount Expedite"], f["amount Daily"]) == ("$339.00", "$393.00", "$468.00")
-    assert "pages" not in f and LOCK_BUTTON in f
+    assert "pages" not in f and LOCK_BUTTON not in f  # no Lock fields button any more (1.3.1)
     assert widget_values(paths[1])["bill_to"].startswith("Sam Advocate")
     invs = ledger.invoices()
     assert len(invs) == 2 and invs[0].invoice_no != invs[1].invoice_no
@@ -155,6 +155,22 @@ def test_one_speed_and_blank_values(case, s, tmp_path):
     f = widget_values(path)
     assert [k for k in f if k.startswith("amount")] == ["amount Expedite"]
     assert f["judge"] == ""
+
+
+def test_a_pdf_with_the_old_lock_button_is_locked_without_it(case, s, tmp_path):
+    """1.3.0 added a "Lock fields" button that most viewers ignored; a PDF made then is locked without it."""
+    path = make_invoices(case, s, tmp_path, InvoiceOpts(pages=10), Ledger(tmp_path / "r.db"))[0]
+    with pymupdf.open(path) as doc:
+        w = pymupdf.Widget()
+        w.field_type = pymupdf.PDF_WIDGET_TYPE_BUTTON
+        w.field_flags = pymupdf.PDF_BTN_FIELD_IS_PUSHBUTTON
+        w.field_name = LOCK_BUTTON
+        w.rect = pymupdf.Rect(500, 6, 580, 22)
+        w.button_caption = "Lock fields"
+        doc[0].add_widget(w)
+        doc.save(tmp_path / "old.pdf")
+    locked = lock_pdf(tmp_path / "old.pdf")
+    assert widget_values(locked) == {} and "Lock fields" not in pymupdf.open(locked)[0].get_text()
 
 
 def test_fields_can_be_changed_and_flattened(case, s, tmp_path):

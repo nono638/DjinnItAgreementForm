@@ -7,7 +7,7 @@ It uses a temporary APPDATA and home folder, so the user's own settings, records
 touched (the folder is removed again when all is good). The inputs are two days of one trial (a transcript
 each, June 3 and June 4) and an e-mail about another case. Expected: the built version, no errors in the log;
 for each day a minute agreement, a MOFR and the run sheet, and one joint invoice for both days (listed under
-each day) that bills the 20 transcript pages and has its amounts as fields and the "Lock fields" button; one
+each day) that bills the 20 transcript pages and has its amounts as fields (and no "Lock fields" button, removed in 1.3.1); one
 run sheet with the 4 takes of each day. Exit code 1 if something is off.
 """
 import json
@@ -67,8 +67,8 @@ if len(invoices) != 1:
 else:
     with pymupdf.open(run / "out" / invoices[0]) as doc:
         widgets = {w.field_name for w in doc[0].widgets()}
-    if not {"amount Regular", "amount Expedite", "DjinnIt lock"} <= widgets:
-        problems.append("the invoice should have its amounts as fields and the Lock fields button")
+    if not {"amount Regular", "amount Expedite"} <= widgets or "DjinnIt lock" in widgets:
+        problems.append("the invoice should have its amounts as fields, and no Lock fields button")
 invoices_csv = run / "home" / "Documents" / "DjinnIt Records" / "invoices.csv"
 rows = invoices_csv.read_text(encoding="utf-8-sig").splitlines() if invoices_csv.exists() else []
 if len(rows) != 2:

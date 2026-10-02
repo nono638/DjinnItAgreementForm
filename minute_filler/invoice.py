@@ -10,9 +10,8 @@ Customize... choice (else Settings.invoice_detail_items) lists: the page count, 
 price per page, the charges in each amount and the split between parties (settings.DETAIL_ITEMS).
 
 The page is laid out as HTML and drawn with PyMuPDF (Story); no other library is needed. Its values (number,
-Bill To, case details, amounts) are text fields, so they can be corrected in a PDF viewer, and the PDF gets
-the "Lock fields" button unless it is flattened (see fill.save_output). Every invoice is numbered and entered
-in the records (records.Ledger).
+Bill To, case details, amounts) are text fields, so they can be corrected in a PDF viewer, unless the PDF is
+flattened (see fill.save_output). Every invoice is numbered and entered in the records (records.Ledger).
 """
 from __future__ import annotations
 

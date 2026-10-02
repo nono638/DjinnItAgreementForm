@@ -1,5 +1,5 @@
 """Fills each form variant (UCS, clean, original) and checks the values that land in the PDF, including the
-fields added on lines a form has none for (signatures, fax) and the "Lock fields" button; also the file names,
+fields added on lines a form has none for (signatures, fax), with no "Lock fields" button; also the file names,
 the short caption, and older settings files upgraded to the new form defaults."""
 import pymupdf
 import pytest
@@ -69,7 +69,7 @@ def test_original_form(case, settings, tmp_path):
     assert by_key["atty_name"] == "Sam Advocate"
     # lines the original has no field for get one added, so they can be changed too
     assert f["sig_attorney"] == "per email" and f["sig_reporter"] == "Pat Reporter"
-    assert f["rep_fax"] == "" and LOCK_BUTTON in f
+    assert f["rep_fax"] == "" and LOCK_BUTTON not in f  # no Lock fields button any more (1.3.1)
 
 
 def test_per_email_off(case, settings, tmp_path):
