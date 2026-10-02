@@ -233,6 +233,18 @@ def test_ticked_attorneys_set_the_invoice_parties(window, tmp_path):
     assert window.inv_parties.value() == 3
 
 
+def test_a_day_with_nobody_ticked_is_warned_about(window, tmp_path):
+    window.output_boxes["invoice"].setChecked(True)
+    window.add_files([str(transcript_pdf(tmp_path / "a.pdf", pages=30, date="June 3, 2026")),
+                      str(transcript_pdf(tmp_path / "b.pdf", pages=60, date="June 4, 2026"))])
+    wait(window, lambda: len(window.jobs) == 2 and all(j.docs for j in window.jobs))
+    day1 = next(j for j in window.jobs if "6/3/2026" in j.case.get("dates"))
+    day1.case.attorneys[0].checked = True  # an attorney ticked on June 3 only
+    window._refresh_outputs()
+    assert window.inv_info.text().startswith("⚠ Generate all: no invoice for these 2 days yet")
+    assert "nobody is ticked on 6/4/2026" in window.inv_info.text()
+
+
 def test_days_of_a_case_share_one_invoice_and_its_extras(window, tmp_path, monkeypatch):
     from minute_filler.gui import dialogs
     window.output_boxes["invoice"].setChecked(True)

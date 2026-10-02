@@ -342,8 +342,9 @@ def _key(atty: Attorney | None) -> str:
 def firm_pages(orders: list[DayOrder], keys: list[str]) -> dict[str, dict[int, list[tuple[int, int]]]]:
     """What each attorney on the invoice (keys) ordered: key -> {day number: [(pages, n), ...]}, n being how
     many parties share those pages. A portion's attorneys not on the invoice are passed over; a portion
-    with none of them (nobody ticked that day) goes to every attorney on the invoice, so no pages are left
-    unbilled. An attorney who ordered nothing is not in the result."""
+    with none of them goes to every attorney on the invoice, so no pages are left unbilled (the window and
+    the batch don't make a joint invoice with a day nobody is ticked on: see batch.group_problem). An
+    attorney who ordered nothing is not in the result."""
     out: dict[str, dict[int, list[tuple[int, int]]]] = {}
     for i, day in enumerate(orders):
         for p in day.portions:

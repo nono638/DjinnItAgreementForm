@@ -1990,6 +1990,13 @@ class MainWindow(QMainWindow):
             self.inv_info.setToolTip("No invoice is made for this day until Who ordered… is checked:\n"
                                      "tick who ordered which pages, or choose \"Everyone ordered every page\".")
             return
+        from ..batch import group_problem
+        held = group_problem(group)
+        if held:  # nobody ticked on a day of the joint invoice: no prices until it says who ordered it
+            self.inv_info.setText(f"⚠ Generate all: no invoice for these {len(group)} days yet:\n{held}")
+            self.inv_info.setToolTip("Tick the attorneys who ordered that day's pages (in its attorney table);\n"
+                                     "until then Generate all makes the other outputs but no invoice for the case.")
+            return
         try:
             from ..invoice import firm_invoices
             firms = firm_invoices(case, self.s, opts)

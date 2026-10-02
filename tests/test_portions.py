@@ -118,6 +118,9 @@ def test_the_index_of_an_excerpt_is_split_like_the_practice(s):
     index = {name: next(l for l in q.lines if l.label == "Index") for name, q in (("A", a), ("B", b))}
     assert index["A"].amount == Decimal("95.00")  # 90 x $1.00 + 10 x $0.50
     assert index["B"].amount == Decimal("5.00")   # 10 x $0.50
+    # the judge's index the same way: A pays for 95 pages of it, B for 5
+    judge = {name: next(l for l in q.lines if l.label == "Judge's index") for name, q in (("A", a), ("B", b))}
+    assert (judge["A"].amount, judge["B"].amount) == (Decimal("95.00"), Decimal("5.00"))
 
 
 def test_a_share_is_rounded_up_to_the_cent(s):

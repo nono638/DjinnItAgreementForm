@@ -1,6 +1,7 @@
 """Invoices that cover several days of one case: the joint invoice (or one per day, as Settings say), the index
 rule, a job's Extras and what granular detail shows. Also: a day billed once (Job.invoiced) is not billed
-again, choices kept when jobs or days come together (Who ordered... too), a failed joint invoice, the progress
+again, choices kept when jobs or days come together (Who ordered... too), a failed joint invoice, a day with
+nobody ticked holding the joint invoice back, the progress
 count, the files counted for Generate all, Pages typed as 0, and the invoice's field names. Attorneys ordering
 different days or pages are in test_portions.py. All names and numbers are made up."""
 from decimal import Decimal
@@ -44,6 +45,29 @@ def three_days(tmp_path, s):
         for a in job.case.attorneys:
             a.checked = "Counsel" in (a.firm or "")
     return jobs
+
+
+def test_a_day_with_nobody_ticked_holds_the_joint_invoice_back(three_days, s):
+    """The user's choice: warn instead of billing that day to everyone. The other outputs are still made."""
+    from minute_filler.batch import group_problem
+    for a in three_days[1].case.attorneys:  # nobody ticked on June 4
+        a.checked = False
+    g = invoice_groups(three_days, s)[0]
+    assert "nobody is ticked on 6/4/2026" in group_problem(g)
+    assert files_to_make(three_days, ["invoice"], s) == 0
+    fill_jobs(three_days, s, outputs=["agreement", "invoice"])
+    assert ledger_for(s).invoices() == []
+    assert all("invoice not made: nobody is ticked on 6/4/2026" in j.error for j in three_days)
+    assert not any(j.invoiced for j in three_days)  # billed once that day says who ordered it
+    assert all(any(p.name.startswith("Minute Agreement") for p in j.saved) for j in three_days if j.case.orderers() != [None])
+    for a in three_days[1].case.attorneys:  # ticked: the case is billed as one invoice again
+        a.checked = "Counsel" in (a.firm or "")
+    assert group_problem(invoice_groups(three_days, s)[0]) == ""
+    # no attorney ticked on any day (a transcript without appearances): one invoice with a blank Bill To, as before
+    for job in three_days:
+        for a in job.case.attorneys:
+            a.checked = False
+    assert group_problem(invoice_groups(three_days, s)[0]) == ""
 
 
 def test_index_rules():

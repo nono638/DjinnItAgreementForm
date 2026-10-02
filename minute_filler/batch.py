@@ -614,9 +614,10 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
     """Makes the outputs (default: Settings.outputs) of every job; problems are recorded in job.error
     instead of stopping the batch. A job without a transcript gets no invoice or run sheet (noted in job.error).
     A job already invoiced (Job.invoiced) is not billed again, nor an attorney a stopped run invoiced already
-    (Job.invoiced_keys). A job whose Who ordered... rows need checking (Job.portions_problem) gets no invoice:
-    its error says so. `batch` is the whole batch when only some of its jobs are filled: jobs for several days
-    of one case get the date in their file names."""
+    (Job.invoiced_keys). A job whose Who ordered... rows need checking (Job.portions_problem) gets no invoice,
+    nor the days of a case with a day nobody is ticked on (group_problem): their errors say so. `batch` is the
+    whole batch when only some of its jobs are filled: jobs for several days of one case get the date in their
+    file names."""
     outputs = list(s.outputs if outputs is None else outputs)
     ledger = ledger_for(s)
     names = [j.name_key() for j in batch or jobs]
@@ -672,6 +673,11 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
         if progress:
             progress(len(jobs) + k, steps, f"Invoice for {first.title()}")
         keys = []  # the attorneys invoiced
+        held = group_problem(g)
+        if held:  # a day with nobody ticked: no invoice until it says who ordered it
+            for job in g:
+                job.error = "; ".join(x for x in (job.error, f"invoice not made: {held}") if x)
+            continue
         try:
             case, opts = joint_invoice(g)
             made = generate(case, s, out_dir_for(first, s), ["invoice"], opts, ledger, invoiced=keys)
@@ -704,6 +710,20 @@ def _started_for(job: Job, started: list[Path], s: Settings) -> str | None:
     return None
 
 
+def group_problem(group: list[Job]) -> str:
+    """Why the joint invoice of these days can't be made yet ("" when it can): a day with nobody ticked while
+    other days have attorneys ticked. Nobody can be billed for its pages until it says who ordered them, so
+    the window and the batch warn instead of guessing. Days with no attorney ticked at all (a transcript
+    without appearances) still make one invoice with a blank Bill To."""
+    if len(group) < 2:
+        return ""
+    empty = [j for j in group if not j.ticked_keys()]
+    if not empty or len(empty) == len(group):
+        return ""
+    days = ", ".join(j.case.get("dates") or j.title() for j in empty)
+    return f"nobody is ticked on {days}: tick who ordered {'that day' if len(empty) == 1 else 'those days'}"
+
+
 def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
     """How many files fill_jobs will make for these jobs: the days of one case share a run sheet, and (as
     Settings.invoice_joint says) the invoices, one for each attorney ticked on any of its days who ordered
@@ -712,7 +732,7 @@ def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
     count = sum(j.file_count(outputs) for j in jobs)
     if "invoice" in outputs:
         groups = invoice_groups([j for j in jobs if not j.invoiced and not j.portions_problem()], s or Settings())
-        count += sum(invoice_count(*joint_invoice(g)) for g in groups)
+        count += sum(invoice_count(*joint_invoice(g)) for g in groups if not group_problem(g))
     cases: list[Ident] = []
     for j in jobs:
         if "runsheet" in j.makeable(outputs):
