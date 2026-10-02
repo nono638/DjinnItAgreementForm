@@ -1,6 +1,8 @@
 """Makes what the user asked for - minute agreements, a MOFR, invoices, the run sheet - and records each file.
 
-Both the window's Generate button and the batch use generate(), so the records see every file made.
+Both the window's Generate button and the batch use generate(), so the records see every file made. The
+batch also calls it for a joint invoice: the case of several days, with "invoice" as the only output (see
+batch.fill_jobs).
 """
 from __future__ import annotations
 
@@ -44,6 +46,7 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
     made: list[Path] = []
 
     def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "", count: int = pages) -> None:
+        """Notes a file made and logs it in the records (count: the pages it covers)."""
         made.append(path)
         try:
             ledger.log_activity(kind, case_name=case.get("case_name"), index_no=case.get("index_no"),

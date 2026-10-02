@@ -1,4 +1,8 @@
-"""Main window: drop zone, job list and paste box on the left, the current job's editable fields on the right.
+"""Main window: drop zone, job list and paste box on the left, the current job's editable fields on the right,
+and the Outputs box at the bottom: the Generate buttons and a panel per output with its options (greyed out
+while the output is unticked). The Invoice panel's speeds, Extras... and Customize... set what the current
+job's invoice offers and shows; with Generate all, the days of one case share one invoice (batch.joint_invoice).
+File -> Lock finished PDFs saves copies whose fields can no longer be changed.
 
 Documents are read, the AI is asked and batches are made on a thread pool (workers.Runner). Their results
 are applied on the UI thread; the results of work started before "New job" are dropped (see MainWindow.gen)."""
@@ -9,12 +13,12 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt, QTimer
+from PySide6.QtCore import QByteArray, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget,
+    QGridLayout, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -33,7 +37,7 @@ from ..runsheet import find_sheets, run_sheet_summary, runsheets_folder, transcr
 from ..settings import OUTPUTS, Settings
 from .dialogs import ClarifyDialog, RunSheetDialog, SettingsDialog
 from .theme import apply_theme
-from .widgets import (ASSETS, check_row, open_path, open_url, plural, refill_combo, repolish, rounded, set_checks,
+from .widgets import (ASSETS, open_path, open_url, plural, refill_combo, repolish, rounded, set_checks,
                       show_save_error)
 from .workers import Runner
 
@@ -147,6 +151,9 @@ class FieldRow(QWidget):
         self.on_edit(self.key)
 
 
+COMPACT_BELOW = 960  # window height (px) under which the drop zone shows the small picture
+
+
 class DropZone(QFrame):
     """The big drop target. Dropped files go to on_files(paths), text to on_text(str), a picture to
     on_image(QImage); the Browse button calls on_browse(). It also shows the djinn pictures."""
@@ -207,7 +214,8 @@ class DropZone(QFrame):
                                "stumped": "Something needs your attention"}.get(mood, ""))
 
     def set_compact(self, on: bool) -> None:
-        """Switches to the small layout (on) or back: a smaller picture leaves room for the list of jobs."""
+        """Switches to the small layout (on) or back: a smaller picture leaves room for the list of jobs, or
+        for the inputs in a short window."""
         if on != self.compact:
             self.compact = on
             self.set_mood(self.wanted)
@@ -340,7 +348,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------- layout
     def _build(self):
         """Builds the window: header, the left column (drop zone, jobs, inputs, paste box), the scrolling form
-        on the right, the Make/Generate bar at the bottom, the menu and the keyboard shortcuts."""
+        on the right, the Outputs box (with the Generate buttons) at the bottom, the menu and the shortcuts."""
         central = QWidget()
         central.setObjectName("central")
         self.setCentralWidget(central)
@@ -397,7 +405,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.jobs_label)
         self.job_list = QListWidget()
         self.job_list.setToolTip("One job per case and date. Click a job to check or edit it;\n"
-                                 "untick the ones \"Fill all\" should leave out.")
+                                 "untick the ones \"Generate all\" should leave out.")
         self.job_list.currentRowChanged.connect(self._job_selected)
         self.job_list.itemChanged.connect(self._job_ticked)
         self.job_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -430,7 +438,15 @@ class MainWindow(QMainWindow):
         self.ai_label.setTextFormat(Qt.RichText)
         self.ai_label.linkActivated.connect(self._ai_help)
         ll.addWidget(self.ai_label)
-        split.addWidget(left)
+        # In a short window the column scrolls, rather than its parts being drawn over each other or the
+        # Outputs box being squeezed (the column needs about 620 px in a batch).
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setWidget(left)
+        left_scroll.setMinimumWidth(left.minimumSizeHint().width() + 12)  # (room for the scroll bar)
+        split.addWidget(left_scroll)
 
         # right column (scrollable form)
         scroll = QScrollArea()
@@ -586,46 +602,72 @@ class MainWindow(QMainWindow):
         rl.addWidget(c)
         rl.addStretch(1)
 
-        # footer / fill bar
+        # footer: the Outputs box - the Generate buttons by its title, then a column per output with its own options
         foot = QFrame()
         foot.setObjectName("card")
         fv = QVBoxLayout(foot)
         fv.setContentsMargins(16, 10, 16, 10)
-        fv.setSpacing(8)
-        ol = QHBoxLayout()
-        make = QLabel("Make:")
-        make.setObjectName("section")
-        ol.addWidget(make)
-        boxes, self.output_boxes = check_row(OUTPUTS, self.s.outputs, self._outputs_changed)
-        ol.addLayout(boxes)
-        self.output_boxes["mofr"].setToolTip("The court's Minute Order Form/Receipt (your parts of it)")
-        ol.addSpacing(12)
-        self.inv_choice = QCheckBox("Offer every speed")
-        self.inv_choice.setToolTip("List the price of each speed (Settings → Invoice) so the attorney can choose;\n"
-                                   "untick to bill only the speed chosen under Order.")
-        self.inv_choice.toggled.connect(self._invoice_choice_changed)
-        self.inv_parties_label = QLabel("Parties:")
-        self.inv_parties = QSpinBox()
-        self.inv_parties.setRange(1, 20)
-        self.inv_parties.setToolTip("How many parties ordered: the original is split between them,\n"
-                                    "and each gets their own copy (normally the number of ticked attorneys)")
-        self.inv_parties.valueChanged.connect(self._invoice_parties_changed)
-        self.inv_info = QLabel("")
-        self.inv_info.setObjectName("muted")
-        for w in (self.inv_choice, self.inv_parties_label, self.inv_parties, self.inv_info):
-            ol.addWidget(w)
-        ol.addStretch(1)
-        fv.addLayout(ol)
-        fl = QHBoxLayout()
-        fv.addLayout(fl)
-        self.per_email = QCheckBox("Write \"per email\" in attorney signature spot")
-        self.per_email.setChecked(self.s.per_email)
-        self.per_email.toggled.connect(lambda v: self._set_opt("per_email", v))
-        self.sign_rep = QCheckBox("Sign as court reporter")
-        self.sign_rep.setToolTip("Puts your signature picture on the court reporter line - or types your name,\n"
-                                 "if no picture is chosen in Settings → My info.")
-        self.sign_rep.setChecked(self.s.sign_reporter)
-        self.sign_rep.toggled.connect(lambda v: self._set_opt("sign_reporter", v))
+        fv.setSpacing(6)
+        top = QHBoxLayout()
+        title = QLabel("Outputs")
+        title.setObjectName("section")
+        top.addWidget(title)
+        top.addStretch(1)
+        self.fill_btn = QPushButton("Generate")
+        self.fill_btn.setObjectName("primary")
+        self.fill_btn.clicked.connect(self.fill)
+        top.addWidget(self.fill_btn)
+        self.fill_all_btn = QPushButton("Generate all")
+        self.fill_all_btn.setObjectName("primary")
+        self.fill_all_btn.setToolTip("Make the ticked outputs for every ticked job (Ctrl+Shift+Enter)")
+        self.fill_all_btn.clicked.connect(self.fill_all_jobs)
+        top.addWidget(self.fill_all_btn)
+        fv.addLayout(top)
+        self.output_grid = QGridLayout()  # a panel per output, four in a row or in three columns (_place_output_cols)
+        self.output_grid.setHorizontalSpacing(10)
+        self.output_grid.setVerticalSpacing(10)
+        fv.addLayout(self.output_grid)
+        self._output_cols: list[QWidget] = []
+        self._cols_per_row = 0
+        self.output_boxes: dict[str, QCheckBox] = {}
+        self.output_opts: dict[str, QWidget] = {}  # each output's options, greyed out while it is unticked
+        tips = {"agreement": "The UCS Court Reporter Minute Agreement Form, one for each ticked attorney",
+                "mofr": "The court's Minute Order Form/Receipt (your parts of it)"}
+
+        def panel(key: str) -> QFormLayout:
+            """A bordered panel headed by the output's make-box, with a line under it; returns the form for
+            its options (label: value rows)."""
+            holder = QFrame()
+            holder.setObjectName("outputPanel")
+            col = QVBoxLayout(holder)
+            col.setContentsMargins(12, 8, 12, 10)
+            col.setSpacing(6)
+            cb = QCheckBox(OUTPUTS[key])
+            cb.setObjectName("outputHead")
+            cb.setChecked(key in self.s.outputs)
+            cb.setToolTip(tips.get(key, ""))
+            cb.toggled.connect(self._outputs_changed)
+            self.output_boxes[key] = cb
+            col.addWidget(cb)
+            rule = QFrame()
+            rule.setObjectName("outputRule")
+            rule.setFixedHeight(1)
+            col.addWidget(rule)
+            body = QWidget()
+            form = QFormLayout(body)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(8)
+            form.setVerticalSpacing(6)
+            form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+            col.addWidget(body)
+            col.addStretch(1)
+            self.output_opts[key] = body
+            self._output_cols.append(holder)
+            return form
+
+        # Minute agreement
+        ag = panel("agreement")
         from ..fill import FORMS
         self.form_choice = QComboBox()
         for key, (_, label) in FORMS.items():
@@ -633,22 +675,99 @@ class MainWindow(QMainWindow):
         self.form_choice.setCurrentIndex(max(0, self.form_choice.findData(self.s.form_choice)))
         self.form_choice.currentIndexChanged.connect(
             lambda _: self._set_opt("form_choice", self.form_choice.currentData()))
-        fl.addWidget(self.per_email)
-        fl.addSpacing(12)
-        fl.addWidget(self.sign_rep)
-        fl.addStretch(1)
-        fl.addWidget(QLabel("Form:"))
-        fl.addWidget(self.form_choice)
-        fl.addSpacing(12)
-        self.fill_btn = QPushButton("Generate")
-        self.fill_btn.setObjectName("primary")
-        self.fill_btn.clicked.connect(self.fill)
-        fl.addWidget(self.fill_btn)
-        self.fill_all_btn = QPushButton("Generate all")
-        self.fill_all_btn.setObjectName("primary")
-        self.fill_all_btn.setToolTip("Make the ticked outputs for every ticked job (Ctrl+Shift+Enter)")
-        self.fill_all_btn.clicked.connect(self.fill_all_jobs)
-        fl.addWidget(self.fill_all_btn)
+        ag.addRow("Form:", self.form_choice)
+        self.per_email = QCheckBox("\"Per email\" on attorney signature")
+        self.per_email.setToolTip("Writes \"per email\" in the attorney's signature spot")
+        self.per_email.setChecked(self.s.per_email)
+        self.per_email.toggled.connect(lambda v: self._set_opt("per_email", v))
+        ag.addRow("Signing:", self.per_email)
+        self.sign_rep = QCheckBox("Sign as court reporter")
+        self.sign_rep.setToolTip("Puts your signature picture on the court reporter line - or types your name,\n"
+                                 "if no picture is chosen in Settings → My info.")
+        self.sign_rep.setChecked(self.s.sign_reporter)
+        self.sign_rep.toggled.connect(lambda v: self._set_opt("sign_reporter", v))
+        ag.addRow("", self.sign_rep)
+
+        # Invoice
+        inv = panel("invoice")
+        speeds = QWidget()
+        self.inv_speeds_grid = QGridLayout(speeds)
+        self.inv_speeds_grid.setContentsMargins(0, 0, 0, 0)
+        self.inv_speeds_grid.setHorizontalSpacing(12)
+        self.inv_speeds_grid.setVerticalSpacing(2)
+        self.inv_speed_boxes: dict[str, QCheckBox] = {}
+        self._fill_invoice_speeds()
+        inv.addRow("Speeds:", speeds)
+        self.inv_parties = QSpinBox()
+        self.inv_parties.setRange(1, 20)
+        self.inv_parties.setToolTip("How many parties ordered: the original is split between them,\n"
+                                    "and each gets their own copy (normally the number of ticked attorneys)")
+        self.inv_parties.valueChanged.connect(self._invoice_parties_changed)
+        inv.addRow("Parties:", self.inv_parties)
+
+        def with_button(w: QWidget, text: str, tip: str, slot) -> QHBoxLayout:
+            """[widget] [button…] on one row."""
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(w)
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+            row.addStretch(1)
+            return row
+
+        self.inv_extras_info = QLabel("")
+        self.inv_extras_info.setObjectName("muted")
+        inv.addRow("Includes:", with_button(
+            self.inv_extras_info, "Extras…", "The e-mailed copy and the index, for this job's invoice only\n"
+            "(your defaults are in Settings → Invoice)", self._invoice_extras))
+        self.inv_detail = QCheckBox("Show granular detail")
+        self.inv_detail.setToolTip("Also show the page count, the price per page and the charges that make up\n"
+                                   "each amount (original, copies, index), and how it is split between parties.\n"
+                                   "Unticked, the invoice shows each speed's turnaround and amount only.")
+        self.inv_detail.setChecked(self.s.invoice_detail)
+        self.inv_detail.toggled.connect(lambda v: self._set_opt("invoice_detail", v))
+        inv.addRow("Shows:", with_button(
+            self.inv_detail, "Customize…", "What granular detail shows on this job's invoice\n"
+            "(your defaults are in Settings → Invoice)", self._invoice_show))
+        self.inv_info = QLabel("")
+        self.inv_info.setObjectName("muted")
+        inv.addRow("Prices:", self.inv_info)
+
+        # MOFR
+        mo = panel("mofr")
+        self.mofr_division = QComboBox()
+        self.mofr_division.addItem("Civil", "civil")
+        self.mofr_division.addItem("Criminal", "criminal")
+        self.mofr_division.setToolTip("Which box is ticked on the MOFR (civil cases also get the case's own title\n"
+                                      "instead of the printed \"People v.\")")
+        self.mofr_division.setCurrentIndex(max(0, self.mofr_division.findData(self.s.mofr_division)))
+        self.mofr_division.currentIndexChanged.connect(
+            lambda _: self._set_opt("mofr_division", self.mofr_division.currentData()))
+        mo.addRow("Case:", self.mofr_division)
+
+        # Run sheet
+        rs = panel("runsheet")
+        self.rs_existing = QComboBox()
+        for key, label in (("ask", "Ask me"), ("add", "Add to it"), ("new", "Start a new one")):
+            self.rs_existing.addItem(label, key)
+        self.rs_existing.setToolTip("When the case already has a run sheet (the same index number or case name)")
+        self.rs_existing.setCurrentIndex(max(0, self.rs_existing.findData(self.s.runsheet_existing)))
+        self.rs_existing.currentIndexChanged.connect(
+            lambda _: self._set_opt("runsheet_existing", self.rs_existing.currentData()))
+        rs.addRow("If one exists:", self.rs_existing)
+        self.rs_info = QLabel("")
+        self.rs_info.setObjectName("muted")
+        self.rs_info.setVisible(False)
+        rs.addRow(self.rs_info)
+        # under the options, not among them: the folder can be opened while Run sheet is unticked too
+        self.rs_folder = QLabel('<a href="open">Open the run sheets folder</a>')
+        self.rs_folder.setToolTip("Opens the folder the run sheets are kept in (Settings → Run sheet)")
+        self.rs_folder.linkActivated.connect(lambda _: self._open_run_sheets_folder())
+        col = self._output_cols[-1].layout()
+        col.insertWidget(col.count() - 1, self.rs_folder)  # above the stretch
+        self._place_output_cols()
         root.addWidget(foot)
         self._refresh_jobs()
 
@@ -674,6 +793,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("&Records (invoices and history)…", self.open_records)
         m.addAction("Save the invoice &spreadsheet template…", self._save_invoice_template)
+        m.addAction("&Lock finished PDFs (no more changes)…", self.lock_pdfs)
         m.addSeparator()
         m.addAction("E&xit", self.close)
         m = mb.addMenu("&Help")
@@ -850,6 +970,7 @@ class MainWindow(QMainWindow):
                 if one_job and (len(docs) == 1 or len(group(docs, self.s)) == 1):
                     # the usual way: everything dropped is about the job on screen
                     target.docs += docs
+                    target.invoiced = False  # new documents may mean new pages to bill
                     remerge(target, self.s)
                     self._show_job()
                     self._maybe_ai(target, docs)
@@ -968,8 +1089,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ jobs
     def _job_text(self, job: Job) -> str:
         """A job's line in the list, e.g. "✓ Jane Roe v. Sam Poe  ·  9/14/2026  ·  712345/2021".
-        ✓ = saved, ⚠ = it failed or needs a look."""
-        mark = "✓ " if job.saved and not job.error else "⚠ " if job.error or job.problems() else ""
+        ✓ = saved (or billed on another day's invoice), ⚠ = it failed or needs a look."""
+        done = (job.saved or job.invoiced) and not job.error
+        mark = "✓ " if done else "⚠ " if job.error or job.problems() else ""
         title = job.title()  # kept short so the date, which tells a case's jobs apart, stays in view
         bits = [title if len(title) <= 30 else title[:29].rstrip() + "…"]
         bits += [v for v in (job.case.get("dates"), job.case.get("index_no")) if v]
@@ -986,6 +1108,8 @@ class MainWindow(QMainWindow):
         if job.error:
             tip.append("Not saved - " + job.error)
         tip += [f"Saved: {p.name}" for p in job.saved]
+        if job.invoiced:
+            tip.append("Invoiced: Generate all won't bill this day again")
         return "\n".join(tip)
 
     def _refresh_jobs(self):
@@ -993,7 +1117,7 @@ class MainWindow(QMainWindow):
         multi = len(self.jobs) > 1
         for w in (self.jobs_label, self.job_list, self.fill_all_btn):
             w.setVisible(multi)
-        self.drop.set_compact(multi)
+        self.drop.set_compact(self._compact_drop())
         self.input_list.setMaximumHeight(72 if multi else 110)
         self.paste.setMaximumHeight(64 if multi else 16777215)
         self.fill_btn.setText("Generate this job" if multi else "Generate")
@@ -1022,14 +1146,14 @@ class MainWindow(QMainWindow):
         self.job_list.blockSignals(False)
         chosen = [j for j in self.jobs if j.include and not j.is_empty()]
         need = sum(1 for j in self.jobs if j.output_problems(self.s.outputs) and not j.saved)
-        saved = sum(1 for j in self.jobs if j.saved)
+        saved = sum(1 for j in self.jobs if j.saved or j.invoiced)
         text = f"Jobs: {len(self.jobs)}"
         if need:
             text += f"  ·  {need} to check (⚠)"
         if saved:
             text += f"  ·  {saved} saved (✓)"
         self.jobs_label.setText(text)
-        files = files_to_make(chosen, self.s.outputs)  # one run sheet per case
+        files = files_to_make(chosen, self.s.outputs, self.s)  # days of a case share a run sheet, invoices too
         self.fill_all_btn.setText(f"Generate all  ({plural(files, 'file')})")
         self.fill_all_btn.setEnabled(bool(chosen) and bool(self.s.outputs) and not self.filling)
 
@@ -1262,6 +1386,7 @@ class MainWindow(QMainWindow):
         self.s.rate_sheet = name
         self.s.save()
         self._fill_speeds()
+        self._fill_invoice_speeds()
         self._apply_speed()
         self._remerge_others()
 
@@ -1307,12 +1432,14 @@ class MainWindow(QMainWindow):
         """Reads the rate sheet files again (after they were edited) and prices every job again."""
         self.s.reload_rates()
         self._fill_sheet_box()
+        self._fill_invoice_speeds()  # the sheet's speeds may have changed
         self._apply_speed()
         self._remerge_others()
         self._toast(f"Loaded {len(self.s.sheets()[0])} rate sheet(s).")
 
     def _set_opt(self, name, value):
-        """Saves an option changed in the window (per email, sign, form, the Make boxes) as the default."""
+        """Saves an option changed in the Outputs box (the outputs ticked and each one's options) as the
+        default."""
         setattr(self.s, name, value)
         self.s.save()
 
@@ -1416,13 +1543,15 @@ class MainWindow(QMainWindow):
         outputs = list(self.s.outputs)
         if not outputs:
             QMessageBox.information(self, "Nothing to make", "Tick what to make first: minute agreement, MOFR, "
-                                    "invoice and/or run sheet (at the bottom of the window).")
+                                    "invoice and/or run sheet (in the Outputs box).")
             return
         if job.makeable(outputs) != outputs:
             left_out = " or ".join(OUTPUTS[o].lower() for o in outputs if o not in job.makeable(outputs))
+            why = ("An invoice needs pages to bill, and the Pages field says 0." if job.transcript_pages() else
+                   "An invoice or a run sheet needs a transcript PDF (for its pages), and this job has none.")
             if QMessageBox.question(
-                    self, f"No {left_out}", f"An invoice or a run sheet needs a transcript PDF (for its pages), and "
-                    f"this job has none.\n\nMake the other outputs without the {left_out}?") != QMessageBox.Yes:
+                    self, f"No {left_out}", f"{why}\n\nMake the other outputs without the {left_out}?"
+            ) != QMessageBox.Yes:
                 return
             if job not in self.jobs or self._batch_running():
                 return
@@ -1489,6 +1618,7 @@ class MainWindow(QMainWindow):
             return
         log.info("made %d file(s): %s, form type %s", len(paths), "+".join(outputs), self.s.form_choice)
         job.saved, job.error = paths, ""
+        job.invoiced |= "invoice" in outputs  # Generate all won't bill this day again
         if self.s.open_after:
             for p in paths:
                 open_path(p)
@@ -1523,7 +1653,8 @@ class MainWindow(QMainWindow):
         Blank fields are not asked about, but incomplete jobs are listed first, to leave out or make anyway.
         Where the takes go is asked once per case when it has a run sheet already (Settings → Run sheet); the
         jobs of one case share a run sheet group, so its days go on one sheet. The batch works on copies of
-        the jobs and the settings; when it ends, each job's saved files and error are copied back.
+        the jobs and the settings; when it ends, each job's saved files, error and whether it was invoiced are
+        copied back.
         With a single job this is the same as Generate.
         """
         if len(self.jobs) < 2:
@@ -1603,12 +1734,13 @@ class MainWindow(QMainWindow):
         def done(paths):
             ended()
             for j in chosen:
-                j.saved, j.error = copies[id(j)].saved, copies[id(j)].error
+                copy = copies[id(j)]
+                j.saved, j.error, j.invoiced = copy.saved, copy.error, copy.invoiced
             failed = [j for j in chosen if j.error and not j.saved]
             partial = [j for j in chosen if j.error and j.saved]
             for j in chosen:
-                if j.saved and not j.error:
-                    j.include = False  # "Fill all" again only does what is left
+                if (j.saved or j.invoiced) and not j.error:
+                    j.include = False  # "Generate all" again only does what is left
             self._update_status()
             folders = list(dict.fromkeys(str(p.parent) for p in paths))
             text = f"Saved {len(paths)} file{'s' if len(paths) != 1 else ''} for " \
@@ -1663,10 +1795,16 @@ class MainWindow(QMainWindow):
             apply_theme(self.app, self.s.theme)
             self.per_email.setChecked(self.s.per_email)
             self.sign_rep.setChecked(self.s.sign_reporter)
-            self.form_choice.setCurrentIndex(max(0, self.form_choice.findData(self.s.form_choice)))
+            for combo, value in ((self.form_choice, self.s.form_choice), (self.mofr_division, self.s.mofr_division),
+                                 (self.rs_existing, self.s.runsheet_existing)):
+                with QSignalBlocker(combo):
+                    combo.setCurrentIndex(max(0, combo.findData(value)))
+            with QSignalBlocker(self.inv_detail):
+                self.inv_detail.setChecked(self.s.invoice_detail)
             set_checks(self.output_boxes, self.s.outputs)
             self.s.reload_rates()
             self._fill_sheet_box()
+            self._fill_invoice_speeds()
             self._check_ai()
             if self.cur.docs:
                 self._remerge()
@@ -1676,17 +1814,19 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- outputs and records
     def _outputs_changed(self, _=None):
-        """The Make: boxes are saved straight away, as the default for next time."""
-        self._set_opt("outputs", [k for k, cb in self.output_boxes.items() if cb.isChecked()])
+        """The outputs ticked are saved straight away, as the default for next time."""
+        self._set_opt("outputs", [k for k in OUTPUTS if self.output_boxes[k].isChecked()])
         self._refresh_outputs()
         if len(self.jobs) > 1:
             self._refresh_job_labels()
 
     def _refresh_outputs(self):
-        """Shows the invoice controls for the current job, and what the invoice and run sheet boxes would do:
-        both need a transcript."""
-        if not hasattr(self, "output_boxes"):
+        """Greys out the options of the outputs not ticked. For the current job: the tooltips and warnings of
+        the invoice and the run sheet (both need a transcript), and the Invoice panel's parties and prices."""
+        if not hasattr(self, "rs_info"):  # still building the window
             return
+        for key, body in self.output_opts.items():
+            body.setEnabled(self.output_boxes[key].isChecked())
         job = self.cur
         pages = job.invoice_pages()
         box = self.output_boxes["invoice"]
@@ -1698,36 +1838,220 @@ class MainWindow(QMainWindow):
             "to the case's run sheet in Excel, or starts one (Settings → Run sheet)" if job.transcript_pages() else
             "Needs a transcript PDF among the inputs (the initials on its pages).\n"
             "Jobs without one get no run sheet.")
-        on = box.isChecked()
-        for w in (self.inv_choice, self.inv_parties_label, self.inv_parties, self.inv_info):
-            w.setVisible(on)
-        if not on:
-            return
-        for w, v in ((self.inv_choice, self.s.invoice_choice if job.invoice_choice is None else job.invoice_choice),
-                     (self.inv_parties, job.parties or job.form_count())):
-            w.blockSignals(True)
-            w.setChecked(v) if isinstance(w, QCheckBox) else w.setValue(v)
-            w.blockSignals(False)
-        if not pages:
-            self.inv_info.setText("⚠ no transcript PDF: no invoice for this job")
+        self.rs_info.setText("" if job.transcript_pages() or not job.docs else
+                             "⚠ no transcript PDF: no run sheet for this job")
+        self.rs_info.setVisible(bool(self.rs_info.text()))
+        self._show_invoice_prices()
+        self._place_output_cols()  # the prices may need more room than the panels have
+
+    def _show_invoice_prices(self):
+        """The Invoice panel's parties, extras and prices for the current job. When Generate all bills it with
+        other days of its case, the first line says so and the prices are the joint invoice's."""
+        from ..batch import joint_invoice
+        job = self.cur
+        group = self._invoice_group()
+        case, opts = joint_invoice(group)
+        with QSignalBlocker(self.inv_parties):
+            self.inv_parties.setValue(opts.parties)
+        self.inv_extras_info.setText(self._extras_text(opts))
+        self.inv_info.setToolTip("")
+        if not job.invoice_pages():
+            if not job.docs:
+                self.inv_info.setText("")  # an empty job has nothing to warn about yet
+            elif job.transcript_pages():
+                self.inv_info.setText("⚠ the Pages field says 0: no invoice for this job")
+            else:
+                self.inv_info.setText("⚠ no transcript PDF: no invoice for this job")
             return
         try:
             from ..invoice_calc import fmt, quotes_for
-            qs = quotes_for(pages, self.inv_parties.value(), self.s.sheet(), self.s,
-                            self.case.get("delivery") or self.s.default_delivery, self.inv_choice.isChecked())
-            self.inv_info.setText(f"{pages} pp.  ·  " + "  ·  ".join(f"{q.speed} {fmt(q.per_party)}" for q in qs)
-                                  + ("  each" if self.inv_parties.value() > 1 else ""))
+            qs = quotes_for(opts.day_pages(), opts.parties, self.s.sheet(), self.s,
+                            case.get("delivery") or self.s.default_delivery, opts.email, opts.index)
         except Exception as e:  # a broken rate sheet must not break the window
             self.inv_info.setText(f"⚠ {e}")
+            return
+        # two speeds a line, so the Invoice panel stays narrow enough for a small window
+        each = [f"{q.speed} {fmt(q.per_party)}" for q in qs]
+        prices = "\n".join(" · ".join(each[i:i + 2]) for i in range(0, len(each), 2)) + \
+            (" each" if opts.parties > 1 else "")
+        if len(group) > 1:
+            self.inv_info.setText(f"Generate all: one invoice for {len(group)} days ({opts.pages} pp.)\n{prices}")
+            self.inv_info.setToolTip(
+                f"Generate all bills these {len(group)} days of the case on one invoice.\n"
+                f"\"Generate this job\" bills the day shown alone ({job.invoice_pages()} pp.).")
+        else:
+            self.inv_info.setText(f"{opts.pages} pp. · {prices}")
 
-    def _invoice_choice_changed(self, on: bool):
-        """The "Offer every speed" box was clicked: it applies to this job only."""
-        self.cur.invoice_choice = on
+    def _invoice_group(self, job: Job | None = None) -> list[Job]:
+        """The days Generate all bills on one invoice with a job (default: the current one), as
+        Settings.invoice_joint says: the ticked jobs of its case not invoiced yet. Just the job itself when
+        Generate all leaves it out."""
+        from ..batch import invoice_groups
+        cur = job or self.cur
+        billed = [j for j in self.jobs if j.include and not j.invoiced and not j.is_empty()]
+        if cur.invoice_pages() and cur in billed:
+            for g in invoice_groups(billed, self.s):
+                if any(j is cur for j in g):
+                    return g
+        return [cur]
+
+    def _extras_text(self, opts) -> str:
+        """'E-mailed copy, index from 50 pp.' - what the invoice includes; '(this job)' when it isn't as
+        Settings say."""
+        s = self.s
+        email = s.invoice_include_email if opts.email is None else opts.email
+        index = ("auto" if s.invoice_include_index else "off") if opts.index is None else opts.index
+        text = ", ".join(("e-mailed copy" if email else "no e-mailed copy",
+                          {"auto": f"index from {s.invoice_index_threshold} pp.", "on": "index",
+                           "off": "no index"}[index]))
+        own = opts.email is not None or opts.index is not None
+        return text[0].upper() + text[1:] + (" (this job)" if own else "")
+
+    def _invoice_extras(self):
+        """Extras…: the e-mailed copy and the index for this job's invoice, and the other days on it."""
+        from ..batch import joint_invoice
+        from .dialogs import InvoiceExtrasDialog
+        job = self.cur
+        group = self._invoice_group(job)
+        opts = joint_invoice(group)[1]
+        dlg = InvoiceExtrasDialog(opts.email, opts.index, self.s, len(group), self)
+        if dlg.exec():
+            email, index = dlg.values()
+            for day in self._invoice_group(job):  # as it is now: a read may have ended meanwhile
+                day.invoice_email, day.invoice_index = email, index
+            self._refresh_outputs()
+
+    def _invoice_show(self):
+        """Customize…: what granular detail shows on this job's invoice, and the other days on it."""
+        from ..batch import joint_invoice
+        from .dialogs import InvoiceShowDialog
+        job = self.cur
+        dlg = InvoiceShowDialog(joint_invoice(self._invoice_group(job))[1].show, self.s, self)
+        if dlg.exec():
+            items = dlg.values()
+            for day in self._invoice_group(job):  # as it is now: a read may have ended meanwhile
+                day.invoice_show = items
+
+    def _place_output_cols(self):
+        """Lays the Outputs panels out four in a row or, when the window is too narrow for that, in three
+        columns with the two short ones (MOFR, run sheet) one above the other. Panels side by side are as tall
+        as each other."""
+        if len(getattr(self, "_output_cols", [])) < 4:  # still building the window
+            return
+        widths = [c.sizeHint().width() for c in self._output_cols]
+        room = self.width() - 36 - 32 - 8  # the window's and the box's margins
+        per_row = 4 if sum(widths) + 10 * 3 <= room else 3
+        if per_row == self._cols_per_row:
+            return
+        self._cols_per_row = per_row
+        for c in self._output_cols:
+            self.output_grid.removeWidget(c)
+        agreement, invoice, mofr, runsheet = self._output_cols
+        if per_row == 4:
+            for i, c in enumerate(self._output_cols):
+                self.output_grid.addWidget(c, 0, i)
+        else:
+            self.output_grid.addWidget(agreement, 0, 0, 2, 1)
+            self.output_grid.addWidget(invoice, 0, 1, 2, 1)
+            self.output_grid.addWidget(mofr, 0, 2)
+            self.output_grid.addWidget(runsheet, 1, 2)
+        for col in range(5):
+            self.output_grid.setColumnStretch(col, 1 if col < per_row else 0)  # the panels share the width
+
+    def _compact_drop(self) -> bool:
+        """The drop zone shows the small picture for a batch (room for the list of jobs), and in a window too
+        short for the big one above the inputs and the paste box."""
+        return len(self.jobs) > 1 or self.height() < COMPACT_BELOW
+
+    def resizeEvent(self, e):
+        """The Outputs columns follow the window's width, and the drop zone its height."""
+        super().resizeEvent(e)
+        self._place_output_cols()
+        if hasattr(self, "drop"):
+            self.drop.set_compact(self._compact_drop())
+
+    def _fill_invoice_speeds(self):
+        """A box per speed of the current rate sheet, ticked for the speeds invoices offer."""
+        from ..rates import speed_key
+        while self.inv_speeds_grid.count():
+            item = self.inv_speeds_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.inv_speed_boxes = {}
+        offered = {speed_key(x) for x in self.s.invoice_speeds}
+        try:
+            names = [sp.name for sp in self.s.sheet().speeds]
+        except Exception:  # a broken rate sheet must not break the window
+            names = []
+        per_row = 2 if len(names) > 3 else 3  # four boxes in a row would make the Invoice panel too wide
+        for i, name in enumerate(reversed(names)):  # fastest first, as on the rate sheet
+            cb = QCheckBox(name)
+            cb.setChecked(speed_key(name) in offered)
+            cb.toggled.connect(self._invoice_speeds_changed)
+            self.inv_speed_boxes[name] = cb
+            self.inv_speeds_grid.addWidget(cb, i // per_row, i % per_row)
+        if not names:
+            self.inv_speeds_grid.addWidget(QLabel("(none on the rate sheet)"), 0, 0)
+        self._place_output_cols()  # more or fewer speeds: the panels may fit in a row now, or no longer
+
+    def _invoice_speeds_changed(self, _=None):
+        """The speeds ticked are saved straight away. Speeds of other rate sheets stay as they were. With one
+        speed ticked the invoice bills that speed alone; with none, the speed chosen under Order."""
+        from ..rates import speed_key
+        here = {speed_key(n) for n in self.inv_speed_boxes}
+        keep = [x for x in self.s.invoice_speeds if speed_key(x) not in here]
+        self._set_opt("invoice_speeds", keep + [n for n, cb in self.inv_speed_boxes.items() if cb.isChecked()])
         self._refresh_outputs()
 
+    def _open_run_sheets_folder(self):
+        """Opens the run sheets folder, making it first if needed (it is made with the first run sheet)."""
+        folder = runsheets_folder(self.s)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "Could not open the folder", str(e))
+            return
+        open_path(folder)
+
+    def lock_pdfs(self):
+        """File → Lock finished PDFs: a copy of each PDF picked, with its fields flattened so the values can no
+        longer be changed ('<name> (locked).pdf' next to it). Only PDFs this app made that still have fields
+        are locked."""
+        from ..fill import has_fields, is_generated, lock_pdf
+        start = self.s.output_dir or str(Path.home() / "Documents")
+        files, _ = QFileDialog.getOpenFileNames(self, "Lock finished PDFs", start, "PDF files (*.pdf)")
+        if not files:
+            return
+        made, skipped, no_fields, failed = [], [], [], []
+        for f in map(Path, files):
+            if not is_generated(f):
+                skipped.append(f.name)
+                continue
+            try:
+                if not has_fields(f):  # flattened when saved, or a locked copy: nothing to lock
+                    no_fields.append(f.name)
+                    continue
+                made.append(lock_pdf(f))
+            except Exception as e:
+                failed.append(f"{f.name}: {e}")
+        copies = "1 locked copy" if len(made) == 1 else f"{len(made)} locked copies"
+        lines = [f"Saved {copies} next to the originals."] if made else []
+        if skipped:
+            lines.append("Not made by this app, so left alone:\n  " + "\n  ".join(skipped))
+        if no_fields:
+            lines.append("Already locked or flattened (no fields), so left alone:\n  " + "\n  ".join(no_fields))
+        if failed:
+            lines.append("Could not be locked (is it open in a PDF viewer?):\n  " + "\n  ".join(failed))
+        QMessageBox.information(self, "Lock finished PDFs", "\n\n".join(lines))
+
     def _invoice_parties_changed(self, n: int):
-        """A number typed here stays; set back to the number of ticked attorneys, it follows them again."""
-        self.cur.parties = 0 if n == self.cur.form_count() else n
+        """A number typed here stays; set back to the number of ticked attorneys, it follows them again. It
+        applies to the other days on the same invoice too."""
+        from ..batch import group_attorneys
+        group = self._invoice_group()
+        ticked = max(1, len(group_attorneys(group))) if len(group) > 1 else self.cur.form_count()
+        for job in group:
+            job.parties = 0 if n == ticked else n
         self._refresh_outputs()
 
     def open_records(self):

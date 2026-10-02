@@ -5,9 +5,16 @@ Forms (Settings.form_choice):
   "clean"    - the app's re-typeset form with named fields and extra lines
   "original" - the 1999 scan with fields added on top
 
-Also helpers that the MOFR, invoices and run sheets share: writing form fields (set_text), file names
-(output_name, safe_filename, unique_path) and saving (save_output, which labels every PDF the app
-makes so it is never read back as an input).
+Lines the UCS form or the original has no field for (forms/*_map.py OVERLAYS: the signature lines, and on the
+original also the fax lines, the date of agreement and the case name's second and third lines) get a text
+field added, so every value can still be changed in a PDF viewer. A signature picture takes the place of the
+reporter's signature field there.
+
+Also helpers that the MOFR, invoices and run sheets share: writing form fields (set_text) and adding new
+ones (add_text_field), file names (output_name, safe_filename, unique_path) and saving (save_output, which
+labels every PDF the app makes so it is never read back as an input, and adds the "Lock fields" button of
+add_lock_button unless the PDF is flattened). lock_pdf saves a copy with the fields flattened
+(File → Lock finished PDFs).
 """
 from __future__ import annotations
 
@@ -164,6 +171,88 @@ def set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
     w.update()
 
 
+def add_text_field(page: pymupdf.Page, name: str, rect, text: str = "", fs: float = 0, font: str = "Helv",
+                   color=(0, 0, 0), multiline: bool = False, right: bool = False) -> pymupdf.Widget:
+    """Adds a text field holding `text` at `rect`, so the value can still be changed in a PDF viewer.
+    fs: the font size (0 = automatic); font: "Helv", "TiRo" or "Cour" (fields can't be bold); right: right-aligned."""
+    w = pymupdf.Widget()
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w.field_name = name
+    w.rect = pymupdf.Rect(rect)
+    w.field_value = text
+    w.text_font = font
+    w.text_fontsize = fs
+    w.text_color = color
+    w.border_width = 0
+    if multiline:
+        w.field_flags = pymupdf.PDF_TX_FIELD_IS_MULTILINE
+    w = page.add_widget(w)
+    if right:  # /Q 2: right-aligned (Widget has no property for it)
+        page.parent.xref_set_key(w.xref, "Q", "2")
+        w.update()
+    return w
+
+
+LOCK_BUTTON = "DjinnIt lock"  # name of the "Lock fields" button (see add_lock_button)
+# Acrobat can flatten the page (and drop the button, a non-printing field); Adobe Reader may not, so there
+# the fields are made read-only and the button hidden. Viewers without JavaScript ignore the button.
+LOCK_JS = f"""try {{ this.flattenPages(0, this.numPages - 1, 2); }} catch (e) {{
+  for (var i = 0; i < this.numFields; i++) {{
+    var f = this.getField(this.getNthFieldName(i));
+    if (f && f.name != "{LOCK_BUTTON}") f.readonly = true;
+  }}
+  var b = this.getField("{LOCK_BUTTON}");
+  if (b) b.display = display.hidden;
+}}"""
+
+
+def add_lock_button(doc: pymupdf.Document) -> None:
+    """Adds a small "Lock fields" button (not printed) at the top right of page 1 of a PDF with fields:
+    clicking it in Adobe Acrobat or Reader locks the values typed in. Does nothing without fields."""
+    if not any(True for page in doc for _ in page.widgets()):
+        return
+    page = doc[0]
+    r = page.rect
+    w = pymupdf.Widget()
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_BUTTON
+    w.field_flags = pymupdf.PDF_BTN_FIELD_IS_PUSHBUTTON
+    w.field_name = LOCK_BUTTON
+    w.field_label = "Locks the fields so they can't be changed (Adobe Acrobat or Reader; not printed)"
+    w.rect = pymupdf.Rect(r.x1 - 84, r.y0 + 6, r.x1 - 12, r.y0 + 22)  # the forms leave this corner blank
+    w.button_caption = "Lock fields"
+    w.text_font = "Helv"
+    w.text_fontsize = 8
+    w.text_color = (0.29, 0.25, 0.56)  # MuPDF draws no dark fill behind a caption: dark text on light
+    w.fill_color = (0.93, 0.92, 0.97)
+    w.border_color = (0.29, 0.25, 0.56)
+    w.border_width = 1
+    w.field_display = 2  # shown on screen, not printed
+    w.script = LOCK_JS
+    page.add_widget(w)
+
+
+def has_fields(path: Path) -> bool:
+    """True when a PDF has fields to lock (the Lock fields button doesn't count): False for one already
+    flattened or locked."""
+    with pymupdf.open(path) as doc:
+        return any(w.field_name != LOCK_BUTTON for page in doc for w in page.widgets())
+
+
+def lock_pdf(path: Path) -> Path:
+    """Saves a copy of a PDF with its fields flattened into the page (they can no longer be changed) as
+    '<name> (locked).pdf' next to it, never overwriting; returns the copy's path. The original is kept."""
+    path = Path(path)
+    with pymupdf.open(path) as doc:
+        for page in doc:
+            buttons = [w.xref for w in page.widgets() if w.field_name == LOCK_BUTTON]
+            for xref in buttons:
+                page.delete_widget(page.load_widget(xref))
+        doc.bake()
+        out = unique_path(path.with_name(f"{path.stem} (locked){path.suffix}"))
+        doc.save(out, garbage=3, deflate=True)
+    return out
+
+
 def set_check(w: pymupdf.Widget, on: bool) -> None:
     """Ticks or clears a checkbox field."""
     w.field_value = w.on_state() if on else "Off"
@@ -197,7 +286,8 @@ def _fill_clean(doc: pymupdf.Document, v: dict) -> None:
 
 def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
     """Fills a form whose field names are mapped to our keys (forms/*_map.py). Its boxes are text
-    fields, so a ticked one gets an "X"; lines it lacks (signatures etc.) are printed as overlays.
+    fields, so a ticked one gets an "X"; lines it has no field for (fmap.OVERLAYS: signatures etc.) get a text
+    field added, blank ones too, so a value can be typed in later.
     case_fs: the largest font size for the case name."""
     page = doc[0]
     # the original's fields are named "Text-<id>"; fields not in the map end up under None and are skipped
@@ -226,11 +316,8 @@ def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
         set_text(w, str(val), fixed.get(key))
     for key, rect in fmap.OVERLAYS.items():
         text = str(v.get(key) or "")
-        if not text:
-            continue
         r = pymupdf.Rect(rect)
-        fs = fixed.get(key) or fit_size(text, r, max_fs=10)
-        page.insert_text((r.x0 + 2, r.y1 - 2.5), text, fontname=FIELD_FONT, fontsize=fs, color=(0, 0, 0))
+        add_text_field(page, key, r, text, (fixed.get(key) or fit_size(text, r, max_fs=10)) if text else 0)
 
 
 def safe_filename(s: str) -> str:
@@ -290,11 +377,13 @@ def mark(doc: pymupdf.Document, kind: str) -> None:
 
 
 def save_output(doc: pymupdf.Document, kind: str, path: Path, flatten: bool = False) -> Path:
-    """Saves a PDF this app made: labels it (see mark), optionally flattens the fields, never overwrites
-    (adds " (2)" etc.), closes it and returns where it went."""
+    """Saves a PDF this app made: labels it (see mark), flattens the fields or else adds the "Lock fields"
+    button (see add_lock_button), never overwrites (adds " (2)" etc.), closes it and returns where it went."""
     mark(doc, kind)
     if flatten:
         doc.bake()
+    else:
+        add_lock_button(doc)
     path.parent.mkdir(parents=True, exist_ok=True)
     out = unique_path(path)
     doc.save(out, garbage=3, deflate=True)
@@ -348,6 +437,9 @@ def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, date
             line = next(w.rect for w in doc[0].widgets() if w.field_name == "sig_reporter")
         else:
             line = pymupdf.Rect((original_map if choice == "original" else ucs_map).OVERLAYS["sig_reporter"])
+            page = doc[0]
+            for xref in [w.xref for w in page.widgets() if w.field_name == "sig_reporter"]:
+                page.delete_widget(page.load_widget(xref))  # no blank field over the signature picture
         signature.place(doc[0], line, s.signature())
     return save_output(doc, "agreement", out_dir / output_name(case, atty, s, dated), s.flatten)
 

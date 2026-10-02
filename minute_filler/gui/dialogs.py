@@ -1,20 +1,20 @@
-"""The app's dialogs: Settings, the "please clarify" questions before filling, the run sheet choice, the
-Ollama setup help (with a model download) and About."""
+"""The app's dialogs: Settings, the "please clarify" questions before filling, the run sheet choice, a job's
+invoice Extras and granular detail, the Ollama setup help (with a model download) and About."""
 from __future__ import annotations
 
 import re
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox,
-    QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+    QSpinBox, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from .. import __version__
 from ..models import Attorney, FIELD_LABELS
 from ..runsheet import runsheets_folder
-from ..settings import OUTPUTS, SPEEDS, Settings, reporter_key
+from ..settings import DETAIL_ITEMS, INDEX_RULES, OUTPUTS, SPEEDS, Settings, reporter_key
 from .widgets import check_row, open_path, open_url, refill_combo, rounded
 
 
@@ -161,6 +161,8 @@ class SettingsDialog(QDialog):
         self.o_per_email = QCheckBox("Write \"per email\" in the attorney signature spot")
         self.o_today = QCheckBox("Use today as the date of agreement")
         self.o_flat = QCheckBox("Flatten the PDF (fields no longer editable)")
+        self.o_flat.setToolTip("Applies to minute agreements, MOFRs and invoices. A flattened PDF has no\n"
+                               "fields left to change, so it gets no \"Lock fields\" button either.")
         self.o_open = QCheckBox("Open the PDF after saving")
         self.o_tc = QCheckBox("Convert ALL-CAPS names to Title Case")
         self.o_djinn = QCheckBox("Show the Djinn (working / done / stumped pictures)")
@@ -180,10 +182,10 @@ class SettingsDialog(QDialog):
         make.addStretch(1)
         f.addRow("Make by default", make)
         self.o_division = QComboBox()
-        self.o_division.addItem("Civil division", "civil")
+        self.o_division.addItem("Civil", "civil")
         self.o_division.addItem("Criminal", "criminal")
         self.o_division.setCurrentIndex(max(0, self.o_division.findData(settings.mofr_division)))
-        f.addRow("MOFR box", self.o_division)
+        f.addRow("MOFR case", self.o_division)
         self.o_instr = QCheckBox("Include the instructions page (UCS form page 2)")
         self.o_instr.setToolTip("Unticked: the saved PDF has the form page only.")
         self.o_instr.setChecked(settings.include_instructions)
@@ -220,15 +222,31 @@ class SettingsDialog(QDialog):
         intro.setObjectName("muted")
         intro.setWordWrap(True)
         f.addRow(intro)
-        self.i_choice = QCheckBox("List every speed below so the attorney can choose (a \"choice\" invoice)")
-        self.i_choice.setChecked(settings.invoice_choice)
-        f.addRow("", self.i_choice)
         from ..rates import speed_key
         offered = {speed_key(x) for x in settings.invoice_speeds}
         speeds, self.i_speeds = check_row({n: n for n in SPEEDS}, [n for n in SPEEDS if speed_key(n) in offered],
                                           spacing=12)
         speeds.addStretch(1)
         f.addRow("Speeds offered", speeds)
+        hint = QLabel("The attorney chooses one. With one ticked the invoice bills that speed alone; with none, "
+                      "the speed chosen under Order.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        f.addRow("", hint)
+        self.i_detail = QCheckBox("Show granular detail")
+        self.i_detail.setToolTip("The same box as Show granular detail in the Outputs box (Invoice panel)")
+        self.i_detail.setChecked(settings.invoice_detail)
+        f.addRow("", self.i_detail)
+        shows = QGridLayout()
+        shows.setHorizontalSpacing(16)
+        shows.setVerticalSpacing(6)
+        self.i_items: dict[str, QCheckBox] = {}
+        for i, (key, label) in enumerate(DETAIL_ITEMS.items()):
+            cb = QCheckBox(label)
+            cb.setChecked(key in settings.invoice_detail_items)
+            self.i_items[key] = cb
+            shows.addWidget(cb, i // 2, i % 2)
+        f.addRow("Granular detail shows", shows)
         self.i_email = QCheckBox("Each party also gets an e-mailed copy (Email column of the rate sheet)")
         self.i_email.setChecked(settings.invoice_include_email)
         f.addRow("", self.i_email)
@@ -244,6 +262,20 @@ class SettingsDialog(QDialog):
         idx.addWidget(self.i_threshold)
         idx.addStretch(1)
         f.addRow("", idx)
+        self.i_rule = QComboBox()
+        for key, label in INDEX_RULES.items():
+            self.i_rule.addItem(label, key)
+        self.i_rule.setCurrentIndex(max(0, self.i_rule.findData(settings.invoice_index_rule)))
+        self.i_rule.setToolTip("For an invoice covering several days. A job's Extras… can still turn the index\n"
+                               "on or off for that job.")
+        f.addRow("Index on several days", self.i_rule)
+        self.i_joint = QComboBox()
+        self.i_joint.addItem("One joint invoice for all the days of a case", True)
+        self.i_joint.addItem("An invoice for each day", False)
+        self.i_joint.setCurrentIndex(0 if settings.invoice_joint else 1)
+        self.i_joint.setToolTip("When several days of one case are generated together (Generate all).\n"
+                                "A single day selected and generated on its own is always billed alone.")
+        f.addRow("Days of one case", self.i_joint)
         self.i_turn: dict[str, QLineEdit] = {}
         for name in SPEEDS:
             e = QLineEdit(settings.turnaround(name))
@@ -536,10 +568,16 @@ class SettingsDialog(QDialog):
         s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
         s.mofr_division = self.o_division.currentData()
         s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
-        s.invoice_choice = self.i_choice.isChecked()
-        s.invoice_speeds = [k for k, cb in self.i_speeds.items() if cb.isChecked()] or ["Regular"]
+        s.invoice_detail = self.i_detail.isChecked()
+        # speeds named otherwise on a rate sheet (ticked in the Outputs box) have no box here: they stay
+        from ..rates import speed_key
+        keep = [x for x in s.invoice_speeds if speed_key(x) not in {speed_key(n) for n in SPEEDS}]
+        s.invoice_speeds = keep + [k for k, cb in self.i_speeds.items() if cb.isChecked()]
         s.invoice_include_email, s.invoice_include_index = self.i_email.isChecked(), self.i_index.isChecked()
         s.invoice_index_threshold = self.i_threshold.value()
+        s.invoice_index_rule = self.i_rule.currentData()
+        s.invoice_joint = bool(self.i_joint.currentData())
+        s.invoice_detail_items = [k for k, cb in self.i_items.items() if cb.isChecked()]
         s.invoice_turnaround = {k: e.text().strip() for k, e in self.i_turn.items()}
         s.invoice_payment_text = self.i_pay.toPlainText().strip()
         s.invoice_footer = self.i_footer.toPlainText().strip()
@@ -626,6 +664,116 @@ class ClarifyDialog(QDialog):
             return None
         return [self.att_list.item(i).data(Qt.UserRole) for i in range(self.att_list.count())
                 if self.att_list.item(i).checkState() == Qt.Checked]
+
+
+DEFAULTS_TIP = "Your defaults for every invoice are in Settings → Invoice."
+
+
+def _tip(text: str) -> QLabel:
+    """A small grey note."""
+    label = QLabel(text)
+    label.setObjectName("muted")
+    label.setWordWrap(True)
+    return label
+
+
+def _invoice_buttons(dlg: QDialog, on_defaults) -> QDialogButtonBox:
+    """OK, Cancel and "Use my defaults" (which calls on_defaults and closes the window with OK)."""
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    reset = buttons.addButton("Use my defaults", QDialogButtonBox.ResetRole)
+    reset.clicked.connect(on_defaults)
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    return buttons
+
+
+class InvoiceExtrasDialog(QDialog):
+    """What one job's invoice includes besides the original and the copies: an e-mailed copy for each party,
+    and the index (automatic, always or never). values() gives (email, index), None where it is as Settings
+    say."""
+
+    def __init__(self, email: bool | None, index: str | None, s: Settings, days: int = 1, parent=None):
+        """email, index: the job's choices (None = Settings); days: how many days the invoice covers."""
+        from PySide6.QtWidgets import QButtonGroup, QRadioButton
+        super().__init__(parent)
+        self.setWindowTitle("Invoice extras")
+        self.setMinimumWidth(460)
+        self.s = s
+        self.default_email = s.invoice_include_email
+        self.default_index = "auto" if s.invoice_include_index else "off"
+        lay = QVBoxLayout(self)
+        intro = QLabel("For this job's invoice" + (f" (all {days} days of the case)" if days > 1 else "") + ":")
+        intro.setObjectName("subtitle")
+        lay.addWidget(intro)
+        self.email = QCheckBox("An e-mailed copy for each party (Email column of the rate sheet)")
+        self.email.setChecked(self.default_email if email is None else email)
+        lay.addWidget(self.email)
+        lay.addSpacing(6)
+        lay.addWidget(QLabel("Index for each party and the judge:"))
+        rule = INDEX_RULES.get(s.invoice_index_rule, "").lower()
+        self.index = QButtonGroup(self)
+        for key, label in (("auto", f"Automatic: from {s.invoice_index_threshold} pages ({rule})"),
+                           ("on", "Always, however short the transcript"), ("off", "Never")):
+            rb = QRadioButton(label)
+            rb.setProperty("key", key)
+            rb.setChecked(key == (self.default_index if index is None else index))
+            self.index.addButton(rb)
+            lay.addWidget(rb)
+        lay.addSpacing(6)
+        lay.addWidget(_tip(DEFAULTS_TIP))
+        lay.addWidget(_invoice_buttons(self, self._defaults))
+
+    def _defaults(self):
+        """Use my defaults: the boxes as Settings say, and the window closes with OK (values() gives (None, None))."""
+        self.email.setChecked(self.default_email)
+        for b in self.index.buttons():
+            b.setChecked(b.property("key") == self.default_index)
+        self.accept()
+
+    def values(self) -> tuple[bool | None, str | None]:
+        """(email, index) for the job; None where the choice is the same as Settings, so it follows them."""
+        email = self.email.isChecked()
+        b = self.index.checkedButton()
+        index = b.property("key") if b else self.default_index
+        return (None if email == self.default_email else email), (None if index == self.default_index else index)
+
+
+class InvoiceShowDialog(QDialog):
+    """What "Show granular detail" adds to one job's invoice (keys of DETAIL_ITEMS). values() gives the list,
+    or None when it is the same as Settings."""
+
+    def __init__(self, items: list | None, s: Settings, parent=None):
+        """items: the job's choice (None = Settings.invoice_detail_items)."""
+        super().__init__(parent)
+        self.setWindowTitle("Granular detail")
+        self.setMinimumWidth(420)
+        self.default = list(s.invoice_detail_items)
+        lay = QVBoxLayout(self)
+        intro = QLabel("With \"Show granular detail\" ticked, this job's invoice also shows:")
+        intro.setObjectName("subtitle")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        chosen = self.default if items is None else items
+        self.boxes: dict[str, QCheckBox] = {}
+        for key, label in DETAIL_ITEMS.items():
+            cb = QCheckBox(label)
+            cb.setChecked(key in chosen)
+            self.boxes[key] = cb
+            lay.addWidget(cb)
+        lay.addSpacing(6)
+        lay.addWidget(_tip("\"Pages for each day\" is shown when the invoice covers several days. " + DEFAULTS_TIP))
+        lay.addWidget(_invoice_buttons(self, self._defaults))
+
+    def _defaults(self):
+        """Use my defaults: the boxes as Settings say, and the window closes with OK (values() gives None)."""
+        for key, cb in self.boxes.items():
+            cb.setChecked(key in self.default)
+        self.accept()
+
+    def values(self) -> list | None:
+        """The items ticked; None when they are the same as Settings, so the job follows them."""
+        items = [k for k, cb in self.boxes.items() if cb.isChecked()]
+        return None if set(items) == set(self.default) else items
 
 
 class RunSheetDialog(QDialog):

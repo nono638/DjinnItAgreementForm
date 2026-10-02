@@ -4,7 +4,7 @@ Several of the form's own field names don't match the label they sit on, so each
 its position on the page:
   "1" is the court blank, "Court" is the county blank, "FirmAddress" is Name of Attorney/Party,
   "Address3" is the Firm/Address line and "Address4" the line under it.
-The form has no fax lines. The two signature spots are printed as text (OVERLAYS).
+The form has no fax lines. The two signature spots get text fields added by fill.py (OVERLAYS).
 """
 
 WIDGETS = {

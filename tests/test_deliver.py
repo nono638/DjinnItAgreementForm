@@ -1,4 +1,6 @@
-"""Generating the chosen outputs: agreements, MOFR and invoices (transcripts only), and their records."""
+"""Generating the chosen outputs: agreements, MOFR and invoices (transcripts only), and their records; also
+settings files from versions 3 and 4 brought up to date (the invoice speeds, and the old "offer every speed"
+box, invoice_choice, now decided by the speeds ticked alone)."""
 from pathlib import Path
 
 import pytest
@@ -77,12 +79,30 @@ def test_generate_without_pages_refuses_an_invoice(s, tmp_path):
 
 
 def test_settings_v3_upgrade(tmp_path):
-    """A version 3 settings file loads as version 4: unknown outputs are dropped and the invoice defaults kick in."""
+    """A version 3 settings file loads as the current version: unknown outputs are dropped and the invoice
+    defaults kick in."""
     import json
     s = Settings()
     s.path.write_text(json.dumps({"settings_version": 3, "outputs": ["agreement", "bogus", "mofr"],
                                   "invoice_speeds": "Regular"}), encoding="utf-8")
     loaded = Settings.load()
-    assert loaded.outputs == ["agreement", "mofr"] and loaded.settings_version == 4
-    assert loaded.invoice_speeds == ["Regular", "Expedited", "Daily"]  # wrong type keeps the default
+    assert loaded.outputs == ["agreement", "mofr"] and loaded.settings_version == Settings.settings_version
+    assert loaded.invoice_speeds == ["Regular", "Expedited"]  # wrong type keeps the default
     assert loaded.turnaround("Expedite") == "1 week from receipt of payment."
+    assert loaded.invoice_detail is False  # invoices show the amounts only, unless asked for detail
+
+
+def test_settings_v4_offer_every_speed_off(tmp_path):
+    """Version 4 had an "offer every speed" box; off, invoices billed the speed chosen under Order. That is now
+    no speed ticked (not the default speed, which would bill an Expedited job at the Regular price)."""
+    import json
+    s = Settings()
+    s.path.write_text(json.dumps({"settings_version": 4, "invoice_choice": False, "default_delivery": "Regular",
+                                  "invoice_speeds": ["Regular", "Expedited", "Daily"]}), encoding="utf-8")
+    loaded = Settings.load()
+    assert loaded.invoice_speeds == []
+    from minute_filler.invoice_calc import quotes_for
+    assert [q.speed for q in quotes_for(10, 1, loaded.sheet(), loaded, "Expedited")] == ["Expedite"]
+    s.path.write_text(json.dumps({"settings_version": 4, "invoice_choice": True, "invoice_speeds": []}),
+                      encoding="utf-8")
+    assert Settings.load().invoice_speeds == []  # none ticked: the job's own speed (see invoice_calc.offered)

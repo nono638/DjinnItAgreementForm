@@ -36,6 +36,9 @@ def no_ollama(request, monkeypatch):
 def qt():
     """PySide6's QtWidgets with a QApplication, drawn off screen (the test is skipped without PySide6)."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    fonts = os.path.join(os.environ.get("WINDIR", ""), "Fonts")
+    if os.path.isdir(fonts):  # the real fonts, so text is measured as on screen (see the layout tests)
+        os.environ.setdefault("QT_QPA_FONTDIR", fonts)
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     return QtWidgets

@@ -32,6 +32,10 @@ QLabel#title { font-size: 16pt; font-weight: 600; }
 QLabel#subtitle, QLabel#muted { color: {muted}; }
 QLabel#section { font-size: 11pt; font-weight: 700; color: {card_title}; }
 QLabel#fieldLabel { color: {muted}; }
+QCheckBox#outputHead { font-weight: 700; color: {card_title}; }
+QFrame#outputPanel { background: {drop_bg}; border: 1px solid {border}; border-radius: 8px; }
+QFrame#outputRule { background: {border}; border: none; }
+QCheckBox:disabled, QLabel:disabled, QComboBox:disabled, QSpinBox:disabled { color: {muted}; }
 QLabel#kpiValue { font-size: 17pt; font-weight: 700; }
 QLabel#kpiValue[tone="ok"] { color: {ok}; }
 QLabel#kpiValue[tone="warn"] { color: {review}; }

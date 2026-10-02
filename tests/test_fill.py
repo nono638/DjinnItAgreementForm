@@ -1,9 +1,10 @@
-"""Fills each form variant (UCS, clean, original) and checks the values that land in the PDF; also the file
-names, the short caption, and older settings files upgraded to the new form defaults."""
+"""Fills each form variant (UCS, clean, original) and checks the values that land in the PDF, including the
+fields added on lines a form has none for (signatures, fax) and the "Lock fields" button; also the file names,
+the short caption, and older settings files upgraded to the new form defaults."""
 import pymupdf
 import pytest
 
-from minute_filler.fill import fill_all, short_caption
+from minute_filler.fill import LOCK_BUTTON, fill_all, short_caption
 from minute_filler.forms import original_map
 from minute_filler.models import Attorney, CaseInfo
 from minute_filler.settings import Profile, Settings
@@ -66,8 +67,9 @@ def test_original_form(case, settings, tmp_path):
     assert by_key["proc_trial"] == "X"
     assert by_key["rate"] == "$3.30"
     assert by_key["atty_name"] == "Sam Advocate"
-    text = page.get_text()
-    assert "per email" in text and "Pat Reporter" in text  # stamped overlays
+    # lines the original has no field for get one added, so they can be changed too
+    assert f["sig_attorney"] == "per email" and f["sig_reporter"] == "Pat Reporter"
+    assert f["rep_fax"] == "" and LOCK_BUTTON in f
 
 
 def test_per_email_off(case, settings, tmp_path):
@@ -96,8 +98,8 @@ def test_ucs_form_is_default(case, settings, tmp_path):
     assert by_key["atty_firm"] == "Counsel & Counsel"
     assert by_key["atty_address_1"] == "100 Main Avenue, Anytown, New York 10000"
     assert by_key["rep_name"] == "Pat Reporter"
-    text = doc[0].get_text()
-    assert "per email" in text  # printed on the attorney signature line
+    sig = {w.field_name: w.field_value for w in doc[0].widgets() if w.field_name.startswith("sig_")}
+    assert sig == {"sig_attorney": "per email", "sig_reporter": "Pat Reporter"}  # fields added on the lines
     settings.include_instructions = False
     assert pymupdf.open(fill_all(case, settings, tmp_path / "x")[0]).page_count == 1
 

@@ -295,3 +295,13 @@ def test_auto_version_bump_asks_github(tmp_path, monkeypatch):
     (tmp_path / "dist" / "installer").mkdir(parents=True)
     (tmp_path / "dist" / "installer" / "DjinnItAgreementForm-Setup-1.2.1.exe").write_text("")
     assert bv.released("1.2.1")
+
+
+def test_settings_ok_keeps_speeds_named_otherwise_on_a_rate_sheet(qt):
+    """A speed of the user's own rate sheet, ticked in the Outputs box, has no box in Settings → Invoice:
+    saving the Settings must not untick it."""
+    from minute_filler.gui.dialogs import SettingsDialog
+    s = pat_settings()
+    s.invoice_speeds = ["Regular", "2-Day Rush Plus"]
+    SettingsDialog(s, None).accept()
+    assert s.invoice_speeds == ["2-Day Rush Plus", "Regular"]

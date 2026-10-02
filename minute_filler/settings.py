@@ -1,4 +1,10 @@
-"""Persistent user settings stored as JSON in %APPDATA%\\DjinnItAgreementForm."""
+"""Persistent user settings stored as JSON in %APPDATA%\\DjinnItAgreementForm.
+
+Settings holds every choice (the defaults are what a new user gets) and load() brings older files up to date.
+The tables here name the choices the window and the Settings dialog offer: the outputs (OUTPUTS), the speeds
+(SPEEDS), which days of an invoice get an index (INDEX_RULES) and what "Show granular detail" adds to an
+invoice (DETAIL_ITEMS).
+"""
 from __future__ import annotations
 
 import json
@@ -63,6 +69,20 @@ INVOICE_PAYMENT_TEXT = (
     "The transcript is sent after the check clears.")
 RUNSHEET_FILENAME_PATTERN = "{month} {year} {index} {case} - Run Sheet"
 RUNSHEET_EXISTING = ("ask", "add", "new")  # when the case has a run sheet: ask / add to it / start a new one
+# Which days of an invoice get an index, when the job doesn't say: key -> what it means
+INDEX_RULES = {
+    "any": "If any day reaches the threshold, every day gets one",
+    "each": "Each day that reaches the threshold gets one",
+    "total": "Every day gets one when the days together reach the threshold",
+}
+# What "Show granular detail" can add to an invoice: key -> label
+DETAIL_ITEMS = {
+    "pages": "Page count",
+    "days": "Pages for each day",
+    "per_page": "Price per page",
+    "charges": "The charges in each amount",
+    "split": "The split between parties",
+}
 
 
 def reporter_key(initials: str) -> str:
@@ -105,7 +125,7 @@ class Settings:
     # Output
     form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
     include_instructions: bool = True  # keep the UCS form's instructions page (page 2)
-    settings_version: int = 4         # bumped when a default changes for existing users
+    settings_version: int = 6         # bumped when a default changes for existing users
     output_dir: str = ""              # blank = next to the first input file, else Documents\Minute Agreements
     filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
     batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
@@ -116,11 +136,15 @@ class Settings:
     mofr_filename_pattern: str = MOFR_FILENAME_PATTERN
 
     # Invoices (made from transcripts only: they need the page count)
-    invoice_choice: bool = True       # list every offered speed so the attorney can choose
-    invoice_speeds: list = field(default_factory=lambda: ["Regular", "Expedited", "Daily"])
+    # the speeds an invoice lists so the attorney can choose (one alone: a single-speed invoice)
+    invoice_speeds: list = field(default_factory=lambda: ["Regular", "Expedited"])
+    invoice_detail: bool = False      # "Show granular detail": also show what invoice_detail_items lists
     invoice_include_email: bool = True  # each party also gets an e-mailed copy (Email column of the rate sheet)
     invoice_include_index: bool = True  # long transcripts get an index (Index column), plus one for the judge
-    invoice_index_threshold: int = 50
+    invoice_index_threshold: int = 50  # pages from which an index is charged (see invoice_index_rule)
+    invoice_index_rule: str = "any"   # one of INDEX_RULES: which days of a several-day invoice get an index
+    invoice_joint: bool = True        # Generate all bills the days of one case on one invoice (False: one per day)
+    invoice_detail_items: list = field(default_factory=lambda: list(DETAIL_ITEMS))  # what granular detail adds
     invoice_turnaround: dict = field(default_factory=lambda: dict(INVOICE_TURNAROUND))
     invoice_payment_text: str = INVOICE_PAYMENT_TEXT
     invoice_footer: str = INVOICE_FOOTER
@@ -235,12 +259,17 @@ class Settings:
                 s.filename_pattern = FILENAME_PATTERN
         # v4 added outputs; unknown ones are dropped. Lists and tables keep only entries of the right kind.
         s.outputs = [o for o in s.outputs if isinstance(o, str) and o in OUTPUTS]
-        s.invoice_speeds = [x for x in s.invoice_speeds if isinstance(x, str)] or cls().invoice_speeds
+        s.invoice_speeds = [x for x in s.invoice_speeds if isinstance(x, str)]  # none: the job's own speed
+        if data.get("invoice_choice") is False:  # v5: "offer every speed" off billed the speed chosen under
+            s.invoice_speeds = []                 # Order alone, which is what no speed ticked does now
         s.invoice_turnaround = {k: v for k, v in s.invoice_turnaround.items()
                                 if isinstance(k, str) and isinstance(v, str)}
         s.invoice_index_threshold = max(1, s.invoice_index_threshold)
         s.reporters = {reporter_key(k): v for k, v in s.reporters.items()
                        if isinstance(k, str) and isinstance(v, str) and reporter_key(k)}
+        if s.invoice_index_rule not in INDEX_RULES:
+            s.invoice_index_rule = "any"
+        s.invoice_detail_items = [k for k in s.invoice_detail_items if isinstance(k, str) and k in DETAIL_ITEMS]
         if s.runsheet_existing not in RUNSHEET_EXISTING:
             s.runsheet_existing = "ask"
         s.settings_version = cls.settings_version

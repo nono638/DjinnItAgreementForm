@@ -17,8 +17,9 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 - **Rate sheets.** Pick your price list (private, city, …) and delivery speed from dropdowns. The rate, delivery checkbox and estimated delivery date follow automatically.
 - **One form per attorney.** Tick several attorneys to get a separate PDF for each.
 - **Batches.** Drop many documents, or a whole folder, at once. Documents about the same case and date are combined, so each order gets one form.
-- **Choose what to make:** tick *Minute agreement*, *MOFR*, *Invoice* and/or *Run sheet* at the bottom of the window. Your choice is remembered.
-- **Invoices from transcripts.** Drop a transcript PDF and the invoice is priced from its page count and your rate sheet: one original, a copy (and e-mailed copy) for each ordering party, and an index for long transcripts, split between the parties. By default it lists Regular, Expedited and Daily so the attorney can choose ("choice" invoice), with your turnaround times and payment instructions (Settings → Invoice). Invoices need a transcript, because the page count is what's billed.
+- **Choose what to make:** the **Outputs** box at the bottom of the window has a column for each of *Minute agreement*, *Invoice*, *MOFR* and *Run sheet*. Tick the ones to make; each column holds that output's own options (the form and "per email" for the agreement, the speeds offered for the invoice, and so on). Your choices are remembered.
+- **Fix it afterwards.** The PDFs stay fillable: every value the app typed in, invoice amounts included, is a field you can still change in a PDF viewer, and a blank one can be typed into. When it's final, click **Lock fields** at the top of the page in Adobe Acrobat or Reader (the button isn't printed), or use **File → Lock finished PDFs** to save a locked copy.
+- **Invoices from transcripts.** Drop a transcript PDF and the invoice is priced from its page count and your rate sheet: one original, a copy (and e-mailed copy) for each ordering party, and an index for long transcripts, split between the parties. It lists the speeds you tick (Regular and Expedited by default) so the attorney can choose, with your turnaround times and payment instructions (Settings → Invoice). Like most reporters' invoices it shows only each speed's amount; tick *Show granular detail* to add the page count, the pages of each day, the price per page and the charges that make up each amount. Several days of one case get **one joint invoice** with the grand total. Invoices need a transcript, because the page count is what's billed.
 - **Run sheets for shared trials.** When reporters take turns, each puts their initials at the foot of the pages they write. The app reads them and keeps the trial's run sheet in Excel: a row per take with the date, reporter, pages written, start and end page and the witness who took the stand. Filter by reporter for their total pages; the *By Reporter* sheet adds them up.
 - **Records and dashboard.** Every file made is logged. **Records** (Ctrl+R) shows your invoices with totals billed, paid and outstanding, filtered by year, month, firm or status, broken down by firm and by month. Tick **Paid** when an invoice is paid, and say which speed they chose. Export a report (HTML), an Excel workbook or CSV files at any time.
 - **Three agreement forms to choose from:** the court's own fillable UCS form (the default), a clean, re-typeset version of it (with room for a long case name, signature/date fields, fax and email), or the original 1999 scan.
@@ -44,11 +45,17 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
    - Each field has a badge showing where its value came from: **regex** (found in the document), **AI**, **default** (your settings), **derived** (calculated), or **you**.
    - Amber fields are guesses. A ▾ button lists other candidates.
 3. **Pick the rate sheet and speed**, then tick the attorney(s) who ordered.
-4. **Tick what to make** (minute agreement, MOFR, invoice, run sheet), then **Generate** (Ctrl+Enter). The PDFs are saved next to your document, or to the folder chosen in Settings, and open automatically; the run sheet is kept in its own folder (see Run sheets).
+4. **Tick what to make** in the Outputs box (minute agreement, invoice, MOFR, run sheet) and check each one's options, then **Generate** (Ctrl+Enter). The PDFs are saved next to your document, or to the folder chosen in Settings, and open automatically; the run sheet is kept in its own folder (see Run sheets).
 
 ## Invoices and records
 
-An invoice can be made when one of the job's inputs is a **transcript PDF**: its pages are billed (you can change the number in *Est. number of pages*). The word index printed after a transcript (Min-U-Script) is not counted. Several transcripts in one job, such as the days of a trial, are added up. A title that runs over two pages ("Title continues on next page") is read to its end, so the attorneys listed on the second page are found too. One invoice is made for each ticked attorney, numbered 2026-0001, 2026-0002, … (the format is in Settings → Invoice). The footer shows the prices before you generate, and lets you change the number of ordering parties or bill a single speed instead of offering every speed.
+An invoice can be made when one of the job's inputs is a **transcript PDF**: its pages are billed (you can change the number in *Est. number of pages*). The word index printed after a transcript (Min-U-Script) is not counted. Several transcripts in one job, such as the days of a trial, are added up. A title that runs over two pages ("Title continues on next page") is read to its end, so the attorneys listed on the second page are found too. One invoice is made for each ticked attorney, numbered 2026-0001, 2026-0002, … (the format is in Settings → Invoice). The *Invoice* panel of the Outputs box shows the prices before you generate. There you tick the speeds to offer (tick one to bill that speed alone; with none ticked, the speed chosen under Order is billed), change the number of ordering parties, and choose *Show granular detail*. Two buttons change this job's invoice only (your defaults for every invoice are in Settings → Invoice):
+- **Extras…**: the e-mailed copy for each party (some attorneys skip it to save money), and the index: automatic, always (for a short transcript too) or never.
+- **Customize…**: what granular detail shows: the page count, the pages of each day, the price per page, the charges in each amount and the split between the parties.
+
+**Several days of one case.** When you generate the days of a case together (*Generate all*), they share **one invoice** for each ordering attorney: every date is listed, and the amount is the grand total. The agreements and MOFRs are still made one per day. The *Prices* line of the Invoice panel says when *Generate all* will put the day shown on such an invoice (only ticked days are). A day once invoiced is not billed again by *Generate all*, even when you tick it again; new documents for it make it billable again. Select a single day and *Generate this job* to bill that day alone, or choose *An invoice for each day* in Settings → Invoice. The index follows a rule you can change there too: by default, once any day reaches the threshold (50 pages), every day gets an index; it can also be each day on its own, or the days' pages together.
+
+Without granular detail the invoice lists each speed with its turnaround and the amount due, and nothing else. With it, the invoice also shows the number of pages, the price per page, the charges that make up each amount (as in the table below) and how it is split between the parties. Either way the amounts, the invoice number and date, *Bill to* and the case details are fields, so you can correct them in a PDF viewer.
 
 The price of each speed, per page of the transcript, is:
 
@@ -57,7 +64,7 @@ The price of each speed, per page of the transcript, is:
 | Original | Original rate, once (shared between the parties) |
 | Copy | Copy rate, for each party |
 | E-mailed copy | Email rate, for each party (optional) |
-| Index | Index rate, for each party, from 50 pages (optional) |
+| Index | Index rate, for each party, from 50 pages (optional; the threshold and the rule for several days are in Settings → Invoice) |
 | Judge's index | Index rate, once, with the indexes |
 
 Each party pays the total divided by the number of parties.
@@ -72,7 +79,7 @@ Prefer a spreadsheet? **File → Save the invoice spreadsheet template** gives y
 
 ## MOFR
 
-The Minute Order Form/Receipt gets the reporter's parts only: county, Civil/Criminal (Settings → Options), title, your name and location, index number, part, judge, dates, total copies, the type of order and the page count. The judge's, counsel's, clerk's and auditor's sections are left blank. On a civil form the printed "PEOPLE V" is covered, so the full caption fits.
+The Minute Order Form/Receipt gets the reporter's parts only: county, Civil/Criminal (*Case* in the MOFR column of the Outputs box), title, your name and location, index number, part, judge, dates, total copies, the type of order and the page count. The judge's, counsel's, clerk's and auditor's sections are left blank. On a civil form the printed "PEOPLE V" is covered, so the full caption fits.
 
 The djinn in the drop zone shows what's happening: working while documents are read, smiling when the form is ready, and stumped when something required is missing. If you'd rather not see him, turn him off in Settings → Options.
 
@@ -88,7 +95,7 @@ When several reporters share a trial, each one writes their initials at the foot
 - **Title pages alone** show as half a take in *Day's Take* (Note: *title page only*), as on a hand-kept run sheet. The *By Reporter* totals don't count them as a take, but do count their pages.
 - The weekday, take counts and page numbers are formulas (the *Don't write here* columns; the first page of a transcript is written as a number), so rows you type in or correct are counted too. Filter the Reporter column to see one reporter's rows; the total of the pages shown is at the top. The **By Reporter** sheet totals each reporter's takes and pages.
 
-**One run sheet per trial.** Before adding, the app looks for the case's run sheet in the run sheets folder (*Documents\DjinnIt Run Sheets*, Settings → Run sheet) and next to the transcript. It's the case's when it has the same **index number**, or the same **case name**: a trial can have several index numbers that are billed together. It then asks whether to add the takes to it or start a new one (or, if you prefer, always adds or always starts a new one). Takes already on the run sheet are not added twice, and an unchanged run sheet isn't saved again. New takes go in date and page order; rows already there keep their place, and what you typed on them (notes, formulas, extra columns) is kept. If the run sheet is open in Excel, nothing is made until you close it, so trying again never makes a second invoice.
+**One run sheet per trial.** Before adding, the app looks for the case's run sheet in the run sheets folder (*Documents\DjinnIt Run Sheets*, Settings → Run sheet) and next to the transcript. It's the case's when it has the same **index number**, or the same **case name**: a trial can have several index numbers that are billed together. It then asks whether to add the takes to it or start a new one (or, if you prefer, always adds or always starts a new one: *If one exists* in the Run sheet column of the Outputs box). Takes already on the run sheet are not added twice, and an unchanged run sheet isn't saved again. New takes go in date and page order; rows already there keep their place, and what you typed on them (notes, formulas, extra columns) is kept. If the run sheet is open in Excel, nothing is made until you close it, so trying again never makes a second invoice.
 
 A run sheet made elsewhere, such as one downloaded from Google Sheets as .xlsx, can be added to as well. It needs Date, Reporter and Pages columns. New rows go at its end (or on a row you typed in ahead for that day) with its own formulas copied down, and a copy of the file is kept first ("… (before DjinnIt).xlsx").
 
@@ -192,9 +199,9 @@ Never change the `AppId` in `installer/DjinnItAgreementForm.iss`; Windows uses i
 | Optional local AI pass, validated against the source text | `extract_llm.py` |
 | Merge candidates, apply defaults and rate sheet, derive dates and pages | `merge.py`, `rates.py` |
 | Sort documents into jobs by case and date, fill a whole batch | `batch.py` |
-| Fill the chosen form, one PDF per attorney | `fill.py`, `forms/` |
+| Fill the chosen form, one PDF per attorney; fields for typed values, the Lock fields button, locked copies | `fill.py`, `forms/` |
 | Fill the MOFR | `mofr.py`, `forms/mofr_map.py` |
-| Price and draw invoices | `invoice_calc.py`, `invoice.py` |
+| Price and draw invoices (values as fields) | `invoice_calc.py`, `invoice.py` |
 | Read who wrote which pages, keep the run sheet | `takes.py`, `runsheet.py` |
 | Make the chosen outputs and record them | `deliver.py`, `records.py` |
 | PySide6 interface | `gui/` |

@@ -9,8 +9,8 @@ they are the user's own business records and never leave the computer.
   invoices  one row per invoice, with the amount of each speed offered and whether it was paid
 
 An invoice's "billed" amount is what it was paid at once paid, else the price of the first speed it
-offers: the job's own speed, or on a choice invoice the cheapest (the attorney picks; Regular is what they
-owe at the least). Void ones count 0.
+offers: the job's own speed, or on a choice invoice the first (slowest, cheapest) of the speeds it offers
+(the attorney picks; that is what they owe at the least). Void ones count 0.
 """
 from __future__ import annotations
 
@@ -105,10 +105,12 @@ class Invoice:
 
     @property
     def paid(self) -> Decimal:
+        """What was paid: the amount paid once the invoice is paid, else 0."""
         return money(self.amount_paid) if self.status == "paid" else Decimal("0.00")
 
     @property
     def outstanding(self) -> Decimal:
+        """What is still owed: the billed amount while the invoice is open, else 0."""
         return self.billed if self.status == "open" else Decimal("0.00")
 
     def offered_text(self) -> str:

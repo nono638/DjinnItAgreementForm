@@ -4,11 +4,16 @@ Two documents belong to the same job when they are about the same case - the sam
 index number or, when one of them has no index number, a matching caption - and
 share a date of proceedings. A transcript and the invoice for it therefore make
 one job, while two days of the same trial make two (unless
-Settings.batch_combine_dates is on).
+Settings.batch_combine_dates is on). The days of one case still share one invoice
+(see invoice_groups and joint_invoice), unless Settings.invoice_joint is off.
+
+fill_jobs makes the outputs of every job (Generate all). A day once invoiced
+(Job.invoiced) is not billed again until a new document is added to it.
 """
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -21,7 +26,7 @@ from .invoice import InvoiceOpts
 from .ingest import IMAGE_EXT, Ingested, ingest_file
 from .log import error as log_error, log
 from .merge import merge, refresh_delivery_date, refresh_rate
-from .models import CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_REGEX, SRC_USER, to_int
+from .models import Attorney, CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_REGEX, SRC_USER, to_int
 from .runsheet import NO_RUNSHEET, RunSheetOpts, matches, name_rows, read_info, rows_from, transcript_pages
 from .settings import OUTPUTS, Settings
 
@@ -123,11 +128,15 @@ class Job:
     proc_touched: bool = False   # the user changed the proceeding types / attorneys,
     att_touched: bool = False    # so later extractions must not overwrite them
     batch: bool = False          # put together by group()
-    include: bool = True         # ticked for "Fill all"
+    include: bool = True         # ticked for "Generate all"
     saved: list[Path] = field(default_factory=list)
     error: str = ""
+    invoiced: bool = False       # an invoice covering this day was made: Generate all must not bill it again
     parties: int = 0             # ordering parties on the invoice; 0 = the number of ticked attorneys
-    invoice_choice: bool | None = None  # list every speed on the invoice; None = the setting
+    # The invoice's own choices (Extras and Customize); None = as Settings say.
+    invoice_email: bool | None = None  # an e-mailed copy for each party
+    invoice_index: str | None = None   # the index: "auto", "on" or "off"
+    invoice_show: list | None = None   # what granular detail shows (keys of settings.DETAIL_ITEMS)
     runsheet_to: str | None = None  # the run sheet to add to; "" = a new one; None = as Settings say
     runsheet_group: int | None = None  # jobs of one case asked about together: they share the run sheet made
 
@@ -146,6 +155,7 @@ class Job:
                 or (self.docs[0].ing.name if self.docs else "New job"))
 
     def missing(self) -> list[str]:
+        """The keys of the required fields (models.REQUIRED_KEYS) that are still blank."""
         return self.case.missing_required()
 
     def no_attorney_chosen(self) -> bool:
@@ -155,7 +165,8 @@ class Job:
         return bool(real) and not any(a.checked for a in self.case.attorneys)
 
     def problems(self) -> list[str]:
-        out = [FIELD_LABELS[k] + " is missing" for k in self.missing()]
+        """What to check before the forms are made: "Index Number is missing", "no attorney is ticked"."""
+        out =[FIELD_LABELS[k] + " is missing" for k in self.missing()]
         if self.no_attorney_chosen():
             out.append("no attorney is ticked")
         return out
@@ -199,9 +210,27 @@ class Job:
         pages = self.transcript_pages()
         return to_int(self.case.get("est_pages"), pages) if pages else 0
 
+    def invoice_days(self) -> list[tuple[str, int]]:
+        """(date, pages) of each day billed, earliest first: a line per day of the transcripts (volumes of one
+        day added up), or one line with the job's dates and all the pages when there is one day, the Pages
+        field was typed in, or a transcript has no date (its day isn't known). Empty without a transcript."""
+        pages = self.invoice_pages()
+        if not pages:
+            return []
+        by_day: dict[date | None, int] = {}
+        for d in self.transcripts():
+            day = self._day_of(d)
+            by_day[day] = by_day.get(day, 0) + transcript_pages(d.ing)
+        typed = self.case.fields["est_pages"].source == SRC_USER
+        if len(by_day) < 2 or typed or None in by_day:
+            return [(self.case.get("dates"), pages)]
+        return [(f"{d.month}/{d.day}/{d.year}", n) for d, n in sorted(by_day.items())]
+
     def invoice_opts(self) -> InvoiceOpts:
-        """The invoice's pages, ordering parties (the ticked attorneys unless set) and speed choice."""
-        return InvoiceOpts(self.invoice_pages(), self.parties or self.form_count(), self.invoice_choice)
+        """The invoice's pages (of each day), ordering parties (the ticked attorneys unless set) and the
+        job's own Extras and granular detail choices."""
+        return InvoiceOpts(self.invoice_pages(), self.parties or self.form_count(), days=self.invoice_days(),
+                           email=self.invoice_email, index=self.invoice_index, show=self.invoice_show)
 
     def output_problems(self, outputs) -> list[str]:
         """What stops the chosen outputs: missing fields for the agreement or MOFR, or no transcript for an
@@ -214,14 +243,20 @@ class Job:
         return out
 
     def makeable(self, outputs) -> list[str]:
-        """The outputs this job can have: all of them, less the invoice and the run sheet when there is no
-        transcript."""
-        return [o for o in outputs if o not in ("invoice", "runsheet") or self.transcript_pages()]
+        """The outputs this job can have: all of them, less the run sheet when there is no transcript and the
+        invoice when there are no pages to bill (no transcript, or the Pages field says 0)."""
+        return [o for o in outputs if not (o == "runsheet" and not self.transcript_pages())
+                and not (o == "invoice" and not self.invoice_pages())]
+
+    def left_out_reason(self) -> str:
+        """Why makeable() left something out: no transcript, or (with one, only the invoice) no pages to bill."""
+        return "the Pages field says 0" if self.transcript_pages() else "no transcript PDF among the inputs"
 
     def file_count(self, outputs) -> int:
-        """How many files generate() will make for this job."""
-        per = {"agreement": self.form_count(), "mofr": 1, "invoice": self.form_count(), "runsheet": 1}
-        return sum(per[o] for o in self.makeable(outputs))
+        """How many agreements and MOFRs generate() makes for this job (files_to_make counts the invoices and
+        run sheets, which the days of a case share)."""
+        per = {"agreement": self.form_count(), "mofr": 1}
+        return sum(per.get(o, 0) for o in outputs)
 
 
 def make_doc(ing: Ingested, regex: Extraction, s: Settings, path: str = "") -> Doc:
@@ -292,11 +327,17 @@ def group(docs: list[Doc], s: Settings, jobs: list[Job] | None = None) -> list[J
                 job.docs += other.docs
                 job.proc_touched |= other.proc_touched
                 job.att_touched |= other.att_touched
+                # the user's invoice and run sheet choices of either job are kept
+                job.parties = job.parties or other.parties
+                for name in ("invoice_email", "invoice_index", "invoice_show", "runsheet_to"):
+                    if getattr(job, name) is None:
+                        setattr(job, name, getattr(other, name))
                 jobs.remove(other)
         else:
             job = Job()
             jobs.append(job)
         job.docs.append(doc)
+        job.invoiced = False  # a new document may mean new pages to bill
         if job not in changed:
             changed.append(job)
 
@@ -387,24 +428,91 @@ def input_folders(job: Job) -> list[Path]:
     return list(dict.fromkeys(Path(d.path).parent for d in job.docs if d.path))
 
 
+def _first_day(job: Job) -> tuple:
+    """The job's earliest date as a sort key; undated jobs last."""
+    days = sorted((d for _, _, d in find_dates(job.case.get("dates"))), key=_date_key)
+    return _date_key(days[0]) if days else (9999,)
+
+
+def invoice_groups(jobs: list[Job], s: Settings) -> list[list[Job]]:
+    """The jobs that share an invoice, earliest day first. With Settings.invoice_joint, every day of one case
+    (the same index number, or a matching caption); otherwise each job alone. Jobs without a transcript have
+    no invoice and are left out."""
+    billable = [j for j in jobs if j.invoice_pages()]
+    if not s.invoice_joint:
+        return [[j] for j in billable]
+    groups: list[list[Job]] = []
+    for job in billable:
+        i = ident(job.case)
+        home = next((g for g in groups if i and any(same_case(i, ident(k.case)) for k in g)), None) if i else None
+        if home is None:
+            groups.append([job])
+        else:
+            home.append(job)
+    for g in groups:
+        g.sort(key=_first_day)
+    return groups
+
+
+def group_attorneys(group: list[Job]) -> list[Attorney]:
+    """The attorneys ticked on any day of the group, each once (see Attorney.key)."""
+    out, seen = [], set()
+    for job in group:
+        for a in job.case.attorneys:
+            if a.checked and a.key() not in seen:
+                seen.add(a.key())
+                out.append(a)
+    return out
+
+
+def joint_invoice(group: list[Job]) -> tuple[CaseInfo, InvoiceOpts]:
+    """The case and choices for one invoice covering a group of days (see invoice_groups): the first day's
+    case with every date and every attorney ticked on any day, and the pages of each day. Each of the
+    Extras, the granular choices and the parties comes from the earliest day that has one of its own, so a
+    choice isn't lost when an earlier day joins the group."""
+    first = group[0]
+    if len(group) == 1:
+        return first.case, first.invoice_opts()
+    case = deepcopy(first.case)
+    days = [d for job in group for d in job.invoice_days()]
+    case.set("dates", ", ".join(day for day, _ in days if day), case.fields["dates"].source)
+    case.attorneys = [deepcopy(a) for a in group_attorneys(group)]
+    opts = first.invoice_opts()
+    opts.days, opts.pages = days, sum(n for _, n in days)
+
+    def own(name: str):
+        return next((getattr(j, name) for j in group if getattr(j, name) is not None), None)
+
+    opts.email, opts.index, opts.show = own("invoice_email"), own("invoice_index"), own("invoice_show")
+    opts.parties = next((j.parties for j in group if j.parties), 0) or max(1, len(case.attorneys))
+    return case, opts
+
+
 def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
               batch: list[Job] | None = None, outputs: list[str] | None = None) -> list[Path]:
     """Makes the outputs (default: Settings.outputs) of every job; problems are recorded in job.error
     instead of stopping the batch. A job without a transcript gets no invoice or run sheet (noted in job.error).
-    `batch` is the whole batch when only some of its jobs are filled: jobs for several days of one
-    case get the date in their file names."""
+    A job already invoiced (Job.invoiced) is not billed again. `batch` is the whole batch when only some of
+    its jobs are filled: jobs for several days of one case get the date in their file names."""
     outputs = list(s.outputs if outputs is None else outputs)
     ledger = ledger_for(s)
     names = [j.name_key() for j in batch or jobs]
+    to_bill = [j for j in jobs if not j.invoiced]
+    joint = [g for g in invoice_groups(to_bill, s) if len(g) > 1] if "invoice" in outputs else []
+    in_joint = {id(j) for g in joint for j in g}  # these days are billed together, after the loop
+    steps = len(jobs) + len(joint)
     done: list[Path] = []
     started: list[Path] = []  # run sheets started by this batch: the other days of the trial go on them too
     made_by_group: dict[int, Path] = {}  # the run sheet of each case the window asked about (Job.runsheet_group)
     for i, job in enumerate(jobs):
         if progress:
-            progress(i, len(jobs), job.title())
+            progress(i, steps, job.title())
         sheet = None
         try:
             want = job.makeable(outputs)
+            billed_elsewhere = job.invoiced or id(job) in in_joint  # billed before, or on the joint invoice
+            if billed_elsewhere:
+                want = [o for o in want if o != "invoice"]
             sheet = job.runsheet_opts(s) if "runsheet" in want else None
             if sheet and job.runsheet_group in made_by_group:
                 sheet.target = str(made_by_group[job.runsheet_group])
@@ -413,8 +521,10 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             job.saved = generate(job.case, s, out_dir_for(job, s), want, job.invoice_opts(), ledger,
                                  dated=names.count(job.name_key()) > 1, runsheet=sheet,
                                  folders=input_folders(job))
-            left_out = [OUTPUTS[o].lower() for o in outputs if o not in want]
-            job.error = f"no {' or '.join(left_out)}: no transcript PDF among the inputs" if left_out else ""
+            job.invoiced |= "invoice" in want
+            left_out = [OUTPUTS[o].lower() for o in outputs if o not in want
+                        and not (o == "invoice" and billed_elsewhere)]
+            job.error = f"no {' or '.join(left_out)}: {job.left_out_reason()}" if left_out else ""
             done += [p for p in job.saved if p not in done]  # one run sheet takes several days
         except Exception as e:
             job.saved = list(getattr(e, "made", []))  # what was made before the problem
@@ -426,6 +536,25 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
                 made_by_group.setdefault(job.runsheet_group, sheet.path)
             if sheet.created and sheet.path not in started:
                 started.append(sheet.path)
+    for k, g in enumerate(joint):  # one invoice for all the days of a case
+        first = g[0]
+        if progress:
+            progress(len(jobs) + k, steps, f"Invoice for {first.title()}")
+        try:
+            case, opts = joint_invoice(g)
+            made = generate(case, s, out_dir_for(first, s), ["invoice"], opts, ledger)
+            problem = ""
+        except Exception as e:
+            made = list(getattr(e, "made", []))
+            problem = f"invoice: {str(e) or type(e).__name__}"  # every day of it says so (plain text, for the window's message)
+            log_error("could not make the invoice for several days of a case", e)
+        for job in g:  # the invoice is each day's: none of them is billed again
+            job.saved += [p for p in made if p not in job.saved]
+            if problem:
+                job.error = "; ".join(x for x in (job.error, problem) if x)
+            else:
+                job.invoiced = True
+        done += made
     log.info("saved %d form(s) for %d job(s)", len(done), len(jobs))
     return done
 
@@ -441,9 +570,14 @@ def _started_for(job: Job, started: list[Path], s: Settings) -> str | None:
     return None
 
 
-def files_to_make(jobs: list[Job], outputs) -> int:
-    """How many files generate() will make for these jobs: the days of one case share a run sheet."""
-    count = sum(j.file_count([o for o in outputs if o != "runsheet"]) for j in jobs)
+def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
+    """How many files fill_jobs will make for these jobs: the days of one case share a run sheet, and (as
+    Settings.invoice_joint says) the invoices, one for each attorney ticked on any of its days. Days already
+    invoiced (Job.invoiced) get none."""
+    count = sum(j.file_count(outputs) for j in jobs)
+    if "invoice" in outputs:
+        groups = invoice_groups([j for j in jobs if not j.invoiced], s or Settings())
+        count += sum(g[0].form_count() if len(g) == 1 else max(1, len(group_attorneys(g))) for g in groups)
     cases: list[Ident] = []
     for j in jobs:
         if "runsheet" in j.makeable(outputs):
