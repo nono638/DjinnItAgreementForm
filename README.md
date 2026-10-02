@@ -198,7 +198,7 @@ Never change the `AppId` in `installer/DjinnItAgreementForm.iss`; Windows uses i
 | Rule-based extraction: index no., part, judge, caption, dates, appearances, e-mail signatures… | `extract_regex.py` |
 | Optional local AI pass, validated against the source text | `extract_llm.py` |
 | Merge candidates, apply defaults and rate sheet, derive dates and pages | `merge.py`, `rates.py` |
-| Sort documents into jobs by case and date, fill a whole batch | `batch.py` |
+| Sort documents into jobs by case and date, fill a whole batch, one invoice for the days of a case | `batch.py` |
 | Fill the chosen form, one PDF per attorney; fields for typed values, the Lock fields button, locked copies | `fill.py`, `forms/` |
 | Fill the MOFR | `mofr.py`, `forms/mofr_map.py` |
 | Price and draw invoices (values as fields) | `invoice_calc.py`, `invoice.py` |
