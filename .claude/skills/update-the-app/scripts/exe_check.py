@@ -4,12 +4,15 @@ After PyInstaller (from anywhere; PYTHONPATH is not needed):
     .venv/Scripts/python.exe .claude/skills/update-the-app/scripts/exe_check.py
 
 It uses a temporary APPDATA and home folder, so the user's own settings, records and run sheets are not
-touched (the folder is removed again when all is good). The inputs are two days of one trial (a transcript
-each, June 3 and June 4) and an e-mail about another case. Expected: the built version, no errors in the log;
-for each day a minute agreement, a MOFR and the run sheet, and one joint invoice for both days (listed under
-each day) that bills the 20 transcript pages and has its amounts as fields (and no "Lock fields" button, removed in 1.3.1); one
-run sheet with the 4 takes of each day. Exit code 1 if something is off.
+touched (the folder is removed again when all is good); its settings say the user is Pat Reporter (initials
+P.R.). The inputs are two days of one trial (a transcript each, June 3 and June 4, written by Pat and Dana
+Smith: PR and DS at the foot of the pages) and an e-mail about another case. Expected: the built version, no
+errors in the log; for each day a minute agreement, a MOFR and the run sheet, and one joint invoice for both
+days (listed under each day) that bills Pat's own 10 of the 20 transcript pages, for one party, and has its
+amounts as fields (and no "Lock fields" button, removed in 1.3.1); one run sheet with the 4 takes of each day.
+Exit code 1 if something is off.
 """
+import csv
 import json
 import os
 import shutil
@@ -25,6 +28,8 @@ from openpyxl import load_workbook  # noqa: E402
 
 from minute_filler import __version__  # noqa: E402
 from test_runsheet import transcript  # noqa: E402
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # (the report may hold arrows and ellipses)
 
 
 def kind(name: str) -> str:
@@ -42,6 +47,11 @@ transcript(src / "Transcript 6-3-2026 Roe v Poe.pdf")  # two reporters, a witnes
 transcript(src / "Transcript 6-4-2026 Roe v Poe.pdf", day="June 4, 2026")  # the next day: one invoice for both
 (src / "email.txt").write_text("From: someone@examplefirm.com\nSubject: minutes\n\nPlease send the minutes in "
                                "Smith v Jones, Index No. 712222/2024, 5/22/2026, Judge Lopez. About 40 pages.")
+# who the user is: the transcripts were written by two reporters, and only the user's pages are billed (without
+# the initials, the invoice would be held until Whose pages... says)
+settings = run / "appdata" / "DjinnItAgreementForm" / "settings.json"
+settings.parent.mkdir(parents=True)
+settings.write_text(json.dumps({"profile": {"name": "Pat Reporter", "initials": "P.R."}}), encoding="utf-8")
 env = dict(os.environ, APPDATA=str(run / "appdata"), USERPROFILE=str(run / "home"), HOME=str(run / "home"))
 problems = []
 try:
@@ -70,11 +80,19 @@ else:
     if not {"amount Regular", "amount Expedite"} <= widgets or "DjinnIt lock" in widgets:
         problems.append("the invoice should have its amounts as fields, and no Lock fields button")
 invoices_csv = run / "home" / "Documents" / "DjinnIt Records" / "invoices.csv"
-rows = invoices_csv.read_text(encoding="utf-8-sig").splitlines() if invoices_csv.exists() else []
-if len(rows) != 2:
-    problems.append(f"one invoice should be recorded, not {len(rows) - 1 if rows else 0}")
-elif ",20,1," not in rows[1] or '"6/3/2026, 6/4/2026"' not in rows[1]:
-    problems.append("the invoice should bill both days' 20 transcript pages (not the word index)")
+rows = []
+if invoices_csv.exists():
+    with open(invoices_csv, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+if len(rows) != 1:
+    problems.append(f"one invoice should be recorded, not {len(rows)}")
+else:
+    row = rows[0]
+    print("  invoice:", {k: row.get(k) for k in ("Pages", "Transcript pages", "Reporters", "Parties")})
+    if (row.get("Pages"), row.get("Transcript pages"), row.get("Parties")) != ("10", "20", "1") \
+            or row.get("Date(s) of proceeding") != "6/3/2026, 6/4/2026":
+        problems.append("the invoice should bill Pat's 10 of both days' 20 transcript pages (not the word index), "
+                        "for one party")
 sheets = list((run / "home" / "Documents" / "DjinnIt Run Sheets").glob("*.xlsx"))
 if sheets:
     ws = load_workbook(sheets[0])["Run Sheet"]

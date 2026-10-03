@@ -240,8 +240,9 @@ def same_name(a: str, b: str) -> bool:
 
 
 def runsheets_folder(s: Settings) -> Path:
-    """Where run sheets are kept: Settings.runsheet_dir, else Documents/DjinnIt Run Sheets."""
-    return Path(s.runsheet_dir) if s.runsheet_dir else Path.home() / "Documents" / "DjinnIt Run Sheets"
+    """Where run sheets are kept: the run sheet's folder under Settings -> Options -> Folders, else
+    Documents/DjinnIt Run Sheets (see Settings.folder_for)."""
+    return s.folder_for("runsheet")
 
 
 def read_info(path: Path) -> Found | None:

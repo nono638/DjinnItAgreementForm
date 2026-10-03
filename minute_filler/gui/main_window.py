@@ -1,8 +1,9 @@
 """Main window: drop zone, job list and paste box on the left, the current job's editable fields on the right,
 and the Outputs box at the bottom: the Generate buttons and a panel per output with its options (greyed out
 while the output is unticked). The Invoice panel's speeds, Extras... and Customize... set what the current
-job's invoice offers and shows, and Who ordered... which attorney ordered which pages of the day; with Generate
-all, the days of one case share one invoice per attorney (batch.joint_invoice).
+job's invoice offers and shows, Excerpts... which attorney ordered which pages of the day, and Whose pages...
+which pages of a transcript of several reporters are billed (the user's own, by default); with Generate all, the
+days of one case share one invoice per attorney (batch.joint_invoice).
 File -> Lock finished PDFs saves copies whose fields can no longer be changed.
 
 Documents are read, the AI is asked and batches are made on a thread pool (workers.Runner). Their results
@@ -10,11 +11,12 @@ are applied on the UI thread; the results of work started before "New job" are d
 from __future__ import annotations
 
 import re
+import textwrap
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
@@ -42,6 +44,8 @@ from .theme import apply_theme
 from .widgets import (ASSETS, open_path, open_url, plural, refill_combo, repolish, rounded, set_checks,
                       show_save_error)
 from .workers import Runner
+from . import zoom as zooming
+from .zoom import sized, z
 
 FILE_FILTER = ("Documents (*.pdf *.jpg *.jpeg *.png *.heic *.tif *.tiff *.bmp *.webp *.eml *.txt *.docx);;"
                "All files (*.*)")
@@ -51,8 +55,14 @@ ATT_FIELDS = [None, "name", "firm", "address", "phone", "fax", "email", "party",
 
 PARTIES_TIP = ("How many parties ordered: the original and the index are split between them,\n"
                "and each gets their own copy (normally the number of ticked attorneys)")
-WHO_TIP = ("Which attorney ticked on this day ordered which of its pages: pages ordered together\n"
-           "share the original and the index, and each attorney pays for their own copy")
+WHO_TIP = ("Excerpts: one attorney ordered the whole transcript and another only pages 20 to 40?\n"
+           "Set which attorney ticked on this day ordered which of its pages. Pages ordered together\n"
+           "share the original and the index, and each attorney pays for their own copy.")
+WHOSE_TIP = ("Several reporters wrote this transcript (the initials at the foot of the pages change).\n"
+             "The invoice bills your own pages; choose here to bill another reporter's or the whole transcript.")
+
+
+WARN_WIDTH = 72  # the longest line of a warning in the Invoice panel (characters; see MainWindow._warn)
 
 
 def _price_lines(firms) -> tuple[str, bool]:
@@ -86,10 +96,12 @@ def _price_lines(firms) -> tuple[str, bool]:
 
 def _billing_changed(job, copy) -> bool:
     """The job was given what changes its invoice while Generate all worked on its copy (made when the batch
-    started): other documents, another page count or other Who ordered... rows. What the batch billed is then
-    not all there is to bill."""
+    started): other documents, another page count, other Excerpts... rows or other pages that are the user's
+    (Whose pages..., or initials corrected under My info: as many pages, but not the same ones). What the batch
+    billed is then not all there is to bill."""
     return ([id(d) for d in job.docs] != [id(d) for d in copy.docs] or job.portions != copy.portions
-            or job.invoice_pages() != copy.invoice_pages())
+            or job.invoice_pages() != copy.invoice_pages() or job.page_basis != copy.page_basis
+            or job.front_owner != copy.front_owner or job.own != copy.own)
 
 
 def _reason(error: str, width: int = 160) -> str:
@@ -116,7 +128,7 @@ class FieldRow(QWidget):
         lay.setSpacing(6)
         if multiline:
             self.edit = QPlainTextEdit()
-            self.edit.setFixedHeight(58)
+            sized(self.edit, "setFixedHeight", 58)
             self.edit.textChanged.connect(self._changed)
         else:
             self.edit = QLineEdit()
@@ -128,11 +140,11 @@ class FieldRow(QWidget):
         self.alts.setText("▾")
         self.alts.setPopupMode(QToolButton.InstantPopup)
         self.alts.setMenu(QMenu(self.alts))
-        self.alts.setFixedWidth(28)
+        sized(self.alts, "setFixedWidth", 28)
         lay.addWidget(self.alts)
         self.badge = QLabel("")
         self.badge.setObjectName("badge")
-        self.badge.setFixedSize(58, 20)
+        sized(self.badge, "setFixedSize", 58, 20)
         self.badge.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.badge, 0, Qt.AlignTop if multiline else Qt.AlignVCenter)
 
@@ -196,7 +208,7 @@ class FieldRow(QWidget):
         self.on_edit(self.key)
 
 
-COMPACT_BELOW = 960  # before the window is shown: window height (px) under which the drop zone is small
+COMPACT_BELOW = 960  # before the window is shown: window height (px at 100 % zoom) under which the drop zone is small
 
 
 class DropZone(QFrame):
@@ -208,7 +220,7 @@ class DropZone(QFrame):
         self.setObjectName("drop")
         self.setAcceptDrops(True)
         self.on_files, self.on_text, self.on_image = on_files, on_text, on_image
-        self.setMinimumHeight(215)
+        self.setMinimumHeight(z(215))
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignCenter)
         self.icon = icon = QLabel("⭳")
@@ -234,7 +246,7 @@ class DropZone(QFrame):
         self.sub = sub
         b = QPushButton("Browse...")
         b.clicked.connect(on_browse)
-        b.setFixedWidth(120)
+        sized(b, "setFixedWidth", 120)
         for w in (icon, t, sub):
             lay.addWidget(w)
         lay.addSpacing(6)
@@ -243,12 +255,12 @@ class DropZone(QFrame):
     def set_mood(self, mood: str | None) -> None:
         """Shows the djinn: 'working', 'done' or 'stumped' (None hides him)."""
         self.wanted = mood
-        width, height = (150, 170) if self.compact else (300, 330)
+        width, height = (z(150), z(170)) if self.compact else (z(300), z(330))
         self.sub.setVisible(not self.compact)
         if mood is None:
             self.djinn.setVisible(False)
             self.icon.setVisible(not self.compact)
-            self.setMinimumHeight(110 if self.compact else 215)
+            self.setMinimumHeight(z(110) if self.compact else z(215))
             return
         self.icon.setVisible(False)
         self.djinn.setVisible(True)
@@ -257,10 +269,15 @@ class DropZone(QFrame):
             return
         self.mood = (mood, width)
         if (mood, width) not in self._pixmaps:
-            self._pixmaps[(mood, width)] = rounded(ASSETS / f"djinn_{mood}.jpg", width, 12)
+            self._pixmaps[(mood, width)] = rounded(ASSETS / f"djinn_{mood}.jpg", width, z(12))
         self.djinn.setPixmap(self._pixmaps[(mood, width)])
         self.djinn.setToolTip({"working": "The djinn is on it…", "done": "Ready to fill!",
                                "stumped": "Something needs your attention"}.get(mood, ""))
+
+    def rezoom(self) -> None:
+        """Shows the picture again at the new zoom's size."""
+        self.mood = None
+        self.set_mood(self.wanted)
 
     def set_compact(self, on: bool) -> None:
         """Switches to the small layout (on) or back: a smaller picture leaves room for the list of jobs, or
@@ -356,12 +373,18 @@ class MainWindow(QMainWindow):
         self._loading: set[str] = set()  # files being read right now (so a second drop doesn't add them twice)
 
         self.setWindowTitle("DjinnItAgreementForm")
-        self.setMinimumSize(1080, 720)
+        if zooming.zoom() != settings.zoom:  # (main() sets it before the style sheet is made)
+            zooming.set_zoom(settings.zoom)
+            apply_theme(app, settings.theme)
+        self._fit_minimum()
         self._build()
         if settings.window_geometry:
             self.restoreGeometry(QByteArray.fromBase64(settings.window_geometry.encode()))
         else:
-            self.resize(1320, 860)
+            self.resize(z(1320), z(860))
+        self._fit_screen()
+        self._wheel = 0  # Ctrl + wheel turned since the last zoom step (see eventFilter)
+        app.installEventFilter(self)  # Ctrl + the mouse wheel zooms, and the form follows its width (eventFilter)
         self._show_case()
         self._set_status("Drop a document to begin", "")
         QTimer.singleShot(50, self._startup)
@@ -400,7 +423,13 @@ class MainWindow(QMainWindow):
         on the right, the Outputs box (with the Generate buttons) at the bottom, the menu and the shortcuts."""
         central = QWidget()
         central.setObjectName("central")
-        self.setCentralWidget(central)
+        # On a small screen (or a large zoom) the whole window scrolls, rather than the Outputs box and the
+        # Generate buttons being pushed off the bottom of the screen
+        self.page_scroll = outer = QScrollArea()
+        outer.setWidgetResizable(True)
+        outer.setFrameShape(QFrame.NoFrame)
+        outer.setWidget(central)
+        self.setCentralWidget(outer)
         root = QVBoxLayout(central)
         root.setContentsMargins(18, 14, 18, 14)
         root.setSpacing(10)
@@ -459,7 +488,7 @@ class MainWindow(QMainWindow):
         self.job_list.itemChanged.connect(self._job_ticked)
         self.job_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.job_list.setTextElideMode(Qt.ElideRight)
-        self.job_list.setMinimumHeight(140)
+        sized(self.job_list, "setMinimumHeight", 140)
         self.job_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.job_list.customContextMenuRequested.connect(self._job_menu)
         ll.addWidget(self.job_list, 3)
@@ -467,8 +496,9 @@ class MainWindow(QMainWindow):
         lbl.setObjectName("fieldLabel")
         ll.addWidget(lbl)
         self.input_list = QListWidget()
-        self.input_list.setMinimumHeight(44)  # (a short window: room for the big djinn picture, see _size_drop)
-        self.input_list.setMaximumHeight(110)
+        # (a short window: room for the big djinn picture, see _size_drop)
+        sized(self.input_list, "setMinimumHeight", 44)
+        self.input_list.setMaximumHeight(z(110))
         self.input_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.input_list.customContextMenuRequested.connect(self._input_menu)
         ll.addWidget(self.input_list)
@@ -478,7 +508,7 @@ class MainWindow(QMainWindow):
         self.paste = QPlainTextEdit()
         self.paste.setPlaceholderText("e.g. \"Please send the minutes for Smith v. Jones, Index 712345/2024, "
                                       "before Justice Lopez on 9/14/2026, expedited…\"")
-        self.paste.setMinimumHeight(52)
+        sized(self.paste, "setMinimumHeight", 52)
         # it takes the room left over, but doesn't ask for any: otherwise the left column's scroll area counts
         # its preferred 190 px and shows a scroll bar in a window with room to spare
         self.paste.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
@@ -512,6 +542,8 @@ class MainWindow(QMainWindow):
         rl.setSpacing(12)
         scroll.setWidget(inner)
         split.addWidget(scroll)
+        self.form_scroll = scroll
+        self._pairs: list[tuple[QGridLayout, QWidget, QWidget]] = []  # the cards' two columns (see two_cols)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setSizes([360, 940])
@@ -534,14 +566,31 @@ class MainWindow(QMainWindow):
             lay.addLayout(f)
             return f
 
+        def two_cols(lay: QVBoxLayout) -> tuple[QVBoxLayout, QVBoxLayout]:
+            """Two columns side by side in a card, one above the other when the form is too narrow for both
+            (a small screen, Windows scaling or a zoom: see _place_pairs)."""
+            holder = QWidget()
+            g = QGridLayout(holder)
+            g.setContentsMargins(0, 0, 0, 0)
+            g.setHorizontalSpacing(18)
+            g.setVerticalSpacing(8)
+            wa, wb = QWidget(), QWidget()
+            cols = []
+            for w in (wa, wb):
+                v = QVBoxLayout(w)
+                v.setContentsMargins(0, 0, 0, 0)
+                cols.append(v)
+            g.addWidget(wa, 0, 0)  # side by side until _place_pairs measures the room
+            g.addWidget(wb, 0, 1)
+            g.setColumnStretch(0, 1)
+            g.setColumnStretch(1, 1)
+            lay.addWidget(holder)
+            self._pairs.append((g, wa, wb))
+            return cols[0], cols[1]
+
         # Case card: two columns
         c, cl = card("Case")
-        grid = QHBoxLayout()
-        grid.setSpacing(18)
-        colA, colB = QVBoxLayout(), QVBoxLayout()
-        grid.addLayout(colA, 1)
-        grid.addLayout(colB, 1)
-        cl.addLayout(grid)
+        colA, colB = two_cols(cl)
         fa, fb = form_in(colA), form_in(colB)
         for k in ("court", "county", "part"):
             row(fa, k)
@@ -568,12 +617,7 @@ class MainWindow(QMainWindow):
 
         # Order card
         c, cl = card("Order")
-        grid = QHBoxLayout()
-        grid.setSpacing(18)
-        colA, colB = QVBoxLayout(), QVBoxLayout()
-        grid.addLayout(colA, 1)
-        grid.addLayout(colB, 1)
-        cl.addLayout(grid)
+        colA, colB = two_cols(cl)
         fa, fb = form_in(colA), form_in(colB)
         # Rate sheet + speed pickers
         sheet_row = QHBoxLayout()
@@ -603,10 +647,12 @@ class MainWindow(QMainWindow):
         for k in ("rate", "copies", "est_pages"):
             row(fa, k)
         row(fb, "delivery_date")
-        quick = QHBoxLayout()
-        quick.setSpacing(4)
-        for label, days, months in (("Today", 0, 0), ("Tomorrow", 1, 0), ("1 week", 7, 0), ("2 weeks", 14, 0),
-                                    ("3 weeks", 21, 0), ("1 month", 0, 1)):
+        # three buttons a row: six in one row would make the Order card too wide for a small screen
+        quick = QGridLayout()
+        quick.setHorizontalSpacing(4)
+        quick.setVerticalSpacing(4)
+        for n, (label, days, months) in enumerate((("Today", 0, 0), ("Tomorrow", 1, 0), ("1 week", 7, 0),
+                                                   ("2 weeks", 14, 0), ("3 weeks", 21, 0), ("1 month", 0, 1))):
             b = QToolButton()
             b.setText(label)
             b.setObjectName("quick")
@@ -614,8 +660,8 @@ class MainWindow(QMainWindow):
             b.setToolTip(f"Estimated delivery {when}" + ("" if label in ("Today", "Tomorrow") else " - from today")
                          + "\n(a Saturday or Sunday becomes the Monday after)")
             b.clicked.connect(lambda _=False, d=days, m=months: self.rows["delivery_date"].choose(quick_date(d, m)))
-            quick.addWidget(b)
-        quick.addStretch(1)
+            quick.addWidget(b, n // 3, n % 3)
+        quick.setColumnStretch(3, 1)
         fb.addRow("", quick)
         row(fb, "agreement_date")
         self.rate_info = QLabel("")
@@ -637,8 +683,8 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setStretchLastSection(False)
         for i, w in enumerate([30, 140, 190, 230, 115, 105, 190, 170, 60]):
-            self.att.setColumnWidth(i, w)
-        self.att.setMinimumHeight(240)
+            sized(self.att, "setColumnWidth", i, w, keep=1)
+        sized(self.att, "setMinimumHeight", 240)
         self.att.itemChanged.connect(self._att_changed)
         cl.addWidget(self.att)
         br = QHBoxLayout()
@@ -759,11 +805,28 @@ class MainWindow(QMainWindow):
         parties = QHBoxLayout()
         parties.setSpacing(8)
         parties.addWidget(self.inv_parties)
-        self.inv_who = QPushButton("Who ordered…")
+        self.inv_who = QPushButton("Excerpts…")
         self.inv_who.clicked.connect(self._who_ordered)
         parties.addWidget(self.inv_who)
+        self.inv_who_note = QLabel("")  # why Excerpts... can't be used now, in a few words
+        self.inv_who_note.setObjectName("muted")
+        parties.addWidget(self.inv_who_note)
         parties.addStretch(1)
         inv.addRow("Parties:", parties)
+        # a transcript of several reporters: whose pages are billed (shown only for such a transcript)
+        self.inv_pages_row = QHBoxLayout()
+        self.inv_pages_row.setSpacing(8)
+        self.inv_pages_info = QLabel("")
+        self.inv_pages_info.setObjectName("muted")
+        self.inv_pages_row.addWidget(self.inv_pages_info)
+        self.inv_whose = QPushButton("Whose pages…")
+        self.inv_whose.setToolTip(WHOSE_TIP)
+        self.inv_whose.clicked.connect(lambda: self._whose_pages(self.cur))
+        self.inv_pages_row.addWidget(self.inv_whose)
+        self.inv_pages_row.addStretch(1)
+        inv.addRow("Billed:", self.inv_pages_row)
+        inv.setRowVisible(self.inv_pages_row, False)  # until a transcript of several reporters is loaded
+        self.inv_form = inv
 
         def with_button(w: QWidget, text: str, tip: str, slot) -> QHBoxLayout:
             """[widget] [button…] on one row."""
@@ -822,7 +885,7 @@ class MainWindow(QMainWindow):
         rs.addRow(self.rs_info)
         # under the options, not among them: the folder can be opened while Run sheet is unticked too
         self.rs_folder = QLabel('<a href="open">Open the run sheets folder</a>')
-        self.rs_folder.setToolTip("Opens the folder the run sheets are kept in (Settings → Run sheet)")
+        self.rs_folder.setToolTip("Opens the folder the run sheets are kept in (Settings → Options → Folders)")
         self.rs_folder.linkActivated.connect(lambda _: self._open_run_sheets_folder())
         col = self._output_cols[-1].layout()
         col.insertWidget(col.count() - 1, self.rs_folder)  # above the stretch
@@ -837,9 +900,11 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.fill)
         QShortcut(QKeySequence("Ctrl+Shift+Return"), self, activated=self.fill_all_jobs)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=self.open_records)
+        for keys, step in (("Ctrl++", 1), ("Ctrl+=", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):
+            QShortcut(QKeySequence(keys), self, activated=lambda s=step: self.zoom_step(s))
 
     def _build_menu(self):
-        """The File and Help menus."""
+        """The File, View (zoom) and Help menus."""
         from .dialogs import AboutDialog, FEEDBACK_URL
         mb = self.menuBar()
         m = mb.addMenu("&File")
@@ -855,6 +920,10 @@ class MainWindow(QMainWindow):
         m.addAction("&Lock finished PDFs (no more changes)…", self.lock_pdfs)
         m.addSeparator()
         m.addAction("E&xit", self.close)
+        m = mb.addMenu("&View")  # (the keys are the window's shortcuts: a menu shortcut would clash with them)
+        m.addAction("Zoom &in\tCtrl++", lambda: self.zoom_step(1))
+        m.addAction("Zoom &out\tCtrl+-", lambda: self.zoom_step(-1))
+        m.addAction("&Actual size\tCtrl+0", lambda: self.zoom_step(0))
         m = mb.addMenu("&Help")
         m.addAction("Set up the &AI helper (Ollama)…", self._ai_help)
         m.addAction("Send &feedback…", lambda: open_url(FEEDBACK_URL))
@@ -1183,8 +1252,8 @@ class MainWindow(QMainWindow):
         for w in (self.jobs_label, self.job_list, self.fill_all_btn):
             w.setVisible(multi)
         self._size_drop()
-        self.input_list.setMaximumHeight(72 if multi else 110)
-        self.paste.setMaximumHeight(64 if multi else 16777215)
+        self.input_list.setMaximumHeight(z(72) if multi else z(110))
+        self.paste.setMaximumHeight(z(64) if multi else 16777215)
         self.fill_btn.setText("Generate this job" if multi else "Generate")
         self.fill_btn.setObjectName("" if multi else "primary")
         repolish(self.fill_btn)
@@ -1377,7 +1446,7 @@ class MainWindow(QMainWindow):
 
     def _attorneys_edited(self):
         """A tick or an edit in the attorney table: the invoice's parties and the file counts follow, and so
-        do the Who ordered... rows when an attorney's name (or firm) was changed."""
+        do the Excerpts... rows when an attorney's name (or firm) was changed."""
         old, new = self.case.attorneys, self._read_attorneys()
         if len(old) == len(new):  # the same rows (none added or removed): the attorney of each row is the same
             keys = {a.key() for a in new}
@@ -1635,6 +1704,7 @@ class MainWindow(QMainWindow):
         outputs = self._without_unchecked_invoice(job, outputs)
         if not outputs:
             return
+        case = job.case  # (Whose pages... may have merged the job again)
         # Ask about required fields that are blank, and fields with competing values (only the case name
         # when neither the agreement nor the MOFR is made)
         questions = []
@@ -1680,7 +1750,7 @@ class MainWindow(QMainWindow):
         # the files are made from the job as it is now: an answer from the AI or a read that ended while a
         # question was on screen merged it again (and what is on screen with it)
         case = job.case
-        if "invoice" in outputs and job.portions_problem():  # (an attorney was unticked meanwhile)
+        if "invoice" in outputs and job.invoice_hold():  # (an attorney was unticked meanwhile)
             outputs = self._without_unchecked_invoice(job, outputs)
             if not outputs or job not in self.jobs:
                 return
@@ -1706,9 +1776,9 @@ class MainWindow(QMainWindow):
             for p in paths:
                 open_path(p)
         made = [p for p in paths if not (sheet and p == sheet.path)]
-        text = f"Saved {plural(len(made), 'file')}:\n\n" + "\n".join(p.name for p in made) + f"\n\nin {out_dir}" \
-            if made else ""
-        folders = [out_dir] if made else []
+        folders = list(dict.fromkeys(p.parent for p in made))  # an output may have a folder of its own
+        where = f"\n\nin {folders[0]}" if len(folders) == 1 else "\n\nin " + ", ".join(map(str, folders))
+        text = f"Saved {plural(len(made), 'file')}:\n\n" + "\n".join(p.name for p in made) + where if made else ""
         if sheet and sheet.path:
             text += ("\n\n" if text else "") + run_sheet_summary(sheet)
             folders.append(sheet.path.parent)
@@ -1718,18 +1788,29 @@ class MainWindow(QMainWindow):
         self._records_changed()
 
     def _without_unchecked_invoice(self, job: Job, outputs: list[str]) -> list[str]:
-        """The outputs to make, less the invoice when the day's Who ordered... rows need checking: asks whether
-        to make the others without it ([] = make nothing)."""
-        if "invoice" not in outputs or not job.portions_problem():
+        """The outputs to make, less the invoice when it is held (Job.invoice_hold): whose pages to bill is asked
+        first (Whose pages...); Excerpts... rows that need checking are not. Asks whether to make the others
+        without it ([] = make nothing)."""
+        if "invoice" in outputs and job.ownership_problem() and not job.portions_problem():
+            self._whose_pages(job, job.ownership_problem())
+            if job not in self.jobs or self._batch_running():
+                return []
+        if "invoice" not in outputs or not job.invoice_hold():
             return outputs
         others = [o for o in outputs if o != "invoice"]
-        why = (f"{job.portions_check()}.\n\nNo invoice is made for this day until you check it: open Who ordered… "
-               "in the Invoice panel and tick who ordered which pages, or choose \"Everyone ordered every page\".")
+        title = "Excerpts… needs checking" if job.portions_problem() else "Whose pages to bill"
+        if job.portions_problem():
+            why = (f"{job.portions_check()}.\n\nNo invoice is made for this day until you check it: open "
+                   "Excerpts… in the Invoice panel and tick who ordered which pages, or choose \"Everyone ordered "
+                   "every page\".")
+        else:
+            why = (f"{job.ownership_problem()[0].upper()}{job.ownership_problem()[1:]}.\n\nNo invoice is made "
+                   "for this job until you choose whose pages to bill (Whose pages… in the Invoice panel).")
         if not others:
-            QMessageBox.warning(self, "Who ordered… needs checking", why)
+            QMessageBox.warning(self, title, why)
             return []
-        if QMessageBox.question(self, "Who ordered… needs checking",
-                                why + "\n\nMake the other outputs without the invoice?") != QMessageBox.Yes:
+        if QMessageBox.question(self, title, why + "\n\nMake the other outputs without the invoice?") \
+                != QMessageBox.Yes:
             return []
         if job not in self.jobs or self._batch_running():
             return []
@@ -1770,6 +1851,13 @@ class MainWindow(QMainWindow):
         outputs = list(self.s.outputs)
         if not outputs:
             return
+        if "invoice" in outputs:  # whose pages to bill is asked now, once per job that needs it
+            for j in [j for j in chosen if j.ownership_problem() and not j.portions_problem()]:
+                if j in self.jobs:
+                    self._whose_pages(j, f"{j.title()}: {j.ownership_problem()}")
+                if self._batch_running():
+                    return
+            chosen = [j for j in chosen if j in self.jobs]
         gaps = [j for j in chosen if j.output_problems(outputs)]
         if gaps:
             box = QMessageBox(self)
@@ -1811,6 +1899,7 @@ class MainWindow(QMainWindow):
         # jobs and the settings: editing a job, an AI answer or a change in Settings can't reach files half made.
         copies = {id(j): replace(j, case=deepcopy(j.case), docs=list(j.docs), saved=[], error="",
                                  invoiced_keys=list(j.invoiced_keys), portions=deepcopy(j.portions),
+                                 page_basis=dict(j.page_basis), front_owner=dict(j.front_owner),
                                  runsheet_to=sheet_for.get(id(j), (None, None))[0],
                                  runsheet_group=sheet_for.get(id(j), (None, None))[1])
                   for j in self.jobs}
@@ -1862,7 +1951,7 @@ class MainWindow(QMainWindow):
                         "\n".join(f"•  {j.title()}: {_reason(j.error)}" for j in partial[:6])
             if changed:
                 text += (f"\n\n{len(changed)} job(s) changed while the files were made (a document was added, or "
-                         "the pages or Who ordered… changed), so they are still ticked: Generate all again to bill "
+                         "the pages or Excerpts… changed), so they are still ticked: Generate all again to bill "
                          "them as they are now:\n" + "\n".join(f"•  {j.title()}" for j in changed[:6]))
             self._saved_box("Batch finished", text, folders, "\n".join(str(p) for p in paths), warn=bool(failed))
             self._set_status(f"✓  Saved {len(paths)} file(s)", "warn" if failed else "ok")
@@ -1904,6 +1993,8 @@ class MainWindow(QMainWindow):
         refreshed and every job is merged and priced again."""
         dlg = SettingsDialog(self.s, self, first_run=first_run)
         if dlg.exec():
+            if self.s.zoom != zooming.zoom():
+                self.set_zoom(self.s.zoom)  # (the theme too)
             apply_theme(self.app, self.s.theme)
             self.per_email.setChecked(self.s.per_email)
             self.sign_rep.setChecked(self.s.sign_reporter)
@@ -1962,38 +2053,48 @@ class MainWindow(QMainWindow):
         job = self.cur
         group = self._invoice_group()
         case, opts = joint_invoice(group)
-        split = job.portions is not None  # Who ordered... decides this day's parties (or needs checking)
+        split = job.portions is not None  # Excerpts... decides this day's parties (or needs checking)
         check = job.portions_check()
         with QSignalBlocker(self.inv_parties):
             self.inv_parties.setValue(opts.parties)
         self.inv_parties.setEnabled(not split)
-        self.inv_parties.setToolTip("This day's pages are split between the attorneys under Who ordered…" if split
+        self.inv_parties.setToolTip("This day's pages are split between the attorneys under Excerpts…" if split
                                     else PARTIES_TIP)
         why = self._who_ordered_why(job)
         self.inv_who.setEnabled(not why or split)  # rows that need checking can always be opened, to fix them
-        self.inv_who.setText("⚠ Who ordered…" if check else "✓ Who ordered…" if split else "Who ordered…")
+        self.inv_who.setText("⚠ Excerpts…" if check else "✓ Excerpts…" if split else "Excerpts…")
         self.inv_who.setToolTip(check + "\n(click to check it)" if check else why or WHO_TIP)
+        self.inv_who_note.setText("" if not why or split or not job.docs else
+                                  "(tick 2 attorneys)" if "two attorneys" in why else
+                                  "(one day at a time)" if "several days" in why else "")
+        owned = self._show_whose_pages(job)
         with QSignalBlocker(self.inv_detail):
             self.inv_detail.setChecked(job.invoice_detail)  # this job's own (Generate this job uses it)
         self.inv_extras_info.setText(self._extras_text(opts))
         self.inv_info.setToolTip("")
-        if not job.invoice_pages():
+        if not job.invoice_pages() and not owned:
             if not job.docs:
                 self.inv_info.setText("")  # an empty job has nothing to warn about yet
             elif job.transcript_pages():
-                self.inv_info.setText("⚠ the Pages field says 0: no invoice for this job")
+                self._warn("⚠ the Pages field says 0: no invoice for this job")
             else:
-                self.inv_info.setText("⚠ no transcript PDF: no invoice for this job")
+                self._warn("⚠ no transcript PDF: no invoice for this job")
+            return
+        if owned:  # whose pages to bill isn't known: no prices until Whose pages... says
+            # (the reason names the file, which can be very long: it goes in the tooltip)
+            self.inv_info.setText("⚠ Choose whose pages to bill (Whose pages…)")
+            self.inv_info.setToolTip(f"{owned[0].upper()}{owned[1:]}\n\n"
+                                     "No invoice is made for this job until you say whose pages to bill.")
             return
         if check:  # no prices: nothing is billed for this day until the rows are checked
-            self.inv_info.setText(f"⚠ {check}")
-            self.inv_info.setToolTip("No invoice is made for this day until Who ordered… is checked:\n"
+            self._warn(f"⚠ {check}")
+            self.inv_info.setToolTip("No invoice is made for this day until Excerpts… is checked:\n"
                                      "tick who ordered which pages, or choose \"Everyone ordered every page\".")
             return
         from ..batch import group_problem
         held = group_problem(group)
         if held:  # nobody ticked on a day of the joint invoice: no prices until it says who ordered it
-            self.inv_info.setText(f"⚠ Generate all: no invoice for these {len(group)} days yet:\n{held}")
+            self._warn(f"⚠ Generate all: no invoice for these {len(group)} days yet:\n{held}")
             self.inv_info.setToolTip("Tick the attorneys who ordered that day's pages (in its attorney table);\n"
                                      "until then Generate all makes the other outputs but no invoice for the case.")
             return
@@ -2001,7 +2102,7 @@ class MainWindow(QMainWindow):
             from ..invoice import firm_invoices
             firms = firm_invoices(case, self.s, opts)
         except Exception as e:  # a broken rate sheet must not break the window
-            self.inv_info.setText(f"⚠ {e}")
+            self._warn(f"⚠ {e}")
             return
         prices, per_firm = _price_lines(firms)
         if len(group) > 1:
@@ -2013,50 +2114,99 @@ class MainWindow(QMainWindow):
         else:
             self.inv_info.setText(f"{opts.pages} pp." + ("\n" if per_firm else " · ") + prices)
 
+    def _warn(self, text: str) -> None:
+        """A warning in the Invoice panel's Prices row, its long lines broken (a file name too): a label is as
+        wide as its longest line, and a long one made the panel, and the window, wider than the screen."""
+        self.inv_info.setText("\n".join(textwrap.fill(line, WARN_WIDTH) for line in text.split("\n")))
+
+    def _show_whose_pages(self, job: Job) -> str:
+        """The Invoice panel's Billed row, shown for a transcript of several reporters: "Your pages: 65 of 153",
+        and the Whose pages... button. Returns why the invoice is held until Whose pages... says ("" when it
+        isn't)."""
+        shared = job.shared_transcripts()
+        held = job.ownership_problem()
+        self.inv_form.setRowVisible(self.inv_pages_row, bool(shared or held))
+        if not (shared or held):
+            return ""
+        whole = job.transcript_pages()
+        mine = all(job.page_basis.get(d.key(), "me") == "me" for d in job.transcripts())
+        if held:
+            text = "Whose pages?"
+        elif job.pages_typed():
+            text = f"the Pages field ({job.invoice_pages()}) of {whole}"
+        else:
+            text = f"{'Your' if mine else 'Chosen'} pages: {job.invoice_pages()} of {whole}"
+        self.inv_pages_info.setText(text)
+        self.inv_whose.setText("⚠ Whose pages…" if held else "Whose pages…")
+        self.inv_whose.setToolTip(held or WHOSE_TIP)
+        return held
+
+    def _whose_pages(self, job: Job, reason: str = "") -> bool:
+        """Whose pages…: which pages of the job's transcripts of several reporters (or of the one held, see
+        Job.ownership_problem) are billed. Returns True when OK was clicked and the job is still there. The job
+        is merged again, so the Pages field shows the pages billed."""
+        from .dialogs import PagesOwnerDialog
+        docs = [d for d in job.transcripts() if len(d.reporters()) > 1 or (
+            d.reporters() and job.page_basis.get(d.key(), "me") != "*" and not job.billed_pages_of(d))]
+        if not docs:
+            QMessageBox.information(self, "Whose pages", "The transcripts of this job have one reporter's pages "
+                                    "each (or no initials at all): they are billed in full.")
+            return False
+        dlg = PagesOwnerDialog([(d.key(), d.ing.name, d.owners()) for d in docs], set(job.own), job.page_basis,
+                               job.front_owner, reason, self)
+        if not dlg.exec() or not any(job is j for j in self.jobs):
+            return False
+        basis, front = dlg.values()
+        job.page_basis = {**job.page_basis, **basis}
+        job.front_owner = {**job.front_owner, **front}
+        self._remerge(job)  # the Pages field shows the pages billed
+        self._update_status()
+        return True
+
     def _who_ordered_why(self, job: Job) -> str:
-        """Why Who ordered… can't be used for this job ("" when it can): it needs one day with pages, and two
+        """Why Excerpts… can't be used for this job ("" when it can): it needs one day with pages, and two
         attorneys ticked on it to split them between."""
         return job.portions_unavailable()
 
     def _portion_attorneys(self, job: Job) -> list[Attorney]:
-        """The attorneys Who ordered… lists for a job: those ticked on that day, each once (an attorney ticked
+        """The attorneys Excerpts… lists for a job: those ticked on that day, each once (an attorney ticked
         only on another day of the invoice orders none of its pages)."""
         return [a for a in job.case.invoice_orderers() if a is not None]
 
     def _who_ordered(self):
-        """Who ordered…: which attorney ordered which pages of the day shown (Job.portions). Rows that need
+        """Excerpts…: which attorney ordered which pages of the day shown (Job.portions). Rows that need
         checking (Job.portions_problem) are shown again when they still end on the day's pages (else the window
         starts from everyone ordering every page), or can be cleared when the day can no longer be split."""
         from .dialogs import PortionsDialog
         job = self.cur
-        title = "Who ordered which pages"
+        title = "Excerpts"
         why = self._who_ordered_why(job)
         if why:
             if job.portions is None:
                 QMessageBox.information(self, title, why)
             elif QMessageBox.question(
-                    self, title, f"{why}\n\nThis day's pages were split under Who ordered… before, so no invoice is "
+                    self, title, f"{why}\n\nThis day's pages were split under Excerpts… before, so no invoice is "
                     "made for it until that is checked. Clear it, so that every attorney ticked on the day orders "
                     "every page?") == QMessageBox.Yes and any(job is j for j in self.jobs):
                 job.portions = None
             self._update_status()
             return
-        pages = job.invoice_pages()
+        pages = job.portion_pages()  # (every page of the day: a firm pays for the billed ones in its stretch)
         attorneys = self._portion_attorneys(job)
         keys = [a.key() for a in attorneys]
         # rows that no longer end on the day's pages start again from the default; ticks of attorneys no longer
         # ticked on the day are left out (a row left with none must be ticked again)
         rows = job.portions if job.portions is not None and job.portions_fit_pages() else None
-        dlg = PortionsDialog(attorneys, pages, rows, keys, self)
+        dlg = PortionsDialog(attorneys, pages, rows, keys, self, printed=job.printed_pages())
         accepted = dlg.exec()
         if not accepted:
             return
         if not any(job is j for j in self.jobs):  # joined with another job by a read that ended meanwhile
             QMessageBox.information(self, title, "This day was joined with another job while the window was open "
-                                    "(a document was read), so nothing was changed. Please open Who ordered… again.")
+                                    "(a document was read), so nothing was changed. Please open Excerpts… again.")
         elif dlg.values() is None:  # everyone ordered every page: right whatever changed meanwhile
             job.portions = None
-        elif job.invoice_pages() != pages or [a.key() for a in self._portion_attorneys(job)] != keys:
+        elif job.portion_pages() != pages or [a.key() for a in self._portion_attorneys(job)] != keys:
             QMessageBox.information(self, title, "The pages of this day, or the attorneys ticked on it, changed "
                                     "while the window was open, so nothing was changed. Please choose again.")
         else:
@@ -2065,12 +2215,12 @@ class MainWindow(QMainWindow):
 
     def _invoice_group(self, job: Job | None = None) -> list[Job]:
         """The days Generate all bills on one invoice with a job (default: the current one), as
-        Settings.invoice_joint says: the ticked jobs of its case not invoiced yet (and whose Who ordered... rows
+        Settings.invoice_joint says: the ticked jobs of its case not invoiced yet (and whose Excerpts... rows
         don't need checking: see batch.fill_jobs). Just the job itself when Generate all leaves it out."""
         from ..batch import invoice_groups
         cur = job or self.cur
         billed = [j for j in self.jobs if j.include and not j.invoiced and not j.is_empty()
-                  and not j.portions_problem()]
+                  and not j.invoice_hold()]
         if cur.invoice_pages() and cur in billed:
             for g in invoice_groups(billed, self.s):
                 if any(j is cur for j in g):
@@ -2121,7 +2271,7 @@ class MainWindow(QMainWindow):
         if len(getattr(self, "_output_cols", [])) < 4:  # still building the window
             return
         widths = [c.sizeHint().width() for c in self._output_cols]
-        room = self.width() - 36 - 32 - 8  # the window's and the box's margins
+        room = self.width() - 36 - 32 - 8 - z(10)  # the window's and the box's margins (and a scroll bar)
         per_row = 4 if sum(widths) + 10 * 3 <= room else 3
         if per_row == self._cols_per_row:
             return
@@ -2140,6 +2290,24 @@ class MainWindow(QMainWindow):
         for col in range(5):
             self.output_grid.setColumnStretch(col, 1 if col < per_row else 0)  # the panels share the width
 
+    def _place_pairs(self) -> None:
+        """Puts the two columns of the Case and Order cards side by side when the form has room for both, else
+        one above the other, so the form never needs scrolling sideways."""
+        scroll = getattr(self, "form_scroll", None)
+        if scroll is None:
+            return
+        room = scroll.viewport().width() - z(16) - z(32)  # the form's and the card's margins
+        for g, wa, wb in self._pairs:
+            side = wa.minimumSizeHint().width() + wb.minimumSizeHint().width() + 18 <= room
+            if (g.itemAtPosition(0, 1) is not None) == side and g.count() == 2:
+                continue
+            g.removeWidget(wa)
+            g.removeWidget(wb)
+            g.addWidget(wa, 0, 0)
+            g.addWidget(wb, 0, 1) if side else g.addWidget(wb, 1, 0)
+            g.setColumnStretch(0, 1)
+            g.setColumnStretch(1, 1 if side else 0)
+
     def _size_drop(self):
         """The drop zone shows the small picture for a batch (room for the list of jobs), and the big one when
         the left column has room for it above the inputs and the paste box. It is tried and measured, since the
@@ -2149,7 +2317,7 @@ class MainWindow(QMainWindow):
             return
         scroll = getattr(self, "left_scroll", None)
         if scroll is None or not scroll.isVisible():
-            self.drop.set_compact(self.height() < COMPACT_BELOW)
+            self.drop.set_compact(self.height() < z(COMPACT_BELOW))
             return
         self.drop.set_compact(False)
         left = scroll.widget()
@@ -2168,6 +2336,7 @@ class MainWindow(QMainWindow):
         """The Outputs columns follow the window's width, and the drop zone its height."""
         super().resizeEvent(e)
         self._place_output_cols()
+        self._place_pairs()
         if hasattr(self, "drop"):
             self._size_drop()
 
@@ -2175,6 +2344,7 @@ class MainWindow(QMainWindow):
         """When the window first shows, the drop zone is sized again once the window is laid out: measured
         earlier, the left column looks shorter than it is."""
         super().showEvent(e)
+        self._place_pairs()
         self._size_drop_later()
 
     def _fill_invoice_speeds(self):
@@ -2225,7 +2395,7 @@ class MainWindow(QMainWindow):
         longer be changed ('<name> (locked).pdf' next to it). Only PDFs this app made that still have fields
         are locked."""
         from ..fill import has_fields, is_generated, lock_pdf
-        start = self.s.output_dir or str(Path.home() / "Documents")
+        start = self.s.output_dirs.get("agreement") or self.s.output_dir or str(Path.home() / "Documents")
         files, _ = QFileDialog.getOpenFileNames(self, "Lock finished PDFs", start, "PDF files (*.pdf)")
         if not files:
             return
@@ -2302,6 +2472,81 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Could not save", str(e))
                 return
             open_path(Path(dest).parent)
+
+    # ------------------------------------------------------------- zoom and screen
+    def zoom_step(self, step: int) -> None:
+        """Zoom in (1), out (-1) or back to 100 % (0): View menu, Ctrl + / Ctrl - / Ctrl 0, Ctrl + wheel."""
+        now = zooming.zoom()
+        self.set_zoom(1.0 if step == 0 else now + step * zooming.STEP)
+
+    def set_zoom(self, f: float) -> None:
+        """Shows everything at zoom f (see zoom.py), saves it as the default and says so in the status line."""
+        f = zooming.set_zoom(f)
+        apply_theme(self.app, self.s.theme)
+        zooming.reapply()
+        self.drop.rezoom()
+        self._cols_per_row = 0  # lay the Outputs panels out again: they are wider or narrower now
+        self._place_output_cols()
+        self._place_pairs()
+        QTimer.singleShot(0, self._place_pairs)  # again once the new sizes are laid out
+        self._fit_minimum()
+        self._refresh_jobs()
+        self._set_opt("zoom", f)
+        self._toast(f"Zoom {round(f * 100)} %")
+
+    def _avail(self):
+        """The part of the window's screen not taken by the taskbar (logical pixels, after Windows scaling)."""
+        screen = self.screen() or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen else None
+
+    def _fit_minimum(self) -> None:
+        """The window's smallest size: 1080 x 720 at 100 % zoom, but never more than the screen has room for.
+        At 150 % Windows scaling a 1920 x 1080 screen is 1280 x 690 or so in Qt's pixels: a fixed 720 would put
+        the bottom of the window off the screen."""
+        avail = self._avail()
+        w, h = z(1080), z(720)
+        if avail is not None:
+            w, h = min(w, int(avail.width() * 0.95)), min(h, int(avail.height() * 0.9))
+        self.setMinimumSize(max(480, w), max(360, h))
+
+    def _fit_screen(self) -> None:
+        """Brings the window back within its screen: a size saved on a bigger screen (or at another scaling) is
+        made smaller, and a window off the screen is moved onto it."""
+        avail = self._avail()
+        if avail is None or self.isMaximized() or self.isFullScreen():
+            return
+        frame = self.frameGeometry()
+        extra_w, extra_h = frame.width() - self.width(), frame.height() - self.height()
+        w = min(self.width(), avail.width() - extra_w)
+        h = min(self.height(), avail.height() - extra_h)
+        if (w, h) != (self.width(), self.height()):
+            self.resize(max(w, self.minimumWidth()), max(h, self.minimumHeight()))
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), avail.x()), avail.right() - frame.width() + 1)
+        y = min(max(frame.y(), avail.y()), avail.bottom() - frame.height() + 1)
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(max(x, avail.x()), max(y, avail.y()))
+
+    def eventFilter(self, obj, e):
+        """Ctrl + the mouse wheel over this window zooms (a text box would otherwise zoom only its own text):
+        a step per notch of the wheel (120), as a touchpad sends a notch in many small turns. And when the form
+        gets wider or narrower (the splitter dragged), its cards' columns are placed again (_place_pairs)."""
+        if e.type() == QEvent.Wheel and e.modifiers() & Qt.ControlModifier:
+            w = obj if isinstance(obj, QWidget) else None
+            if w is not None and w.window() is self:
+                dy = e.angleDelta().y()
+                if dy and (dy > 0) != (self._wheel > 0):
+                    self._wheel = 0  # turned the other way: start counting again
+                self._wheel += dy
+                steps = int(self._wheel / 120)  # (towards 0: the rest is kept for the next turn)
+                if steps:
+                    self._wheel -= steps * 120
+                    self.set_zoom(zooming.zoom() + steps * zooming.STEP)
+                return True
+        elif (e.type() == QEvent.Resize and getattr(self, "form_scroll", None) is not None
+              and obj is self.form_scroll.viewport()):
+            self._place_pairs()
+        return super().eventFilter(obj, e)
 
     def closeEvent(self, e):
         """Asks first while a batch is being made; remembers the window's size and place."""

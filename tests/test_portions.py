@@ -1,5 +1,5 @@
-"""Who ordered which pages: each attorney's invoice bills only the days it is ticked on and, of a day split with
-Who ordered... (Job.portions), only the pages it ordered. Pages ordered together share the original, the
+"""Excerpts (who ordered which pages): each attorney's invoice bills only the days it is ticked on and, of a day
+split with Excerpts... (Job.portions), only the pages it ordered. Pages ordered together share the original, the
 judge's index and (by default) the index; each firm pays its own copies. Also the index setting, the Parties
 number, portions kept to be checked when the pages or the attorneys change, the same attorney entered twice,
 a run stopped part way, the files counted for Generate all and the records of each firm. All names and numbers
@@ -132,13 +132,13 @@ def test_a_share_is_rounded_up_to_the_cent(s):
 
 
 def test_the_index_setting_is_kept_and_checked(tmp_path):
-    assert Settings().invoice_index_shared == "split" and Settings().settings_version == 7
+    assert Settings().invoice_index_shared == "split" and Settings().settings_version == 8
     s = Settings()
     s.path.write_text(json.dumps({"settings_version": 6, "invoice_index_shared": "sometimes"}), encoding="utf-8")
     assert Settings.load().invoice_index_shared == "split"
     s.path.write_text(json.dumps({"settings_version": 7, "invoice_index_shared": "each"}), encoding="utf-8")
     loaded = Settings.load()
-    assert loaded.invoice_index_shared == "each" and loaded.settings_version == 7
+    assert loaded.invoice_index_shared == "each" and loaded.settings_version == 8
 
 
 # ------------------------------------------------------------------ the days and pages of each firm
@@ -185,7 +185,7 @@ def test_the_parties_number_shares_a_day_without_portions(tmp_path, s):
     # 30 x 4.30 / 2 + 30 + 30 = 124.50, as the whole invoice split two ways
     assert f.quotes[0].per_party == Decimal("124.50") == quote(30, s.sheet().find("Regular"), 2).per_party
     job.case.attorneys = [alex(), dana()]
-    job.portions = [(10, [A]), (30, [A, B])]  # a day split by Who ordered...: the number no longer applies
+    job.portions = [(10, [A]), (30, [A, B])]  # a day split by Excerpts...: the number no longer applies
     firms = {f.atty.name: f.quotes[0].per_party for f in firm_invoices(job.case, s, job.invoice_opts())}
     # Alex: 10 alone + 20 shared: (10 + 10) x 4.30 + 30 + 30 = 146.00; Dana: 10 x 4.30 + 20 + 20 = 83.00
     assert firms == {"Alex B. Counsel": Decimal("146.00"), "Dana Smith": Decimal("83.00")}
@@ -211,7 +211,7 @@ def test_portions_that_no_longer_fit_are_kept_to_be_checked(tmp_path, s):
     assert [p.pages for p in job.invoice_orders()[0].portions] == [10, 20]
     job.case.set("est_pages", "3")  # typed in: the last row no longer ends on the last page
     assert job.valid_portions() is None and job.portions == rows  # kept, not dropped
-    assert job.portions_check() == "Who ordered… needs checking (its rows don't end on this day's 3 pages)"
+    assert job.portions_check() == "Excerpts… needs checking (its rows don't end on this day's 3 pages)"
     assert files_to_make([job], ["invoice"], s) == 0
     job.case.set("est_pages", "30")
     assert job.valid_portions() == rows and not job.portions_check()
@@ -262,11 +262,11 @@ def test_rows_naming_an_attorney_no_longer_ticked_bill_nobody_until_checked(tmp_
     job.portions = [(10, [A]), (30, [A, B])]
     job.case.attorneys[1].checked = False
     assert job.valid_portions() is None and job.portions == [(10, [A]), (30, [A, B])]
-    assert job.portions_check() == "Who ordered… needs checking (it names an attorney no longer ticked)"
+    assert job.portions_check() == "Excerpts… needs checking (it names an attorney no longer ticked)"
     assert files_to_make([job], ["invoice"], s) == 0
     fill_jobs([job], s, outputs=["agreement", "invoice"])
     assert not ledger_for(s).invoices() and not job.invoiced
-    assert job.error == "invoice not made: check Who ordered… for 6/3/2026"
+    assert job.error == "invoice not made: check Excerpts… for 6/3/2026"
     assert [p.name.split(" - ")[0] for p in job.saved] == ["Minute Agreement"]  # the rest is made
     job.portions = [(10, [A]), (30, [A])]  # names only Alex, but a split needs two attorneys on the day
     assert job.portions_problem() == "fewer than two attorneys are ticked" and job.valid_portions() is None
@@ -282,7 +282,7 @@ def test_rows_naming_an_attorney_no_longer_ticked_bill_nobody_until_checked(tmp_
 
 def test_a_name_filled_in_by_a_merge_renames_the_attorney_in_the_rows(tmp_path, s):
     """An attorney typed with the firm only gets its name from a document read later (dedupe_attorneys): the
-    Who ordered... rows follow the attorney."""
+    Excerpts... rows follow the attorney."""
     job, = read_days(tmp_path, s, {"June 3, 2026": 30})
     firm_only = Attorney(firm="Counsel & Counsel", email="ab@counsel.example", checked=True)
     job.case.attorneys = [firm_only, dana()]
@@ -306,7 +306,7 @@ def test_portions_of_a_day_name_only_its_own_attorneys(tmp_path, s):
     fill_jobs(jobs, s, outputs=["invoice"])
     assert {(i.bill_to, i.dates) for i in ledger_for(s).invoices()} == {("Alex B. Counsel", "6/4/2026"),
                                                                        ("Dana Smith", "6/4/2026")}
-    assert not jobs[0].invoiced and "check Who ordered… for 6/3/2026" in jobs[0].error and jobs[1].invoiced
+    assert not jobs[0].invoiced and "check Excerpts… for 6/3/2026" in jobs[0].error and jobs[1].invoiced
 
 
 def test_the_same_attorney_entered_twice_is_one_party(tmp_path, s):

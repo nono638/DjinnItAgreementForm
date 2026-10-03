@@ -1,6 +1,6 @@
 """Invoices that cover several days of one case: the joint invoice (or one per day, as Settings say), the index
 rule, a job's Extras and what granular detail shows. Also: a day billed once (Job.invoiced) is not billed
-again, choices kept when jobs or days come together (Who ordered... too), a failed joint invoice, a day with
+again, choices kept when jobs or days come together (Excerpts... too), a failed joint invoice, a day with
 nobody ticked holding the joint invoice back, the progress
 count, the files counted for Generate all, Pages typed as 0, and the invoice's field names. Attorneys ordering
 different days or pages are in test_portions.py. All names and numbers are made up."""

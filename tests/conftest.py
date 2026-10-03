@@ -59,3 +59,12 @@ def make_window(qt):
     for win in made:
         win.gen += 1  # results of work still running are dropped
         win.deleteLater()
+    # deleted now, not when an event loop next runs: windows left from earlier tests would each be styled again
+    # by a later test that changes the style sheet (a zoom), which takes minutes with a hundred of them
+    from PySide6.QtCore import QCoreApplication, QEvent
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    from minute_filler.gui import zoom
+    if zoom.zoom() != 1.0:  # a test that zoomed must not leave the next one zoomed (the zoom is the app's)
+        from minute_filler.gui.theme import apply_theme
+        zoom.set_zoom(1.0)
+        apply_theme(qt.QApplication.instance(), "light")

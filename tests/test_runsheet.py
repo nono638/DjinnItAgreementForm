@@ -137,7 +137,9 @@ def test_names_for_the_initials():
 
 def test_the_word_index_is_not_billed(tmp_path, s):
     job = job_of(transcript(tmp_path / "Transcript 6-3-2026 Roe v Poe.pdf"), s)
-    assert job.docs[0].ing.page_count == 11 and job.transcript_pages() == 10 and job.invoice_pages() == 10
+    assert job.docs[0].ing.page_count == 11 and job.transcript_pages() == 10
+    job.page_basis[job.docs[0].key()] = "*"  # the whole transcript (Pat wrote 5 of its pages: see test_own_pages)
+    assert job.invoice_pages() == 10
     note = job.docs[0].regex.fields["est_pages"][0].note
     assert "transcript pages 310-319" in note and "not counting 1 page(s) after the transcript (word index)" in note
 

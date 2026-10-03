@@ -3,7 +3,9 @@
 Settings holds every choice (the defaults are what a new user gets) and load() brings older files up to date.
 The tables here name the choices the window and the Settings dialog offer: the outputs (OUTPUTS), the speeds
 (SPEEDS), which days of an invoice get an index (INDEX_RULES), who pays the index of pages several firms
-ordered together (INDEX_SHARED) and what "Show granular detail" adds to an invoice (DETAIL_ITEMS).
+ordered together (INDEX_SHARED), what "Show granular detail" adds to an invoice (DETAIL_ITEMS), and where the
+invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN, default_invoice_texts), and the folders
+the outputs go to when they have none of their own (OUTPUT_FOLDERS, see Settings.folder_for).
 """
 from __future__ import annotations
 
@@ -53,6 +55,10 @@ OUTPUTS = {  # what Generate can make: key -> label
     "invoice": "Invoice",
     "runsheet": "Run sheet",
 }
+# Where each output is saved when Settings.output_dirs doesn't say: a folder of its own under Documents, or
+# (not listed) the general "Save to" folder. A new output only needs its key in OUTPUTS and its file written to
+# Settings.folder_for(key, ...): it then gets its own row under Settings -> Options -> Folders as well.
+OUTPUT_FOLDERS = {"runsheet": "DjinnIt Run Sheets"}
 SPEEDS = ("Regular", "Expedited", "Daily", "Immediate")  # the delivery speeds, as named in Settings
 MOFR_FILENAME_PATTERN = "MOFR - {case} - {index} - {today}"
 INVOICE_FILENAME_PATTERN = "Invoice {number} - {case} - {attorney}"
@@ -90,11 +96,61 @@ DETAIL_ITEMS = {
 }
 
 
+INVOICE_FOOTER = ("I am in the courtroom during the day, so e-mail is the best way to reach me. "
+                  "Please send a short e-mail after paying so I can start on your transcript.")
+# The invoice's own text (Settings.invoice_texts): rows of {"where": a key of TEXT_PLACES, "when": a key of
+# TEXT_WHEN, "text": what is written, with {placeholders} (see invoice.text_values)}
+TEXT_PLACES = {
+    "top": "At the top, above Bill To",
+    "transcript": "Under the transcript details",
+    "amounts": "Under the amounts",
+    "payment": "Payment",
+    "footer": "Footer (small print)",
+}
+TEXT_WHEN = {
+    "always": "Always",
+    "parties": "More than one party ordered",
+    "one_party": "One party ordered",
+    "speeds": "More than one speed is offered",
+    "one_speed": "One speed is offered",
+    "days": "It covers several days",
+    "one_day": "It covers one day",
+    "excerpt": "The attorney ordered an excerpt",
+    "whole": "The attorney ordered every page",
+    "email": "An e-mailed copy is charged",
+    "no_email": "No e-mailed copy is charged",
+    "index": "An index is charged",
+    "no_index": "No index is charged",
+    "shared": "Several reporters wrote the transcript",
+    "split_share": "Granular detail shows the split; the firms ordered different pages",
+    "split_even": "Granular detail shows the split; every party ordered every page",
+}
+TEXT_PLACEHOLDERS = ("{case} {index} {dates} {pages} {total_pages} {parties} {number} {name} {bill_to} "
+                     "{transcript} (\"transcript\" or \"transcripts\") {is} (\"is\" or \"are\") "
+                     "{shared} (\"the original and the index\", what firms ordering the same pages split)")
+
+
+def default_invoice_texts(payment: str = INVOICE_PAYMENT_TEXT, footer: str = INVOICE_FOOTER) -> list[dict]:
+    """The invoice's text as it has always been: the notes under the amounts, the payment details and the
+    footer (payment, footer: the ones to use, e.g. a user's own from before the text could be changed)."""
+    rows = [
+        {"where": "amounts", "when": "speeds",
+         "text": "Please choose one delivery option and pay the amount shown for it."},
+        {"where": "amounts", "when": "split_share",
+         "text": "Amounts are your share: {shared} of pages ordered together are split between the parties who "
+                 "ordered them."},
+        {"where": "amounts", "when": "split_even", "text": "Amounts are per party ({parties} parties ordered)."},
+        {"where": "amounts", "when": "parties", "text": "The {transcript} {is} delivered once every party has paid."},
+        {"where": "amounts", "when": "one_party", "text": "The {transcript} {is} sent after payment is received."},
+        {"where": "payment", "when": "always", "text": payment},
+        {"where": "footer", "when": "always", "text": footer},
+    ]
+    return [r for r in rows if r["text"].strip()]
+
+
 def reporter_key(initials: str) -> str:
     """Initials as they are looked up: 'D.S.' and 'd s' are 'ds'."""
     return initials.lower().replace(".", "").replace(" ", "")
-INVOICE_FOOTER = ("I am in the courtroom during the day, so e-mail is the best way to reach me. "
-                  "Please send a short e-mail after paying so I can start on your transcript.")
 
 
 @dataclass
@@ -130,8 +186,9 @@ class Settings:
     # Output
     form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
     include_instructions: bool = True  # keep the UCS form's instructions page (page 2)
-    settings_version: int = 7         # bumped when a default changes for existing users
+    settings_version: int = 8         # bumped when a default changes for existing users
     output_dir: str = ""              # blank = next to the first input file, else Documents\Minute Agreements
+    output_dirs: dict = field(default_factory=dict)  # a folder for one output (key of OUTPUTS); none = as above
     filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
     batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
     outputs: list = field(default_factory=lambda: ["agreement"])  # ticked by default: keys of OUTPUTS
@@ -154,14 +211,17 @@ class Settings:
     invoice_joint: bool = True        # Generate all bills the days of one case on one invoice (False: one per day)
     invoice_detail_items: list = field(default_factory=lambda: list(DETAIL_ITEMS))  # what granular detail adds
     invoice_turnaround: dict = field(default_factory=lambda: dict(INVOICE_TURNAROUND))
-    invoice_payment_text: str = INVOICE_PAYMENT_TEXT
-    invoice_footer: str = INVOICE_FOOTER
+    # the invoice's own text, each row placed and shown as it says (see TEXT_PLACES, TEXT_WHEN); the payment
+    # details and the footer note are rows too
+    invoice_texts: list = field(default_factory=default_invoice_texts)
     invoice_number_format: str = "{year}-{seq:04}"
     invoice_filename_pattern: str = INVOICE_FILENAME_PATTERN
     records_dir: str = ""             # blank = Documents\DjinnIt Records (CSV copies and exports)
+    # the columns shown in the Records window: "invoices" / "activity" -> column keys (see records_window);
+    # a table not listed shows its usual columns
+    records_columns: dict = field(default_factory=dict)
 
     # Run sheets (who wrote which pages of a trial; see runsheet.py)
-    runsheet_dir: str = ""            # blank = Documents\DjinnIt Run Sheets
     runsheet_filename_pattern: str = RUNSHEET_FILENAME_PATTERN
     runsheet_existing: str = "ask"    # one of RUNSHEET_EXISTING
     reporters: dict = field(default_factory=dict)  # initials -> the name in the Reporter column ("ds": "Dana")
@@ -177,6 +237,7 @@ class Settings:
     theme: str = "system"             # system / light / dark
     show_djinn: bool = True
     window_geometry: str = ""
+    zoom: float = 1.0                 # View → Zoom (1.0 = 100 %), on top of the Windows display scaling
 
     @property
     def path(self) -> Path:
@@ -223,6 +284,29 @@ class Settings:
         """The signature picture to put on the forms, or "" (not signing, none chosen, or the file is gone)."""
         ok = self.sign_reporter and self.signature_image and Path(self.signature_image).is_file()
         return self.signature_image if ok else ""
+
+    @property
+    def runsheet_dir(self) -> str:
+        """The run sheets' own folder ("" = Documents\\DjinnIt Run Sheets): output_dirs["runsheet"]. Kept for
+        older callers and the tests; the folders are output_dirs now (see folder_for)."""
+        return self.output_dirs.get("runsheet", "")
+
+    @runsheet_dir.setter
+    def runsheet_dir(self, folder: str) -> None:
+        self.output_dirs = {**self.output_dirs, "runsheet": folder}
+        if not folder:
+            del self.output_dirs["runsheet"]
+
+    def folder_for(self, kind: str, general: Path | str | None = None) -> Path:
+        """The folder an output (a key of OUTPUTS) is saved to: its own folder under Settings -> Options ->
+        Folders, else its built-in one (OUTPUT_FOLDERS: run sheets go to Documents\\DjinnIt Run Sheets), else
+        `general` (the job's "Save to" folder, see batch.out_dir_for; Documents\\Minute Agreements without one)."""
+        own = self.output_dirs.get(kind, "")
+        if own:
+            return Path(own)
+        if kind in OUTPUT_FOLDERS:
+            return Path.home() / "Documents" / OUTPUT_FOLDERS[kind]
+        return Path(general) if general else Path.home() / "Documents" / "Minute Agreements"
 
     def records_folder(self) -> Path:
         """Where record CSV copies and exports go: records_dir, else Documents\\DjinnIt Records."""
@@ -285,5 +369,26 @@ class Settings:
         s.invoice_detail_items = [k for k in s.invoice_detail_items if isinstance(k, str) and k in DETAIL_ITEMS]
         if s.runsheet_existing not in RUNSHEET_EXISTING:
             s.runsheet_existing = "ask"
+        # v8: a folder for each output. The run sheets' folder (runsheet_dir before) is one of them now.
+        s.output_dirs = {k: v.strip() for k, v in s.output_dirs.items()
+                         if k in OUTPUTS and isinstance(v, str) and v.strip()}
+        old = data.get("runsheet_dir")
+        if isinstance(old, str) and old.strip() and "runsheet" not in s.output_dirs:
+            s.output_dirs["runsheet"] = old.strip()
+        # v8: the invoice's text became rows (Settings -> Invoice -> Invoice text); a payment text and footer
+        # written before are kept as the payment and footer rows
+        if "invoice_texts" not in data:
+            pay, foot = data.get("invoice_payment_text"), data.get("invoice_footer")
+            s.invoice_texts = default_invoice_texts(pay if isinstance(pay, str) else INVOICE_PAYMENT_TEXT,
+                                                    foot if isinstance(foot, str) else INVOICE_FOOTER)
+        s.invoice_texts = [{"where": r["where"], "when": r["when"], "text": r["text"]} for r in s.invoice_texts
+                           if isinstance(r, dict) and isinstance(r.get("where"), str) and r["where"] in TEXT_PLACES
+                           and isinstance(r.get("when"), str) and r["when"] in TEXT_WHEN
+                           and isinstance(r.get("text"), str)]
+        s.records_columns = {k: [c for c in v if isinstance(c, str)] for k, v in s.records_columns.items()
+                             if k in ("invoices", "activity") and isinstance(v, list)}
+        if isinstance(data.get("zoom"), int) and not isinstance(data.get("zoom"), bool):
+            s.zoom = float(data["zoom"])  # "zoom": 1 typed by hand
+        s.zoom = min(1.6, max(0.7, s.zoom)) if s.zoom == s.zoom else 1.0
         s.settings_version = cls.settings_version
         return s

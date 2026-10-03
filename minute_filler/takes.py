@@ -290,6 +290,23 @@ def first_name(name: str, title_case: bool = True) -> str:
     return word.capitalize() if title_case and (word.isupper() or word.islower()) else word
 
 
+def my_initials(own_name: str, own_initials: str = "") -> set[str]:
+    """The initials the user puts on their pages: those under My info ('P.R.' -> {'pr'}), else the ones of
+    their name ('Pat Q. Reporter' -> {'pr', 'pqr'}); empty when neither is known."""
+    return {own_initials.lower().replace(".", "").replace(" ", "")} - {""} or initials_of(own_name)
+
+
+def page_owners(marks: list[PageMark]) -> list[str]:
+    """Whose each page is: the initials on it, else those of the page before (a page without them belongs to
+    the take it is in, as find_takes says). Pages before the first initials are "": nobody's initials are on
+    them, so on a transcript of several reporters whose they are isn't known. [] without marks."""
+    out, cur = [], ""
+    for m in marks:
+        cur = m.initials or cur
+        out.append(cur)
+    return out
+
+
 def reporter_label(initials: str, names: list[str], known: dict[str, str], own_name: str = "",
                    own_initials: str = "", title_case: bool = True) -> str:
     """What the run sheet's Reporter column says for these initials: the name given in Settings, the user's
@@ -299,7 +316,7 @@ def reporter_label(initials: str, names: list[str], known: dict[str, str], own_n
     key = initials.lower()
     if key in known:
         return known[key]
-    own = {own_initials.lower().replace(".", "").replace(" ", "")} - {""} or initials_of(own_name)
+    own = my_initials(own_name, own_initials)
     if own_name and key in own:
         return first_name(own_name, title_case)
     for n in names:

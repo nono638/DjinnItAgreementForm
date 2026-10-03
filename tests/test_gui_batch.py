@@ -1,6 +1,6 @@
 """Drives the main window (off screen): several documents become a batch of jobs; outputs that need a
 transcript; the Outputs box (each output's options, the invoice speeds, parties, Extras... and Customize...);
-the days of a case on one invoice, billed once by Generate all; Who ordered... (which attorney ordered which
+the days of a case on one invoice, billed once by Generate all; Excerpts... (which attorney ordered which
 pages) and the prices of each attorney: its rows following a renamed attorney, kept to be checked when an
 attorney is unticked or the pages are typed again, the attorneys of the day only, and a read that ends while it
 is open; a document added while Generate all runs, and Generate tried again after a problem; the granular
@@ -489,14 +489,14 @@ def test_portions_dialog_rows_and_checks(qt):
     dlg._add_row()
     assert dlg.rows() == [(45, [A, B]), (90, [A, B])] and dlg.lines[1][0].text() == "Pages 46 to"
     dlg.lines[0][1].setValue(40)
-    dlg.lines[0][2][0].setChecked(False)  # the first 40 pages: Dana only
+    dlg.lines[0][3][0].setChecked(False)  # the first 40 pages: Dana only
     assert dlg.lines[1][0].text() == "Pages 41 to"
-    for cb in dlg.lines[1][2]:
+    for cb in dlg.lines[1][3]:
         cb.setChecked(False)
     dlg.accept()
     assert dlg.result() != qt.QDialog.Accepted and "Pages 41 to 90: tick who ordered them" in dlg.error.text()
-    dlg.lines[1][2][0].setChecked(True)
-    dlg.lines[1][2][1].setChecked(True)
+    dlg.lines[1][3][0].setChecked(True)
+    dlg.lines[1][3][1].setChecked(True)
     dlg.lines[0][1].setValue(90)  # a first row as long as the day leaves nothing for the second
     dlg.accept()
     assert dlg.result() != qt.QDialog.Accepted and "must end on a later page" in dlg.error.text()
@@ -506,7 +506,7 @@ def test_portions_dialog_rows_and_checks(qt):
 
     again = PortionsDialog([counsel(), smith()], 90, [(40, [B]), (90, [A, B])], [A, B])
     assert again.rows() == [(40, [B]), (90, [A, B])]
-    again.lines[0][2][0].setChecked(True)  # both rows everyone's: the same as no rows at all
+    again.lines[0][3][0].setChecked(True)  # both rows everyone's: the same as no rows at all
     again.accept()
     assert again.values() is None
     again._remove_row()
@@ -544,7 +544,9 @@ def test_records_window_changes_amounts(window, tmp_path, monkeypatch):
     win._change_amounts(inv)
     assert lg.invoice("2026-0001").amounts == {"Regular": "58.50", "Daily": "84.00"}
     assert win.kpi["billed"].text() == "$58.50" and win.kpi["outstanding"].text() == "$58.50"
-    assert "Regular $58.50" in win.inv_table.item(0, 7).text() and win.inv_table.item(0, 8).text() == "$58.50"
+    offered, billed = (rw.col_index(rw.INVOICE_COLS, k) for k in ("offered", "billed"))
+    assert "Regular $58.50" in win.inv_table.item(0, offered).text()
+    assert win.inv_table.item(0, billed).text() == "$58.50"
     win.close()
 
 
@@ -571,7 +573,7 @@ def test_each_attorneys_prices_fit_in_a_small_window(window, tmp_path):
 # ------------------------------------------------------------ found in the sweep of who ordered which pages
 
 def split(window, monkeypatch, rows):
-    """Who ordered… as if the user ticked these rows and clicked OK."""
+    """Excerpts… as if the user ticked these rows and clicked OK."""
     from minute_filler.gui import dialogs
     monkeypatch.setattr(dialogs.PortionsDialog, "exec", lambda self: 1)
     monkeypatch.setattr(dialogs.PortionsDialog, "values", lambda self: rows)
@@ -597,7 +599,7 @@ def test_who_ordered_follows_a_rename_and_needs_checking_when_an_attorney_is_unt
 
     window.att.item(1, 0).setCheckState(QtCore.Qt.Unchecked)  # Dana unticked: her pages are not Alex's
     assert window.cur.portions == [(10, [A]), (30, [A, "dana m smith"])]
-    assert window.inv_info.text() == "⚠ Who ordered… needs checking (it names an attorney no longer ticked)"
+    assert window.inv_info.text() == "⚠ Excerpts… needs checking (it names an attorney no longer ticked)"
     assert window.inv_who.isEnabled() and window.inv_who.text().startswith("⚠")
     window.output_boxes["agreement"].setChecked(False)
     said = answer(monkeypatch, QtWidgets.QMessageBox.Yes)
@@ -619,7 +621,7 @@ def test_retyping_the_pages_keeps_who_ordered(window, tmp_path, monkeypatch):
     split(window, monkeypatch, rows)
     window.rows["est_pages"].choose("3")  # "30" -> "3" -> "30", as when a digit is typed again
     assert window.cur.portions == rows
-    assert window.inv_info.text() == "⚠ Who ordered… needs checking (its rows don't end on this day's 3 pages)"
+    assert window.inv_info.text() == "⚠ Excerpts… needs checking (its rows don't end on this day's 3 pages)"
     window.rows["est_pages"].choose("30")
     assert window.cur.portions == rows and window.inv_who.text().startswith("✓")
     assert window.inv_info.text().splitlines()[1].startswith("Alex B. Counsel: Regular $146.00")

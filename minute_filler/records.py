@@ -12,6 +12,13 @@ An invoice's "billed" amount is what it was paid at once paid, else the price of
 offers: the job's own speed, or on a choice invoice the first (slowest, cheapest) of the speeds it offers
 (the attorney picks; that is what they owe at the least). Void ones count 0. The amounts are the ones the
 invoice was made with, until they are changed here (Ledger.set_amounts: an amount corrected in the PDF).
+
+A record deleted goes to the trash (its `deleted` time is set): it is left out of every list, total and copy,
+and can be restored for 30 days (TRASH_DAYS); after that it is deleted for good. The files themselves are
+never touched. An invoice's number stays taken even then (the used_numbers table), so it is never given to
+another invoice.
+
+Databases made by older versions get the newer columns when opened (_migrate); their old rows leave them blank.
 """
 from __future__ import annotations
 
@@ -22,7 +29,7 @@ import sqlite3
 import threading
 from contextlib import closing
 from dataclasses import asdict, dataclass, field, fields
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -35,7 +42,20 @@ from .rates import parse_amount
 # added in one step (the batch runs on another thread than the window).
 _MIRROR_LOCK = threading.Lock()
 NUMBER_LOCK = threading.RLock()
+# Opening a database makes its tables and adds missing columns: two threads doing that at once (the batch and the
+# window) would both try to add the same column
+_SCHEMA_LOCK = threading.Lock()
 KINDS = {"agreement": "Minute agreement", "mofr": "MOFR", "invoice": "Invoice", "runsheet": "Run sheet"}
+TRASH_DAYS = 30  # a deleted record can be restored for this long
+SCHEMA_VERSION = 2
+# Columns added after the first version: (table, column, type), added to an older database when it is opened
+# (a new one gets them from _SCHEMA)
+_ADDED = [
+    ("invoices", "court", "TEXT"), ("invoices", "part", "TEXT"), ("invoices", "transcript_pages", "INTEGER"),
+    ("invoices", "my_pages", "INTEGER"), ("invoices", "reporters", "TEXT"), ("invoices", "excerpt", "TEXT"),
+    ("invoices", "email_copy", "TEXT"), ("invoices", "idx", "TEXT"), ("invoices", "deleted", "TEXT"),
+    ("activity", "transcript_pages", "INTEGER"), ("activity", "my_pages", "INTEGER"), ("activity", "deleted", "TEXT"),
+]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS activity (
@@ -43,7 +63,8 @@ CREATE TABLE IF NOT EXISTS activity (
     ts TEXT NOT NULL,             -- 2026-09-30T14:05:00
     kind TEXT NOT NULL,           -- agreement / mofr / invoice / runsheet
     case_name TEXT, index_no TEXT, dates TEXT, judge TEXT, part TEXT,
-    attorney TEXT, firm TEXT, pages INTEGER, file_path TEXT, invoice_no TEXT
+    attorney TEXT, firm TEXT, pages INTEGER, file_path TEXT, invoice_no TEXT,
+    transcript_pages INTEGER, my_pages INTEGER, deleted TEXT
 );
 CREATE TABLE IF NOT EXISTS invoices (
     invoice_no TEXT PRIMARY KEY,
@@ -56,7 +77,12 @@ CREATE TABLE IF NOT EXISTS invoices (
     billed_speed TEXT,
     status TEXT NOT NULL DEFAULT 'open',
     paid_speed TEXT, amount_paid TEXT, paid_date TEXT,
-    file_path TEXT, notes TEXT
+    file_path TEXT, notes TEXT,
+    court TEXT, part TEXT, transcript_pages INTEGER, my_pages INTEGER, reporters TEXT, excerpt TEXT,
+    email_copy TEXT, idx TEXT, deleted TEXT
+);
+CREATE TABLE IF NOT EXISTS used_numbers (     -- every invoice number given, even of invoices deleted for good
+    invoice_no TEXT PRIMARY KEY, year INTEGER, seq INTEGER
 );
 """
 
@@ -90,6 +116,15 @@ class Invoice:
     paid_date: str = ""
     file_path: str = ""
     notes: str = ""
+    court: str = ""
+    part: str = ""
+    transcript_pages: int = 0      # every page of the transcript(s) billed, whoever wrote them
+    my_pages: int = 0              # the user's own pages of them (fewer when several reporters wrote them)
+    reporters: str = ""            # who wrote how many pages: "PR 65, DS 85"
+    excerpt: str = ""              # the pages this firm ordered, when not all of them: "6/3/2026 pp. 20-40"
+    email_copy: str = ""           # "Yes" / "No": an e-mailed copy was charged ("" = not known, older records)
+    index: str = ""                # "Yes" / "No": an index was charged (the column is "idx")
+    deleted: str = ""              # when it went to the trash (ISO time); "" = not deleted
 
     @property
     def client(self) -> str:
@@ -136,6 +171,17 @@ class Activity:
     pages: int = 0
     file_path: str = ""
     invoice_no: str = ""
+    transcript_pages: int = 0     # every page of the transcript(s), whoever wrote them
+    my_pages: int = 0             # the user's own pages of them
+    deleted: str = ""             # when it went to the trash (ISO time); "" = not deleted
+
+
+def gone_for_good(deleted: str) -> str:
+    """The day a record deleted at `deleted` (ISO time) leaves the trash for good, as M/D/YYYY."""
+    try:
+        return us_date((datetime.fromisoformat(deleted) + timedelta(days=TRASH_DAYS)).date().isoformat())
+    except ValueError:
+        return ""
 
 
 @dataclass
@@ -169,9 +215,14 @@ def summarize(invoices: list[Invoice]) -> tuple[Summary, dict[str, Summary], dic
 # The exported tables (CSV, Excel): (header, value) per column
 INVOICE_TABLE = [
     ("Invoice No.", lambda i: i.invoice_no), ("Date", lambda i: us_date(i.created)), ("Case", lambda i: i.case_name),
-    ("Index No.", lambda i: i.index_no), ("Date(s) of proceeding", lambda i: i.dates), ("Judge", lambda i: i.judge),
+    ("Index No.", lambda i: i.index_no), ("Court", lambda i: i.court), ("Part", lambda i: i.part),
+    ("Date(s) of proceeding", lambda i: i.dates), ("Judge", lambda i: i.judge),
     ("Bill to", lambda i: i.bill_to), ("Firm", lambda i: i.firm), ("E-mail", lambda i: i.email),
-    ("Pages", lambda i: i.pages), ("Parties", lambda i: i.parties), ("Offered (per party)", Invoice.offered_text),
+    ("Pages", lambda i: i.pages), ("My pages", lambda i: i.my_pages or ""),
+    ("Transcript pages", lambda i: i.transcript_pages or ""), ("Reporters", lambda i: i.reporters),
+    ("Excerpt", lambda i: i.excerpt), ("Parties", lambda i: i.parties),
+    ("Speeds offered", lambda i: ", ".join(i.amounts)), ("Offered (per party)", Invoice.offered_text),
+    ("E-mailed copy", lambda i: i.email_copy), ("Index", lambda i: i.index),
     ("Billed", lambda i: float(i.billed)), ("Status", lambda i: i.status.title()),
     ("Paid speed", lambda i: i.paid_speed), ("Amount paid", lambda i: float(i.paid) if i.status == "paid" else ""),
     ("Date paid", lambda i: us_date(i.paid_date)), ("File", lambda i: i.file_path), ("Notes", lambda i: i.notes),
@@ -180,7 +231,8 @@ ACTIVITY_TABLE = [
     ("Date", lambda a: us_date(a.ts)), ("Time", lambda a: a.ts[11:16]), ("Made", lambda a: KINDS.get(a.kind, a.kind)),
     ("Case", lambda a: a.case_name), ("Index No.", lambda a: a.index_no), ("Date(s) of proceeding", lambda a: a.dates),
     ("Judge", lambda a: a.judge), ("Part", lambda a: a.part), ("Attorney", lambda a: a.attorney),
-    ("Firm", lambda a: a.firm), ("Pages", lambda a: a.pages or ""), ("Invoice No.", lambda a: a.invoice_no),
+    ("Firm", lambda a: a.firm), ("Pages", lambda a: a.pages or ""), ("My pages", lambda a: a.my_pages or ""),
+    ("Transcript pages", lambda a: a.transcript_pages or ""), ("Invoice No.", lambda a: a.invoice_no),
     ("File", lambda a: a.file_path),
 ]
 INVOICE_COLUMNS = [h for h, _ in INVOICE_TABLE]
@@ -198,9 +250,13 @@ def activity_row(a: Activity) -> list:
 
 
 def _from_row(cls, row: sqlite3.Row, **override):
-    """A dataclass from a database row: NULL becomes the field's default, unknown columns are dropped."""
+    """A dataclass from a database row: NULL becomes the field's default, unknown columns are dropped (the
+    invoices' "idx" column is Invoice.index: INDEX is a word of SQL)."""
     names = {f.name: f for f in fields(cls)}
-    d = {k: v for k, v in dict(row).items() if k in names and v is not None}
+    raw = dict(row)
+    if "idx" in raw:
+        raw["index"] = raw.pop("idx")
+    d = {k: v for k, v in raw.items() if k in names and v is not None}
     return cls(**{**d, **override})
 
 
@@ -211,8 +267,27 @@ class Ledger:
         self.path = Path(path) if path else default_db()
         self.mirror_dir = mirror_dir
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._db()) as db:
+        with _SCHEMA_LOCK, closing(self._db()) as db:
             db.executescript(_SCHEMA)
+            self._migrate(db)
+        self.purge()
+
+    @staticmethod
+    def _migrate(db: sqlite3.Connection) -> None:
+        """Brings a database made by an older version up to date: the columns added since (_ADDED), and every
+        invoice number already given entered in used_numbers. Old rows keep blanks in the new columns."""
+        with db:
+            for table, col, kind in _ADDED:
+                have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+                if col not in have:
+                    try:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+                    except sqlite3.OperationalError as e:  # another program (a second window) added it just now
+                        if "duplicate column name" not in str(e):
+                            raise
+            if db.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                db.execute("INSERT OR IGNORE INTO used_numbers SELECT invoice_no, year, seq FROM invoices")
+                db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _db(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path)
@@ -229,12 +304,32 @@ class Ledger:
             db.close()
         self.mirror()
 
-    def _insert(self, table: str, values: dict) -> None:
+    def _run_all(self, steps: list[tuple[str, tuple]]) -> None:
+        """Makes several changes as one (all or none), then brings the CSV copies up to date."""
+        db = self._db()
+        try:
+            with db:
+                for sql, args in steps:
+                    db.execute(sql, args)
+        finally:
+            db.close()
+        self.mirror()
+
+    @staticmethod
+    def _insert_sql(table: str, values: dict) -> tuple[str, tuple]:
+        """The INSERT for one row (Invoice.index is stored in the "idx" column)."""
+        values = {("idx" if k == "index" else k): v for k, v in values.items()}
         cols = ", ".join(values)
-        self._run(f"INSERT INTO {table} ({cols}) VALUES ({', '.join('?' * len(values))})", tuple(values.values()))
+        return f"INSERT INTO {table} ({cols}) VALUES ({', '.join('?' * len(values))})", tuple(values.values())
+
+    def _insert(self, table: str, values: dict) -> None:
+        self._run(*self._insert_sql(table, values))
 
     def _next_seq(self, year: int) -> int:
-        return (self._rows("SELECT MAX(seq) FROM invoices WHERE year = ?", (year,))[0][0] or 0) + 1
+        """The next count of the year, after every number given (deleted invoices' too)."""
+        rows = self._rows("SELECT MAX(seq) FROM invoices WHERE year = ? UNION ALL "
+                          "SELECT MAX(seq) FROM used_numbers WHERE year = ?", (year, year))
+        return max([r[0] or 0 for r in rows] + [0]) + 1
 
     def _set_status(self, invoice_no: str, status: str, speed: str = "", amount: str = "", paid: str = "") -> None:
         self._run("UPDATE invoices SET status=?, paid_speed=?, amount_paid=?, paid_date=? WHERE invoice_no=?",
@@ -254,7 +349,7 @@ class Ledger:
         invoices may get the same number."""
         year = (today or date.today()).year
         seq = self._next_seq(year)
-        taken = {r[0] for r in self._rows("SELECT invoice_no FROM invoices")}
+        taken = {r[0] for r in self._rows("SELECT invoice_no FROM invoices UNION SELECT invoice_no FROM used_numbers")}
 
         def number(pattern: str, seq: int) -> str:
             try:
@@ -277,6 +372,7 @@ class Ledger:
         a.ts = a.ts or datetime.now().isoformat(timespec="seconds")
         values = asdict(a)
         values.pop("id")
+        values["deleted"] = values["deleted"] or None
         self._insert("activity", values)
 
     def add_invoice(self, inv: Invoice, year: int = 0, seq: int = 0) -> None:
@@ -285,7 +381,10 @@ class Ledger:
         year = year or int(inv.created[:4])
         values = asdict(inv)
         values.update(amounts=json.dumps(inv.amounts), year=year, seq=seq or self._next_seq(year))
-        self._insert("invoices", values)
+        values["deleted"] = values["deleted"] or None
+        self._run_all([self._insert_sql("invoices", values),
+                       ("INSERT OR IGNORE INTO used_numbers VALUES (?, ?, ?)",
+                        (inv.invoice_no, year, values["seq"]))])
 
     def mark_paid(self, invoice_no: str, speed: str, amount, paid_date: str | None = None) -> None:
         """Paid at this speed. amount: '$63.00' or 63; paid_date: ISO ('2026-09-30'), today when not given."""
@@ -316,13 +415,66 @@ class Ledger:
             clean[speed] = str(d)
         self._run("UPDATE invoices SET amounts=? WHERE invoice_no=?", (json.dumps(clean), invoice_no))
 
+    # ------------------------------------------------------------------ the trash
+    def delete(self, invoices: list[str] = (), activity: list[int] = ()) -> None:
+        """Moves records to the trash: invoices by number (with the "invoice" rows of everything made that
+        name them) and rows of everything made by id. They can be restored for TRASH_DAYS days."""
+        now = datetime.now().isoformat(timespec="seconds")
+        steps = []
+        for no in invoices:
+            steps.append(("UPDATE invoices SET deleted=? WHERE invoice_no=? AND deleted IS NULL", (now, no)))
+            steps.append(("UPDATE activity SET deleted=? WHERE invoice_no=? AND kind='invoice' AND deleted IS NULL",
+                          (now, no)))
+        steps += [("UPDATE activity SET deleted=? WHERE id=? AND deleted IS NULL", (now, i)) for i in activity]
+        if steps:
+            self._run_all(steps)
+
+    def restore(self, invoices: list[str] = (), activity: list[int] = ()) -> None:
+        """Takes records out of the trash (an invoice with the rows of everything made that name it)."""
+        steps = []
+        for no in invoices:
+            steps.append(("UPDATE invoices SET deleted=NULL WHERE invoice_no=?", (no,)))
+            steps.append(("UPDATE activity SET deleted=NULL WHERE invoice_no=? AND kind='invoice'", (no,)))
+        steps += [("UPDATE activity SET deleted=NULL WHERE id=?", (i,)) for i in activity]
+        if steps:
+            self._run_all(steps)
+
+    def delete_forever(self, invoices: list[str] = (), activity: list[int] = ()) -> None:
+        """Deletes records in the trash for good (records not in the trash are left alone). An invoice's
+        number stays taken."""
+        steps = []
+        for no in invoices:
+            steps.append(("DELETE FROM invoices WHERE invoice_no=? AND deleted IS NOT NULL", (no,)))
+            steps.append(("DELETE FROM activity WHERE invoice_no=? AND kind='invoice' AND deleted IS NOT NULL", (no,)))
+        steps += [("DELETE FROM activity WHERE id=? AND deleted IS NOT NULL", (i,)) for i in activity]
+        if steps:
+            self._run_all(steps)
+
+    def purge(self, now: datetime | None = None) -> int:
+        """Deletes for good what has been in the trash longer than TRASH_DAYS days; returns how many records.
+        Done each time the records are opened."""
+        cutoff = ((now or datetime.now()) - timedelta(days=TRASH_DAYS)).isoformat(timespec="seconds")
+        db = self._db()
+        try:
+            with db:
+                n = db.execute("DELETE FROM invoices WHERE deleted IS NOT NULL AND deleted < ?", (cutoff,)).rowcount
+                n += db.execute("DELETE FROM activity WHERE deleted IS NOT NULL AND deleted < ?", (cutoff,)).rowcount
+        finally:
+            db.close()
+        if n:
+            self.mirror()
+        return n
+
     # ------------------------------------------------------------------ reading
     def invoices(self, year: int | None = None, month: int | None = None, client: str = "",
-                 status: str = "", text: str = "") -> list[Invoice]:
+                 status: str = "", text: str = "", trash: bool = False) -> list[Invoice]:
         """Newest first, filtered by year, month, status ("open", "paid", "void"), client (the exact
-        firm/attorney, see Invoice.client) and text (words found anywhere)."""
+        firm/attorney, see Invoice.client) and text (words found anywhere). trash: the invoices in the trash
+        instead of the others."""
         out = []
-        for r in self._rows("SELECT * FROM invoices ORDER BY created DESC, year DESC, seq DESC, invoice_no DESC"):
+        where = "deleted IS NOT NULL" if trash else "deleted IS NULL"
+        for r in self._rows(f"SELECT * FROM invoices WHERE {where} "
+                            "ORDER BY created DESC, year DESC, seq DESC, invoice_no DESC"):
             try:
                 amounts = json.loads(r["amounts"] or "{}")
             except ValueError:
@@ -343,13 +495,16 @@ class Ledger:
         return out
 
     def invoice(self, invoice_no: str) -> Invoice | None:
-        """One invoice by its number, or None."""
-        return next((i for i in self.invoices() if i.invoice_no == invoice_no), None)
+        """One invoice by its number (in the trash or not), or None."""
+        return next((i for i in self.invoices() + self.invoices(trash=True) if i.invoice_no == invoice_no), None)
 
-    def activity(self, kind: str = "", since: str = "", until: str = "", text: str = "") -> list[Activity]:
-        """Newest first. kind: a key of KINDS; since/until: ISO dates (inclusive); text: words found anywhere."""
+    def activity(self, kind: str = "", since: str = "", until: str = "", text: str = "",
+                 trash: bool = False) -> list[Activity]:
+        """Newest first. kind: a key of KINDS; since/until: ISO dates (inclusive); text: words found anywhere;
+        trash: the rows in the trash instead of the others."""
         out = []
-        for r in self._rows("SELECT * FROM activity ORDER BY ts DESC, id DESC"):
+        where = "deleted IS NOT NULL" if trash else "deleted IS NULL"
+        for r in self._rows(f"SELECT * FROM activity WHERE {where} ORDER BY ts DESC, id DESC"):
             a = _from_row(Activity, r)
             if kind and a.kind != kind:
                 continue
@@ -364,8 +519,8 @@ class Ledger:
 
     def years(self) -> list[int]:
         """The years with any invoice or activity, newest first."""
-        rows = self._rows("SELECT DISTINCT substr(created,1,4) FROM invoices UNION "
-                          "SELECT DISTINCT substr(ts,1,4) FROM activity")
+        rows = self._rows("SELECT DISTINCT substr(created,1,4) FROM invoices WHERE deleted IS NULL UNION "
+                          "SELECT DISTINCT substr(ts,1,4) FROM activity WHERE deleted IS NULL")
         return sorted({int(r[0]) for r in rows if r[0] and r[0].isdigit()}, reverse=True)
 
     def clients(self) -> list[str]:
@@ -384,7 +539,7 @@ class Ledger:
             log_error("could not update the CSV copies of the records", e)
 
     def export_csv(self, folder: Path) -> list[Path]:
-        """Writes invoices.csv and activity.csv (every row) into folder; returns their paths."""
+        """Writes invoices.csv and activity.csv (every row not in the trash) into folder; returns their paths."""
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
         out = []

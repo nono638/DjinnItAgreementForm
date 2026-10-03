@@ -219,6 +219,7 @@ def test_open_the_run_sheets_folder_before_there_is_one(qt, tmp_path, monkeypatc
     opened = []
     monkeypatch.setattr(dialogs, "open_path", opened.append)
     dlg = dialogs.SettingsDialog(pat_settings())
-    dlg.r_dir.setText(str(tmp_path / "Run Sheets"))
-    dlg._open_run_sheets_folder()
+    edit = dlg.o_dirs["runsheet"]  # Options -> Folders
+    edit.setText(str(tmp_path / "Run Sheets"))
+    dlg._open_folder(edit, "runsheet")
     assert (tmp_path / "Run Sheets").is_dir() and opened == [tmp_path / "Run Sheets"]

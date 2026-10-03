@@ -63,9 +63,10 @@ def best(ex, key):
     return cands[0].value if cands else ""
 
 
-def transcript_pdf(path: Path, pages: int = 30, date: str = "") -> Path:
+def transcript_pdf(path: Path, pages: int = 30, date: str = "", initials: list[str] | None = None) -> Path:
     """A fictional transcript: the cover page from the samples, then numbered pages. date: another day for
-    it than the cover's ("June 4, 2026")."""
+    it than the cover's ("June 4, 2026"); initials: the reporter's initials at the foot of each page ("" for
+    none; as many as the pages), for a transcript of several reporters."""
     doc = pymupdf.open()
     text = (SAMPLES / "transcript_cover.txt").read_text(encoding="utf-8")
     if date:
@@ -73,5 +74,7 @@ def transcript_pdf(path: Path, pages: int = 30, date: str = "") -> Path:
     for i in range(pages):
         page = doc.new_page()
         page.insert_text((72, 60), text if i == 0 else f"{101 + i}\n 1\n 2\n 3\n Q. And then?", fontsize=9)
+        if initials and initials[i]:
+            page.insert_text((520, page.rect.height - 40), initials[i], fontsize=10)
     doc.save(path)
     return path

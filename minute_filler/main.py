@@ -43,7 +43,8 @@ def selftest(out_dir: str, files: list[str]) -> int:
 def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> int:
     """Headless batch: --batch OUTDIR [--outputs agreement,mofr,invoice,runsheet] files/folders... fills one set of
     forms per case and date with the saved settings, and writes batch.json (what was grouped, saved or
-    unreadable). Without --outputs, the outputs ticked in the window are made. Returns 0, 1 when a file or
+    unreadable). The files go into OUTDIR whatever folders Settings give each output (run sheets still go to
+    their own folder). Without --outputs, the outputs ticked in the window are made. Returns 0, 1 when a file or
     job had a problem, or 2 for an unknown output."""
     import json
     from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
@@ -58,6 +59,7 @@ def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> i
     out.mkdir(parents=True, exist_ok=True)
     s = Settings.load()
     s.output_dir = str(out)
+    s.output_dirs = {k: v for k, v in s.output_dirs.items() if k == "runsheet"}  # everything else into OUTDIR
     docs, errors = read_docs(expand_paths(paths), s)
     jobs = group(docs, s)
     fill_jobs([j for j in jobs if j.include], s, outputs=outputs)  # not the documents that name no case
@@ -143,6 +145,8 @@ def main() -> int:
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
     settings = Settings.load()
+    from minute_filler.gui.zoom import set_zoom
+    set_zoom(settings.zoom)  # View → Zoom, kept from last time
     apply_theme(app, settings.theme)
     win = MainWindow(settings, app)
     win.show()

@@ -1,6 +1,8 @@
-"""Generating the chosen outputs: agreements, MOFR and invoices (transcripts only), and their records; also
-settings files from versions 3 and 4 brought up to date (the invoice speeds, and the old "offer every speed"
-box, invoice_choice, now decided by the speeds ticked alone)."""
+"""Generating the chosen outputs: agreements, MOFR and invoices (transcripts only), and their records; a folder
+of its own for each output (Settings -> Options -> Folders, also for an output added later; the command line's
+folder takes them all); also settings files from versions 3, 4 and 7 brought up to date (the invoice speeds,
+the old "offer every speed" box, invoice_choice, now decided by the speeds ticked alone, and the old run sheets
+folder)."""
 from pathlib import Path
 
 import pytest
@@ -105,3 +107,50 @@ def test_settings_v4_offer_every_speed_off(tmp_path):
     s.path.write_text(json.dumps({"settings_version": 4, "invoice_choice": True, "invoice_speeds": []}),
                       encoding="utf-8")
     assert Settings.load().invoice_speeds == []  # none ticked: the job's own speed (see invoice_calc.offered)
+
+
+def test_each_output_can_have_a_folder_of_its_own(folder, s, tmp_path):
+    roe, _ = jobs_of(folder, s)
+    for a in roe.case.attorneys:
+        a.checked = "Counsel" in (a.firm or "")
+    s.output_dirs = {"invoice": str(tmp_path / "Invoices"), "mofr": str(tmp_path / "MOFRs")}
+    fill_jobs([roe], s, outputs=["agreement", "mofr", "invoice"])
+    where = {p.name.split(" - ")[0].split(" ")[0]: p.parent for p in roe.saved}
+    assert where == {"Minute": tmp_path / "out", "MOFR": tmp_path / "MOFRs", "Invoice": tmp_path / "Invoices"}
+    assert Path(ledger_for(s).invoices()[0].file_path).parent == tmp_path / "Invoices"
+
+
+def test_folder_for_falls_back_and_takes_new_outputs(tmp_path, monkeypatch):
+    import minute_filler.settings as settings
+    s = Settings()
+    assert s.folder_for("agreement", tmp_path) == tmp_path               # the job's Save to folder
+    assert s.folder_for("runsheet", tmp_path).name == "DjinnIt Run Sheets"  # its own built-in folder
+    s.output_dirs["agreement"] = str(tmp_path / "A")
+    assert s.folder_for("agreement", tmp_path / "x") == tmp_path / "A"
+    # an output added later needs nothing more than its key: blank, it goes with the others
+    monkeypatch.setitem(settings.OUTPUTS, "letter", "Cover letter")
+    assert s.folder_for("letter", tmp_path) == tmp_path
+    s.output_dirs["letter"] = str(tmp_path / "Letters")
+    s.save()
+    assert Settings.load().folder_for("letter", tmp_path) == tmp_path / "Letters"
+
+
+def test_the_old_run_sheets_folder_is_kept(tmp_path):
+    import json
+    s = Settings()
+    s.path.write_text(json.dumps({"settings_version": 7, "runsheet_dir": str(tmp_path / "Sheets"),
+                                  "output_dirs": {"bogus": "x", "mofr": 5}}), encoding="utf-8")
+    loaded = Settings.load()
+    assert loaded.output_dirs == {"runsheet": str(tmp_path / "Sheets")}
+    assert loaded.runsheet_dir == str(tmp_path / "Sheets") and loaded.folder_for("runsheet") == tmp_path / "Sheets"
+    loaded.runsheet_dir = ""
+    assert "runsheet" not in loaded.output_dirs
+
+
+def test_the_command_line_folder_takes_every_output(folder, tmp_path, monkeypatch):
+    from minute_filler.main import batch
+    s = pat_settings()
+    s.output_dirs = {"agreement": str(tmp_path / "elsewhere")}
+    s.save()
+    assert batch(str(tmp_path / "cli"), [str(folder)], ["agreement"]) in (0, 1)
+    assert not (tmp_path / "elsewhere").exists() and list((tmp_path / "cli").glob("Minute Agreement*.pdf"))

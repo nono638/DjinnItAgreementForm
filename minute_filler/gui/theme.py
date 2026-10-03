@@ -146,11 +146,12 @@ def is_dark(theme: str) -> bool:
 
 
 def apply_theme(app, theme: str) -> dict:
-    """Sets the app's palette and style sheet for theme ("light", "dark" or "system") and returns the color
-    tokens used. The palette is set as well as
-    the style sheet because some widgets (placeholders, links) read only the palette."""
+    """Sets the app's palette and style sheet for theme ("light", "dark" or "system") at the current zoom (see
+    zoom.py) and returns the color tokens used. The palette is set as well as the style sheet because some
+    widgets (placeholders, links) read only the palette."""
+    from .zoom import scale_qss, zoom
     tokens = DARK if is_dark(theme) else LIGHT
-    qss = QSS
+    qss = scale_qss(QSS, zoom())
     for k, v in tokens.items():
         qss = qss.replace("{" + k + "}", v)
     qss = qss.replace("CHECK_ICON", _check_icon_path())

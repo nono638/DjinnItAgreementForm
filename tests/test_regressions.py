@@ -141,6 +141,15 @@ def test_settings_with_entries_of_the_wrong_kind_still_load():
     assert s.invoice_turnaround == {"Daily": "tomorrow"} and s.invoice_index_threshold == 1
 
 
+def test_invoice_text_rows_with_a_list_or_dict_for_where_or_when_are_dropped():
+    # a hand-edited file: "where"/"when" that aren't strings used to crash the load (unhashable)
+    rows = [{"where": ["footer"], "when": "always", "text": "x"}, {"where": "footer", "when": {"a": 1}, "text": "y"},
+            {"where": "footer", "when": "always", "text": "Thank you."}]
+    Settings().path.write_text(json.dumps({"invoice_texts": rows}), encoding="utf-8")
+    s = Settings.load()
+    assert s.invoice_texts == [{"where": "footer", "when": "always", "text": "Thank you."}]
+
+
 def test_bad_file_name_pattern_falls_back(s, tmp_path):
     from minute_filler.fill import output_name
     case = make_case(ROE)
@@ -321,3 +330,36 @@ def test_the_invoice_spreadsheet_prices_as_the_app_does():
     assert setup[f"B{row}"].value is False  # one index, split, unless the user says otherwise
     first, last = (int(x.rsplit("$", 1)[1]) for x in names["Turnaround"].split(":"))
     assert setup[f"A{first - 1}"].value == "TURNAROUND WORDING" and last - first == 3
+
+
+def test_generate_asks_about_the_case_as_whose_pages_left_it(make_window, monkeypatch, tmp_path):
+    # Whose pages... (asked first) may merge the job again: the questions are about the case as it is now
+    from minute_filler.gui import main_window
+    s = pat_settings()
+    s.use_ai = s.open_after = False
+    s.output_dir = str(tmp_path / "out")
+    s.outputs = ["agreement"]
+    win = make_window(s)
+    win.case = make_case(ROE)
+    win._show_case()
+    merged = make_case({**ROE, "case_name": ""})  # (the case name blank after the merge)
+
+    def whose_pages(job, outputs):
+        job.case = merged
+        return outputs
+    monkeypatch.setattr(win, "_without_unchecked_invoice", whose_pages)
+    asked, made = [], []
+
+    class Ask:
+        Accepted = 1
+
+        def __init__(self, questions, attorneys, parent):
+            asked.append([key for key, _, _ in questions])
+
+        def exec(self):
+            return 0  # (Cancel)
+    monkeypatch.setattr(main_window, "ClarifyDialog", Ask)
+    monkeypatch.setattr(main_window, "generate", lambda *a, **k: made.append(a) or [])
+    monkeypatch.setattr(win, "_saved_box", lambda *a, **k: None)
+    win.fill()
+    assert asked == [["case_name"]] and not made

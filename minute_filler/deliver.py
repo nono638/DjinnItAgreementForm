@@ -30,7 +30,8 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
              invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False,
              runsheet: RunSheetOpts | None = None, folders: list[Path] | None = None,
              invoiced: list[str] | None = None) -> list[Path]:
-    """Writes the chosen outputs (keys of settings.OUTPUTS) into out_dir and logs them in the records.
+    """Writes the chosen outputs (keys of settings.OUTPUTS) and logs them in the records. Each output goes to
+    its own folder when Settings -> Options -> Folders gives it one (Settings.folder_for), else into out_dir.
     An invoice needs `invoice` with the page count, the run sheet `runsheet` with the takes of the transcripts;
     raises ValueError otherwise. The run sheet goes to the run sheets folder (an existing one of the case is
     looked for there and in `folders`, see runsheet.choose). It is written first: when it is open in Excel,
@@ -49,16 +50,20 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
     pages = billed or to_int(case.get("est_pages"))
     made: list[Path] = []
 
+    mine = invoice.my_pages or billed if invoice else 0
+    whole = invoice.total_pages if invoice and invoice.total_pages else mine
+
     def record(kind: str, path: Path, atty: Attorney | None = None, number: str = "", count: int = pages,
-               on: CaseInfo = case) -> None:
+               on: CaseInfo = case, my: int = mine, total: int = whole) -> None:
         """Notes a file made and logs it in the records (count: the pages it covers; on: the case as the file
-        names it, an attorney's invoice naming only its own days)."""
+        names it, an attorney's invoice naming only its own days; my, total: the user's pages of the
+        transcripts and all their pages, when there are transcripts)."""
         made.append(path)
         try:
             ledger.log_activity(kind, case_name=on.get("case_name"), index_no=on.get("index_no"),
                                 dates=on.get("dates"), judge=on.get("judge"), part=on.get("part"),
                                 attorney=atty.name if atty else "", firm=atty.firm if atty else "", pages=count,
-                                file_path=str(path), invoice_no=number)
+                                file_path=str(path), invoice_no=number, my_pages=my, transcript_pages=total)
         except Exception as e:  # the files are made; a records problem must not lose them
             log_error("could not add to the records", e)
 
@@ -69,15 +74,18 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
                 record("runsheet", path, count=runsheet.added_pages)  # the pages of the takes added
         if "agreement" in outputs:
             for atty in case.orderers():
-                record("agreement", fill(case, atty, s, out_dir, dated), atty)
+                record("agreement", fill(case, atty, s, s.folder_for("agreement", out_dir), dated), atty)
         if "mofr" in outputs:
-            record("mofr", fill_mofr(case, s, out_dir, dated, pages=str(billed) if billed else ""))
+            record("mofr", fill_mofr(case, s, s.folder_for("mofr", out_dir), dated,
+                                     pages=str(billed) if billed else ""))
         if "invoice" in outputs:
             for f in firm_invoices(case, s, invoice):  # one per attorney, for the pages it ordered
-                path, number = make_invoice(f.case, f.atty, s, out_dir, f.opts, ledger, dated, f.quotes)
+                path, number = make_invoice(f.case, f.atty, s, s.folder_for("invoice", out_dir), f.opts, ledger,
+                                            dated, f.quotes)
                 if invoiced is not None:
                     invoiced.append(f.atty.key() if f.atty else "")
-                record("invoice", path, f.atty, number, f.opts.pages, f.case)
+                record("invoice", path, f.atty, number, f.opts.pages, f.case, f.opts.my_pages or f.opts.pages,
+                       f.opts.total_pages or f.opts.my_pages or f.opts.pages)
     except Exception as e:
         e.made = made  # what was saved before the problem, so the caller can say so
         raise

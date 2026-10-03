@@ -3,7 +3,7 @@ hand, with the app's arithmetic (minute_filler/invoice_calc.quote, as Settings h
 invoice where every party ordered every page: one original, index and judge's index, each split between the
 parties (the index one per party when Setup says so, as Settings.invoice_index_shared "each" does), a copy and
 an e-mailed copy for each, and each party's share rounded up to the cent. (Pages ordered
-by some of the parties only - the app's Who ordered... - are not in it.) All its data is fictional.
+by some of the parties only - the app's Excerpts... - are not in it.) All its data is fictional.
 
     .venv/Scripts/python.exe tools/make_invoice_template.py
 
