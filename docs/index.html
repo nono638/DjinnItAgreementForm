@@ -109,6 +109,16 @@
 <section>
   <div class="wrap two">
     <div>
+      <h2>Who pays for what, in plain sight</h2>
+      <p>Before you generate, the <b>Who ordered what</b> card lists every day the invoice covers, with a row for each attorney: the pages it ordered (every page, or which excerpt), the page numbers printed on them, who else ordered the same pages, and how many of your pages that bills. An attorney not ticked on a day "orders nothing", and when an invoice won't be made yet (a day with nobody ticked, an excerpt to check, whose pages to bill) the card says so in amber. Double-click a row to change it. <b>Generate all</b> asks before it bills a case with a day not decided: go back and decide, or go on without it. Sample shown uses made-up names.</p>
+    </div>
+    <img class="shot" src="orders.png" alt="The Who ordered what card: one attorney ordered every page, another an excerpt of pages 20 to 40">
+  </div>
+</section>
+
+<section>
+  <div class="wrap two">
+    <div>
       <h2>Shared trial? The run sheet keeps count.</h2>
       <p>When reporters take turns, each one puts their initials on the pages they write. Tick <b>Run sheet</b> and the app reads those initials page by page and adds a row per take to the trial's run sheet in Excel: date, reporter, pages written, start and end page, and the witness who took the stand. It finds the trial's run sheet by index number or case name (one trial can have several index numbers) and asks before adding to it. Filter by reporter to see their pages, or open the <b>By Reporter</b> sheet for everyone's totals. Sample shown uses made-up names.</p>
     </div>
@@ -120,7 +130,7 @@
   <div class="wrap two">
     <div>
       <h2>See what you billed, and what was paid</h2>
-      <p><b>Records</b> keeps every invoice and form the app made. See totals billed, paid and outstanding for any month, year or firm, with breakdowns by firm and by month. Tick <b>Paid</b> when the money comes in, and if you corrected an amount in an invoice PDF, <b>Change amounts…</b> keeps the totals right. Choose the columns you want: your pages and the transcript's, the excerpt, the speeds offered and the one ordered, whether an e-mailed copy was included, and more, and click a heading to sort. Deleted something by mistake? It waits in the <b>Trash</b> for 30 days. Export a report, an Excel workbook or CSV files whenever you like; a CSV copy is always kept up to date in your Documents folder.</p>
+      <p><b>Records</b> keeps every invoice and form the app made. See totals billed, paid and outstanding for any month, year or firm, with breakdowns by firm and by month. Tick <b>Paid</b> when the money comes in, and if you corrected an amount in an invoice PDF, <b>Change amounts…</b> keeps the totals right. Choose the columns you want: your pages and the transcript's, the excerpt, the speeds offered and the one ordered, whether an e-mailed copy was included, and more, and click a heading to sort. Looking for one firm or case? Type it in the search box: a firm, a case, an index number, an invoice number, with <b>Fuzzy</b> to forgive a typo or <b>Regex</b> for exact patterns. Deleted something by mistake? It waits in the <b>Trash</b> for 30 days. Export a report, an Excel workbook or CSV files whenever you like; a CSV copy is always kept up to date in your Documents folder.</p>
     </div>
     <img class="shot" src="records.png" alt="The Records window with invoice totals and a list of invoices">
   </div>
@@ -138,6 +148,7 @@
       <div class="card"><h3>Your folders</h3><p>Save everything next to your documents, in one folder, or give agreements, invoices, MOFRs and run sheets a folder each.</p></div>
       <div class="card"><h3>Your rate sheets</h3><p>Rates live in small spreadsheets (CSV) you can edit in Excel: private, city, whatever you charge.</p></div>
       <div class="card"><h3>Optional local AI</h3><p>If you use Ollama, an AI helper can read messy photos and e-mails. It is only used when Ollama is installed, and it stays on your machine.</p></div>
+      <div class="card"><h3>Help built in</h3><p>Press F1 (or Help &rarr; How to use) for what the app reads, what it makes, the steps, tips and the keyboard shortcuts.</p></div>
       <div class="card"><h3>Open source</h3><p>Read the code, report a problem, or suggest a change on GitHub.</p></div>
     </div>
   </div>
