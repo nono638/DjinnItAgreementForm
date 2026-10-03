@@ -118,6 +118,16 @@
 
 <section>
   <div class="wrap two">
+    <img class="shot" src="preview.png" alt="The preview: the filled minute agreement shown before it is saved, with Go back and Save">
+    <div>
+      <h2>See it before it's saved</h2>
+      <p>Click <b>Generate</b> and the app first shows you each form and invoice as it will be saved, a tab for each file, the invoice with the number it will get. <b>Save</b> saves them. <b>Go back</b> saves nothing and takes no invoice number, so you can fix a field and try again. Rather skip it? <b>Don't show previews anymore</b> turns it off, and Settings turns it back on. Once the files are saved, <b>Print…</b> sends them to your printer. Sample shown uses made-up names.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap two">
     <div>
       <h2>Shared trial? The run sheet keeps count.</h2>
       <p>When reporters take turns, each one puts their initials on the pages they write. Tick <b>Run sheet</b> and the app reads those initials page by page and adds a row per take to the trial's run sheet in Excel: date, reporter, pages written, start and end page, and the witness who took the stand. It finds the trial's run sheet by index number or case name (one trial can have several index numbers) and asks before adding to it. Filter by reporter to see their pages, or open the <b>By Reporter</b> sheet for everyone's totals. Sample shown uses made-up names.</p>
@@ -131,6 +141,7 @@
     <div>
       <h2>See what you billed, and what was paid</h2>
       <p><b>Records</b> keeps every invoice and form the app made. See totals billed, paid and outstanding for any month, year or firm, with breakdowns by firm and by month. Tick <b>Paid</b> when the money comes in, and if you corrected an amount in an invoice PDF, <b>Change amounts…</b> keeps the totals right. Choose the columns you want: your pages and the transcript's, the excerpt, the speeds offered and the one ordered, whether an e-mailed copy was included, and more, and click a heading to sort. Looking for one firm or case? Type it in the search box: a firm, a case, an index number, an invoice number, with <b>Fuzzy</b> to forgive a typo or <b>Regex</b> for exact patterns. Deleted something by mistake? It waits in the <b>Trash</b> for 30 days. Export a report, an Excel workbook or CSV files whenever you like; a CSV copy is always kept up to date in your Documents folder.</p>
+      <p>Need a corrected invoice, or another day of the same case? Right-click a record and <b>open its job again</b>: the case comes back as you left it. Ticked the wrong invoice paid? <b>Undo</b> (Ctrl+Z) takes it back. <b>Summary…</b> sums up a month or a year (invoices, pages, billed, paid, still owed), and the first time you open Records in a new month it tells you what last month came to. Your records are <b>backed up</b> each day you open the app, and you can go back to any of the last ten days.</p>
     </div>
     <img class="shot" src="records.png" alt="The Records window with invoice totals and a list of invoices">
   </div>
@@ -140,7 +151,7 @@
   <div class="wrap">
     <h2>Good to know</h2>
     <div class="grid">
-      <div class="card"><h3>Private</h3><p>Everything runs on your computer. Photos are read with Windows' built-in text recognition. Nothing is uploaded.</p></div>
+      <div class="card"><h3>Private</h3><p>Everything runs on your computer. Photos are read with Windows' built-in text recognition. Nothing is uploaded. Once a day the app asks GitHub whether there is a newer version (it sends nothing about you or your cases); you can turn that off in Settings.</p></div>
       <div class="card"><h3>Asks when unsure</h3><p>Missing or conflicting items (index number, dates, judge) are raised before filling, never silently guessed.</p></div>
       <div class="card"><h3>Remembers you</h3><p>Your name, address, phone, e-mail, default speed, copies and signature are set once in Settings, and what you tick in the Outputs box stays ticked.</p></div>
       <div class="card"><h3>Fix it afterwards</h3><p>The PDFs stay fillable: every value the app typed in, invoice amounts included, can be corrected in a PDF viewer. When it's final, File &rarr; Lock finished PDFs saves a locked copy.</p></div>
@@ -148,6 +159,7 @@
       <div class="card"><h3>Your folders</h3><p>Save everything next to your documents, in one folder, or give agreements, invoices, MOFRs and run sheets a folder each.</p></div>
       <div class="card"><h3>Your rate sheets</h3><p>Rates live in small spreadsheets (CSV) you can edit in Excel: private, city, whatever you charge.</p></div>
       <div class="card"><h3>Optional local AI</h3><p>If you use Ollama, an AI helper can read messy photos and e-mails. It is only used when Ollama is installed, and it stays on your machine.</p></div>
+      <div class="card"><h3>A new computer?</h3><p>File &rarr; Export settings saves your details, options and rate sheets as one file; Import settings reads it on the other computer. A short welcome asks a new user the few things the forms need.</p></div>
       <div class="card"><h3>Help built in</h3><p>Press F1 (or Help &rarr; How to use) for what the app reads, what it makes, the steps, tips and the keyboard shortcuts.</p></div>
       <div class="card"><h3>Open source</h3><p>Read the code, report a problem, or suggest a change on GitHub.</p></div>
     </div>
