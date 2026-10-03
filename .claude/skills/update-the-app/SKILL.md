@@ -38,7 +38,11 @@ Tell the user in a line or two what you're on as you go, e.g. "Step 2 of 7: docs
   wait for input.
 - **Subagents** (the bug sweep runs several): tell each one to edit only its own files, to keep repro
   scripts in the scratchpad, and never to end processes by name (`taskkill /IM python*` once closed the
-  user's own Python programs). Only processes it started itself.
+  user's own Python programs). Only processes it started itself. Every script that imports minute_filler
+  must first (at the very top, before that import) set `APPDATA`, `USERPROFILE` and `HOME` to a
+  `tempfile.mkdtemp()` folder: setting records_dir/output_dir is not enough, as `Ledger()` otherwise writes
+  the user's real `%APPDATA%\DjinnItAgreementForm\records.db` (made-up invoices once had to be removed from
+  it by hand). pytest is safe (conftest isolates them).
 - Read the project memory (`MEMORY.md` and the files it points to) for the current state and known
   limits before starting.
 

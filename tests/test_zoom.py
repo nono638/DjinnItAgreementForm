@@ -1,4 +1,4 @@
-"""Zoom (View → Zoom in / out / Actual size, Ctrl + / Ctrl - / Ctrl 0) and a window that fits the screen: the
+"""Zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl + wheel) and a window that fits the screen: the
 style sheet's sizes are scaled, fixed widget sizes follow, the zoom is saved, and the window is never bigger
 than the screen has room for (at 150 % Windows scaling a 1920 x 1080 screen is about 1280 x 690)."""
 import os

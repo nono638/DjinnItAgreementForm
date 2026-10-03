@@ -15,7 +15,7 @@ from typing import Callable
 from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
+    QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -32,6 +32,8 @@ from .zoom import z
 
 SUM_COLS = ["", "Invoices", "Billed", "Paid", "Outstanding"]
 STATUS_FILTERS = [("All", ""), ("Unpaid", "open"), ("Paid", "paid"), ("Void", "void")]
+SEARCH_TIP = ("Words found anywhere in a record, in any order: a firm, an attorney, a case,\n"
+              "an index number (712345/2021 or 712345-2021), an invoice number, a judge…")
 STATUS_COLORS = {"open": "#d97706", "paid": "#16a34a", "void": "#8a8797"}  # readable on light and dark
 
 
@@ -335,6 +337,37 @@ class RecordsWindow(QDialog):
             lay.addWidget(client)
         return year, month, client
 
+    def _search(self, lay: QHBoxLayout, placeholder: str, on_change) -> tuple[QLineEdit, QCheckBox, QCheckBox]:
+        """Adds a search box with its Regex and Fuzzy boxes (both unticked: plain words) to a filter row;
+        on_change runs when any of them changes. The two boxes exclude each other."""
+        edit = QLineEdit()
+        edit.setPlaceholderText(placeholder)
+        edit.setClearButtonEnabled(True)
+        edit.setToolTip(SEARCH_TIP)
+        lay.addWidget(edit, 1)
+        regex, fuzzy = QCheckBox("Regex"), QCheckBox("Fuzzy")
+        regex.setToolTip("Search with a regular expression, e.g.  ^Smith  or  2026-00(1|2)  (any case)")
+        fuzzy.setToolTip("Also find near misses and misspellings: \"Counsle\" finds \"Counsel & Counsel\"")
+        for box, other in ((regex, fuzzy), (fuzzy, regex)):
+            box.toggled.connect(lambda on, o=other: o.setChecked(False) if on else None)
+            box.toggled.connect(on_change)
+            lay.addWidget(box)
+        edit.textChanged.connect(on_change)
+        return edit, regex, fuzzy
+
+    @staticmethod
+    def _how(regex: QCheckBox, fuzzy: QCheckBox) -> str:
+        """The search mode the boxes ask for: "regex", "fuzzy" or plain "words" (see records.matcher)."""
+        return "regex" if regex.isChecked() else "fuzzy" if fuzzy.isChecked() else "words"
+
+    @staticmethod
+    def _search_problem(edit: QLineEdit, problem: str) -> None:
+        """Marks a search box whose regular expression can't be read (amber, with the reason as its tooltip)."""
+        from .widgets import repolish
+        edit.setProperty("review", bool(problem))
+        edit.setToolTip(problem or SEARCH_TIP)
+        repolish(edit)
+
     def _table_buttons(self, lay: QHBoxLayout, which: str) -> QPushButton:
         """Adds Columns… and the Trash toggle to a filter row; returns the Trash button."""
         cols = QPushButton("Columns…")
@@ -359,15 +392,12 @@ class RecordsWindow(QDialog):
             self.i_status.addItem(label, key)
         fl.addWidget(QLabel("Status:"))
         fl.addWidget(self.i_status)
-        self.i_text = QLineEdit()
-        self.i_text.setPlaceholderText("Search case, index no., attorney…")
-        self.i_text.setClearButtonEnabled(True)
-        fl.addWidget(self.i_text, 1)
+        self.i_text, self.i_regex, self.i_fuzzy = self._search(
+            fl, "Search: firm, attorney, case, index no., invoice no.…", self.show_invoices)
         self.i_trash = self._table_buttons(fl, "invoices")
         v.addLayout(fl)
         for c in (self.i_year, self.i_month, self.i_client, self.i_status):
             c.currentIndexChanged.connect(self.show_invoices)
-        self.i_text.textChanged.connect(self.show_invoices)
         self.i_trash.toggled.connect(lambda on: self._trash_toggled(on, self.i_year))
 
         tiles = QHBoxLayout()
@@ -428,15 +458,12 @@ class RecordsWindow(QDialog):
         fl.addWidget(QLabel("Show:"))
         fl.addWidget(self.a_kind)
         self.a_year, self.a_month, _ = self._filters(fl, False)
-        self.a_text = QLineEdit()
-        self.a_text.setPlaceholderText("Search case, index no., attorney, firm…")
-        self.a_text.setClearButtonEnabled(True)
-        fl.addWidget(self.a_text, 1)
+        self.a_text, self.a_regex, self.a_fuzzy = self._search(
+            fl, "Search: firm, attorney, case, index no., file…", self.show_activity)
         self.a_trash = self._table_buttons(fl, "activity")
         v.addLayout(fl)
         for c in (self.a_kind, self.a_year, self.a_month):
             c.currentIndexChanged.connect(self.show_activity)
-        self.a_text.textChanged.connect(self.show_activity)
         self.a_trash.toggled.connect(lambda on: self._trash_toggled(on, self.a_year))
         self.a_count = QLabel("")
         self.a_count.setObjectName("muted")
@@ -543,13 +570,18 @@ class RecordsWindow(QDialog):
         """The Invoices tab's filters as keyword arguments for Ledger.invoices ("All" is None or "")."""
         return dict(year=self.i_year.currentData() or None, month=self.i_month.currentData() or None,
                     client=self.i_client.currentData() or "", status=self.i_status.currentData() or "",
-                    text=self.i_text.text().strip())
+                    text=self.i_text.text().strip(), how=self._how(self.i_regex, self.i_fuzzy))
 
     def show_invoices(self, _=None) -> None:
         """Lists the invoices that match the filters (those in the trash with the Trash button) and updates the
         totals and the by-firm and by-month tabs."""
         trash = self.i_trash.isChecked()
-        self.shown = self.ledger.invoices(**self._invoice_filters(), trash=trash)
+        try:
+            self.shown = self.ledger.invoices(**self._invoice_filters(), trash=trash)
+            self._search_problem(self.i_text, "")
+        except ValueError as e:  # a regular expression still being typed ("(smith")
+            self.shown = []
+            self._search_problem(self.i_text, str(e))
         t = self.inv_table
         t.blockSignals(True)  # setting the Paid ticks must not look like the user clicking them
         t.setSortingEnabled(False)
@@ -609,8 +641,13 @@ class RecordsWindow(QDialog):
         since = until = ""
         if y:
             since, until = f"{y}-{m or 1:02}-01", f"{y}-{m or 12:02}-{calendar.monthrange(y, m or 12)[1]:02}"
-        rows = self.ledger.activity(self.a_kind.currentData() or "", since, until, self.a_text.text().strip(),
-                                    trash=self.a_trash.isChecked())
+        try:
+            rows = self.ledger.activity(self.a_kind.currentData() or "", since, until, self.a_text.text().strip(),
+                                        trash=self.a_trash.isChecked(), how=self._how(self.a_regex, self.a_fuzzy))
+            self._search_problem(self.a_text, "")
+        except ValueError as e:  # a regular expression still being typed
+            rows = []
+            self._search_problem(self.a_text, str(e))
         # A month in every year ("March", All years) is not one date range, so it is filtered here.
         if m and not y:
             rows = [a for a in rows if a.ts[5:7] == f"{m:02}"]
@@ -857,8 +894,19 @@ class RecordsWindow(QDialog):
         deleted ones) the same filters match: a report never passes deleted invoices off as billed."""
         return self.ledger.invoices(**self._invoice_filters()) if self.i_trash.isChecked() else self.shown
 
+    def _search_blocked(self) -> bool:
+        """True (after saying so) when the Invoices tab's search can't be read (a regular expression half
+        typed, Fuzzy without its library: the box is amber, see _search_problem): a report of it would list
+        nothing, or fail."""
+        if not self.i_text.property("review"):
+            return False
+        QMessageBox.information(self, "Fix the search first", f"Fix the search first: {self.i_text.toolTip()}")
+        return True
+
     def export_html(self) -> None:
         """Saves a report of the invoices shown (see _to_export) as a web page and opens it."""
+        if self._search_blocked():
+            return
         title = self._filter_title()
         p = self._ask_path("Save the report", f"{title}.html", "Web page (*.html)")
         if p:
@@ -867,6 +915,8 @@ class RecordsWindow(QDialog):
     def export_xlsx(self) -> None:
         """Saves the invoices shown (see _to_export; and everything made, and totals) as an Excel workbook and
         opens it."""
+        if self._search_blocked():
+            return
         p = self._ask_path("Export to Excel", f"{self._filter_title()}.xlsx", "Excel workbook (*.xlsx)")
         if p:
             self._try(lambda: open_path(str(self.ledger.export_xlsx(p, self._to_export()))))

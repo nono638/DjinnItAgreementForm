@@ -467,10 +467,14 @@ class Ledger:
 
     # ------------------------------------------------------------------ reading
     def invoices(self, year: int | None = None, month: int | None = None, client: str = "",
-                 status: str = "", text: str = "", trash: bool = False) -> list[Invoice]:
+                 status: str = "", text: str = "", trash: bool = False, how: str = "words") -> list[Invoice]:
         """Newest first, filtered by year, month, status ("open", "paid", "void"), client (the exact
-        firm/attorney, see Invoice.client) and text (words found anywhere). trash: the invoices in the trash
-        instead of the others."""
+        firm/attorney, see Invoice.client) and text: found anywhere in the invoice (number, case, index number,
+        firm, attorney, e-mail, court, part, judge, dates, excerpt, reporters, notes, the speed paid, file),
+        as `how` says
+        (see matcher: "words", "regex" or "fuzzy"; ValueError for a pattern that isn't one). trash: the
+        invoices in the trash instead of the others."""
+        found = matcher(text, how)
         out = []
         where = "deleted IS NOT NULL" if trash else "deleted IS NULL"
         for r in self._rows(f"SELECT * FROM invoices WHERE {where} "
@@ -488,8 +492,9 @@ class Ledger:
                 continue
             if status and inv.status != status:
                 continue
-            if text and not _matches(text, [inv.invoice_no, inv.case_name, inv.index_no, inv.bill_to, inv.firm,
-                                            inv.email, inv.judge, inv.notes]):
+            if not found([inv.invoice_no, inv.case_name, inv.index_no, inv.bill_to, inv.firm, inv.email,
+                          inv.court, inv.part, inv.judge, inv.dates, inv.excerpt, inv.reporters, inv.notes,
+                          inv.paid_speed, Path(inv.file_path).name if inv.file_path else ""]):
                 continue
             out.append(inv)
         return out
@@ -499,9 +504,12 @@ class Ledger:
         return next((i for i in self.invoices() + self.invoices(trash=True) if i.invoice_no == invoice_no), None)
 
     def activity(self, kind: str = "", since: str = "", until: str = "", text: str = "",
-                 trash: bool = False) -> list[Activity]:
-        """Newest first. kind: a key of KINDS; since/until: ISO dates (inclusive); text: words found anywhere;
-        trash: the rows in the trash instead of the others."""
+                 trash: bool = False, how: str = "words") -> list[Activity]:
+        """Newest first. kind: a key of KINDS; since/until: ISO dates (inclusive); text: found anywhere in the
+        row (case, index number, attorney, firm, judge, part, dates, invoice number, what was made as the
+        Activity tab names it ("Minute agreement"), file), as `how` says (see matcher); trash: the rows in the
+        trash instead of the others."""
+        found = matcher(text, how)
         out = []
         where = "deleted IS NOT NULL" if trash else "deleted IS NULL"
         for r in self._rows(f"SELECT * FROM activity WHERE {where} ORDER BY ts DESC, id DESC"):
@@ -512,7 +520,8 @@ class Ledger:
                 continue
             if until and a.ts[:10] > until:
                 continue
-            if text and not _matches(text, [a.case_name, a.index_no, a.attorney, a.firm, a.judge, a.invoice_no]):
+            if not found([a.case_name, a.index_no, a.attorney, a.firm, a.judge, a.part, a.dates, a.invoice_no,
+                          KINDS.get(a.kind, a.kind), Path(a.file_path).name if a.file_path else ""]):
                 continue
             out.append(a)
         return out
@@ -609,10 +618,49 @@ class Ledger:
         return path
 
 
-def _matches(text: str, values: list) -> bool:
-    """Every word of text is somewhere in values (any case)."""
-    hay = " ".join(str(v) for v in values if v).lower()
-    return all(w in hay for w in text.lower().split())
+SEARCH_MODES = ("words", "regex", "fuzzy")
+FUZZY_SCORE = 80  # how alike a word must be (0-100, rapidfuzz's partial_ratio) to count as found
+
+
+def matcher(text: str, how: str = "words"):
+    """A test for one record's values (a list of strings) against the search text:
+      "words"  every word of text is somewhere in them, any case ("counsel 2026"); a dash and a slash find
+               each other, both ways ("712345-2021" finds "712345/2021", "6/3/2026" finds "6-3-2026")
+      "regex"  text is a regular expression found somewhere in them, any case ("^Invoice 2026-00(1|2)");
+               ValueError when it isn't a valid one
+      "fuzzy"  every word is close to a part of them (rapidfuzz's partial_ratio at least FUZZY_SCORE), so a
+               misspelling still finds it ("Counsle" finds "Counsel & Counsel"); words of one or two letters
+               must be found as they are, and in practice so must words of three or four (one wrong letter
+               already puts them below the score); ValueError when rapidfuzz is missing
+    Blank text finds everything. ValueError for a `how` not in SEARCH_MODES."""
+    if how not in SEARCH_MODES:
+        raise ValueError(f"unknown search mode {how!r} (one of {', '.join(SEARCH_MODES)})")
+    text = text.strip()
+    if not text:
+        return lambda values: True
+    if how == "regex":
+        import re
+        try:
+            pattern = re.compile(text, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(f"not a valid regular expression: {e}") from None
+        return lambda values: any(pattern.search(str(v)) for v in values if v)
+    words = text.lower().split()
+    if how == "fuzzy":
+        try:
+            from rapidfuzz import fuzz
+        except ImportError:  # (a build without it): the box says so, as for a pattern that can't be read
+            raise ValueError("Fuzzy search isn't available: the rapidfuzz library is missing") from None
+
+        def close(values) -> bool:
+            hay = " ".join(str(v) for v in values if v).lower()
+            return all(w in hay or (len(w) > 2 and fuzz.partial_ratio(w, hay) >= FUZZY_SCORE) for w in words)
+        return close
+
+    def has(values) -> bool:
+        hay = " ".join(str(v) for v in values if v).lower()
+        return all(w in hay or w.replace("-", "/") in hay or w.replace("/", "-") in hay for w in words)
+    return has
 
 
 def _month_name(ym: str) -> str:

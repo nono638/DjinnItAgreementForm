@@ -237,7 +237,7 @@ class Settings:
     theme: str = "system"             # system / light / dark
     show_djinn: bool = True
     window_geometry: str = ""
-    zoom: float = 1.0                 # View → Zoom (1.0 = 100 %), on top of the Windows display scaling
+    zoom: float = 1.0                 # Ctrl + / Ctrl - zoom (1.0 = 100 %), on top of the Windows display scaling
 
     @property
     def path(self) -> Path:

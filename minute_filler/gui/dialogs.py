@@ -216,7 +216,7 @@ class SettingsDialog(QDialog):
         self.o_zoom.setSuffix(" %")
         self.o_zoom.setValue(round(zoom() * 100))
         self.o_zoom.setToolTip("How big everything in the window is drawn, on top of Windows' own display scaling.\n"
-                               "Also View → Zoom in / Zoom out, Ctrl + and Ctrl −, or Ctrl and the mouse wheel;\n"
+                               "Also Ctrl + and Ctrl − in the window, or Ctrl and the mouse wheel;\n"
                                "Ctrl 0 goes back to 100 %.")
         f.addRow("Zoom", self.o_zoom)
         scroll = QScrollArea()  # a long tab: scrolls on small screens
@@ -993,7 +993,7 @@ def excerpt_rows(pages: int, everyone: list[str], who: str, first: int, last: in
 
 
 class PortionsDialog(QDialog):
-    """Excerpts / who ordered…: which attorney ordered which pages of one day. One attorney ordering the whole
+    """Excerpts…: which attorney ordered which pages of one day. One attorney ordering the whole
     transcript and another an excerpt is set in one go at the top (excerpt_rows); otherwise each row is a
     stretch of pages, from the page after the row above up to the page chosen (the last row ends at the day's
     pages), with a box per attorney. values() gives the rows as Job.portions keeps them, or None when every
@@ -1565,6 +1565,7 @@ _BACKGROUND: list[QThread] = []
 
 
 CONTACT_EMAIL = "noahcollincourtreporter@gmail.com"
+WEBSITE_URL = "https://nono638.github.io/DjinnItAgreementForm/"
 SOURCE_URL = "https://github.com/nono638/DjinnItAgreementForm"
 FEEDBACK_URL = f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}"
 COFFEE_URL = "https://buymeacoffee.com/noahcollin"
@@ -1576,6 +1577,7 @@ COMPONENTS = [
     ("ollama-python", "MIT", "https://github.com/ollama/ollama-python"),
     ("PyWinRT (Windows OCR bindings)", "MIT", "https://github.com/pywinrt/pywinrt"),
     ("openpyxl (run sheets)", "MIT", "https://openpyxl.readthedocs.io"),
+    ("RapidFuzz (the Records search's Fuzzy box)", "MIT", "https://github.com/rapidfuzz/RapidFuzz"),
     ("et_xmlfile (used by openpyxl)", "MIT", "https://foss.heptapod.net/openpyxl/et_xmlfile"),
     ("HTTPX (used by ollama-python)", "BSD-3-Clause", "https://www.python-httpx.org"),
     ("Python", "PSF License", "https://www.python.org"),
@@ -1590,7 +1592,7 @@ class AboutDialog(QDialog):
         from pathlib import Path
         from ..settings import settings_dir
         self.setWindowTitle("About DjinnItAgreementForm")
-        self.setMinimumWidth(z(460))
+        self.setMinimumWidth(z(560))
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
         pic = Path(__file__).resolve().parent.parent / "assets" / "djinn_done.jpg"
@@ -1607,7 +1609,9 @@ class AboutDialog(QDialog):
         lay.addWidget(ver)
         body = QLabel(
             "Fills in New York UCS Court Reporter Minute Agreement Forms from transcripts, invoices, "
-            "photos and e-mails.<br><br>"
+            "photos and e-mails.<br>"
+            f'Website, with a guide and the latest version: <a href="{WEBSITE_URL}">'
+            f'{WEBSITE_URL.split("//")[1].rstrip("/")}</a><br><br>'
             "Created by <b>Noah Collin</b>, Senior Court Reporter.<br>"
             f'Questions, bugs or ideas: <a href="mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm">'
             f"{CONTACT_EMAIL}</a><br><br>"
@@ -1615,6 +1619,7 @@ class AboutDialog(QDialog):
             + (f' Source code: <a href="{SOURCE_URL}">{SOURCE_URL}</a>' if SOURCE_URL else "")
             + f'<br><br>If this saves you time, you can <a href="{COFFEE_URL}">buy me a coffee</a> ☕')
         body.setWordWrap(True)
+        body.setMinimumWidth(z(520))  # so its height is measured at the width it's shown at (else the end is cut)
         body.setTextFormat(Qt.RichText)
         body.setOpenExternalLinks(True)
         lay.addWidget(body)
@@ -1657,3 +1662,122 @@ class AboutDialog(QDialog):
         b.clicked.connect(box.accept)
         lay.addWidget(b, 0, Qt.AlignRight)
         box.exec()
+
+
+GUIDE = """
+<h2>How to use DjinnItAgreementForm</h2>
+<p>The app reads the documents of an order (a transcript, an invoice, a photo of a court paper, an e-mail),
+finds the court, part, judge, case, index number, dates and attorneys, shows them for you to check, and makes
+the paperwork: the minute agreement, the invoice, the MOFR and the run sheet. Everything stays on this
+computer.</p>
+
+<h3>What you can put in</h3>
+<ul>
+<li><b>Transcript PDFs.</b> The best input: the case details come from the title page, and the page count
+(the pages with <i>your</i> initials, when several reporters wrote it) is what the invoice bills.</li>
+<li><b>Other PDFs:</b> an invoice, a scanned order, a printed e-mail. Scans are read by Windows' text
+recognition.</li>
+<li><b>Photos and screenshots</b> (JPG, PNG, TIFF, BMP, WebP), or a screenshot pasted with
+<b>Ctrl+V</b>.</li>
+<li><b>E-mails:</b> paste the text into the box and click <b>Extract from text</b>, or drop a saved
+<code>.eml</code>. Word (<code>.docx</code>), <code>.txt</code> and web pages work too. Outlook
+<code>.msg</code> files don't: copy the e-mail's text instead.</li>
+<li><b>A whole folder</b> (File → Open a folder of documents). Documents about the same case and date are
+put together, one job per day.</li>
+</ul>
+
+<h3>What it makes</h3>
+<p>Tick them in the <b>Outputs</b> box at the bottom of the window; each column holds that output's
+options.</p>
+<ul>
+<li><b>Minute agreement</b>: the UCS Court Reporter Minute Agreement Form, one PDF for each ticked
+attorney.</li>
+<li><b>Invoice</b>: priced from your rate sheet and the transcript's pages, one for each ticked attorney.
+It needs a transcript. Several days of one case made together with <b>Generate all</b> get one joint invoice
+per attorney (unless Settings → Invoice says an invoice for each day), and an attorney who ordered an excerpt
+pays only for those pages (<b>Who ordered what</b> shows who pays for what).</li>
+<li><b>MOFR</b>: the Minute Order Form/Receipt, the reporter's parts filled in.</li>
+<li><b>Run sheet</b>: an Excel sheet of a shared trial's takes (who wrote which pages), read from the
+initials at the foot of the pages.</li>
+</ul>
+<p>The PDFs are saved next to your document, or in the folders chosen in Settings → Options → Folders, and
+they stay fillable (unless <i>Flatten the PDF</i> is ticked in Settings → Options): you can still correct any
+value in a PDF viewer. Every file made is listed in
+<b>Records</b> (Ctrl+R).</p>
+
+<h3>Step by step</h3>
+<ol>
+<li><b>Add the order:</b> drop the documents on the drop zone (or click <b>Browse...</b>, or Ctrl+O).</li>
+<li><b>Check the fields.</b> Amber fields are guesses; a ▾ button lists the other candidates. The badge
+on each field says where its value came from (found in the document, AI, your defaults, calculated or
+typed by you).</li>
+<li><b>Tick the attorneys who ordered.</b> A transcript lists everyone who appeared, not who ordered.</li>
+<li><b>Pick the rate sheet and speed</b> under Order.</li>
+<li><b>Tick the outputs</b> and click <b>Generate</b> (Ctrl+Enter), or <b>Generate all</b>
+(Ctrl+Shift+Enter) for every ticked job in the list on the left.</li>
+</ol>
+
+<h3>Tips</h3>
+<ul>
+<li>The first time, fill in <b>Settings → My info</b> (your name, contact details, initials and signature)
+and <b>Settings → Defaults</b> (rate sheet, speed, copies) once, and they are used on every form.</li>
+<li>Several documents for one order can be added together; what they say is combined.</li>
+<li>In the job list, ✓ marks a job already made and ⚠ one that failed or has something missing. Right-click a
+document to
+move it to a job of its own.</li>
+<li>When one attorney ordered the whole transcript and another only some pages, set it with
+<b>Excerpts…</b> in the Invoice panel of the Outputs box, and check the <b>Who ordered what</b> card before generating.</li>
+<li>Your own invoice text (shown always, or only when it applies) is in Settings → Invoice → <i>Invoice
+text</i>; <b>Preview…</b> shows a made-up invoice with it.</li>
+<li>In <b>Records</b>, type a firm, case or index number to find its invoices, tick <b>Paid</b> when they
+pay, and choose the columns with <b>Columns…</b>. Deleted records stay in the trash for 30 days; the PDFs
+are never deleted.</li>
+<li>When an invoice is final, <b>File → Lock finished PDFs</b> saves a copy nobody can change.</li>
+<li>Text too small or too big? <b>Ctrl +</b> and <b>Ctrl −</b> (or Ctrl and the mouse wheel) zoom,
+<b>Ctrl 0</b> goes back to 100%.</li>
+<li>Prices are in rate sheets you can edit in Excel: <b>File → Open rate sheets folder</b>.</li>
+</ul>
+
+<h3>Keyboard shortcuts</h3>
+<table cellpadding="2">
+<tr><td><b>F1</b></td><td>This guide</td></tr>
+<tr><td><b>Ctrl+O</b></td><td>Open documents</td></tr>
+<tr><td><b>Ctrl+V</b></td><td>Paste a screenshot or e-mail text</td></tr>
+<tr><td><b>Ctrl+N</b></td><td>New job</td></tr>
+<tr><td><b>Ctrl+Enter</b></td><td>Generate (this job)</td></tr>
+<tr><td><b>Ctrl+Shift+Enter</b></td><td>Generate all</td></tr>
+<tr><td><b>Ctrl+R</b></td><td>Records</td></tr>
+<tr><td><b>Ctrl + / Ctrl − / Ctrl 0</b></td><td>Zoom in, out, back to 100%</td></tr>
+</table>
+
+<h3>More help</h3>
+<p>The <a href="{website}">website</a> shows the app with pictures and explains each feature, and has the
+latest version to download. Something not working? <b>Help → Copy details for a problem report</b> and
+e-mail it with <b>Help → Send feedback</b>; the log never records what your documents say.</p>
+"""
+
+
+class GuideDialog(QDialog):
+    """Help → How to use: what the app takes in, what it makes, the steps, tips and shortcuts (GUIDE)."""
+
+    def __init__(self, parent=None):
+        """Builds the window: the guide in a scrolling text box, a Website button and Close."""
+        super().__init__(parent)
+        self.setWindowTitle("How to use DjinnItAgreementForm")
+        self.resize(z(680), z(720))
+        lay = QVBoxLayout(self)
+        self.text = QTextBrowser()
+        self.text.setOpenExternalLinks(True)
+        self.text.setHtml(GUIDE.replace("{website}", WEBSITE_URL))
+        lay.addWidget(self.text, 1)
+        row = QHBoxLayout()
+        site = QPushButton("Open the website")
+        site.setToolTip(WEBSITE_URL)
+        site.clicked.connect(lambda: open_url(WEBSITE_URL))
+        row.addWidget(site)
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)

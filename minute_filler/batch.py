@@ -44,6 +44,9 @@ from .settings import OUTPUTS, Settings
 
 BATCH_EXT = {".pdf", ".eml", ".docx", ".txt", ".htm", ".html"} | IMAGE_EXT  # taken from a dropped folder
 Progress = Callable[[int, int, str], None]
+# How fill_jobs begins a day's error when its invoice was held back (a choice to make): the window tells these
+# apart from files that could not be saved
+NOT_INVOICED = "invoice not made:"
 
 # Words that don't help tell two captions apart.
 _NOISE = {"the", "of", "and", "in", "re", "matter", "et", "al", "ano", "inc", "llc", "llp", "corp",
@@ -318,8 +321,8 @@ class Job:
         return ""
 
     def invoice_hold(self) -> str:
-        """Why no invoice is made for this job until the user checks something ("" when it can be made): Who
-        ordered... rows that no longer fit, or whose pages to bill (Whose pages...)."""
+        """Why no invoice is made for this job until the user checks something ("" when it can be made):
+        Excerpts... rows that no longer fit, or whose pages to bill (Whose pages...)."""
         if self.portions_problem():
             return self.portions_check()
         why = self.ownership_problem()
@@ -535,6 +538,68 @@ class Job:
         return [DayOrder(day, pages, [Portion(pages, keys, n)], total, who)
                 for (day, pages), total, who in zip(days, totals, counts)]
 
+    def order_lines(self, attorneys: list[Attorney] | None = None) -> list[OrderLine]:
+        """Who orders what, spelled out for the window's "Who ordered what" card: a line per day and attorney,
+        with the stretches of pages it ordered (whole day or an excerpt), who shares each of them, and how many
+        of the user's pages that bills. attorneys: also give a line ("orders nothing") to these when they are not
+        ticked on the day (the other days' attorneys of a joint invoice). [] without pages to bill."""
+        days = self.invoice_days()
+        if not days and not self.ownership_problem():
+            return []
+        held = self.invoice_hold()  # (the wording the Invoice panel and Generate all use)
+        ticked = [a for a in self.case.invoice_orderers() if a is not None]
+        keys = [a.key() for a in ticked]
+        names = {a.key(): a.name or a.firm for a in ticked}
+        others = [a for a in attorneys or [] if a.key() not in names]
+
+        def nothing(day: str) -> list[OrderLine]:
+            """The lines of the attorneys of the other days who aren't ticked on this one."""
+            return [OrderLine(day, a.key(), a.name or a.firm, note="not ticked on this day: orders nothing")
+                    for a in others]
+
+        out: list[OrderLine] = []
+        if held or not days:
+            day = days[0][0] if len(days) == 1 else self.case.get("dates")
+            return [OrderLine(day, k, names[k], note="⚠ " + held) for k in keys] + nothing(day)
+        if len(days) > 1:  # a job of several days (Settings: all days on one form): every day is whole
+            for (day, billed), whole in zip(days, self.day_totals()):
+                for k in keys:
+                    line = OrderLine(day, k, names[k], [(1, whole)], True, {o: [(1, whole)] for o in keys
+                                                                            if o != k}, billed, whole)
+                    line.parties = self.parties  # invoice_orders shares each day that many ways when typed
+                    out.append(line)
+                out += nothing(day)
+            return out
+        day, billed_day = days[0]
+        pages = self.portion_pages()
+        rows = self.valid_portions() or [(pages, keys)]
+        mask, printed = self.day_mask(), self.printed_pages()
+        stretches, start = [], 0  # (first, last, keys), 1-based
+        for last, ks in rows:
+            stretches.append((start + 1, last, [k for k in ks if k in names]))
+            start = last
+
+        def billed(first: int, last: int) -> int:
+            """The pages billed among first..last (the user's own, when several reporters wrote the day)."""
+            return sum(mask[first - 1:last]) if mask is not None else last - first + 1
+
+        for k in keys:
+            mine = [(a, b) for a, b, ks in stretches if k in ks]
+            spans = _join(mine)
+            shared: dict[str, list[tuple[int, int]]] = {}
+            for a, b, ks in stretches:
+                if k in ks:
+                    for o in ks:
+                        if o != k:
+                            shared.setdefault(o, []).append((a, b))
+            line = OrderLine(day, k, names[k], spans, spans == [(1, pages)],
+                             {o: _join(s) for o, s in shared.items()}, sum(billed(a, b) for a, b in spans), pages)
+            line.printed = [_printed_span(printed, a, b) for a, b in spans]
+            line.parties = self.parties if self.valid_portions() is None else 0
+            line.typed = self.pages_typed()
+            out.append(line)
+        return out + nothing(day)
+
     def output_problems(self, outputs) -> list[str]:
         """What stops the chosen outputs: missing fields for the agreement or MOFR, no transcript for an
         invoice or run sheet, or Excerpts... rows to check for the invoice."""
@@ -563,6 +628,47 @@ class Job:
         run sheets, which the days of a case share)."""
         per = {"agreement": self.form_count(), "mofr": 1}
         return sum(per.get(o, 0) for o in outputs)
+
+
+@dataclass
+class OrderLine:
+    """One attorney's order of one day, as the "Who ordered what" card shows it (see Job.order_lines). spans:
+    the stretches of the day's pages it ordered, counted from 1 over every page of the day's transcripts
+    ([(20, 40)]); whole: every page of the day; shared: the other attorneys who ordered some of the same
+    pages, and which; billed: the user's pages among them (what its invoice counts); pages: the day's pages;
+    printed: the printed page numbers of each span ("pp. 120-140", "" when not known); note: instead of spans,
+    why there is nothing to show ("not ticked on this day", a choice still to make)."""
+    day: str
+    key: str
+    name: str
+    spans: list = field(default_factory=list)
+    whole: bool = False
+    shared: dict = field(default_factory=dict)
+    billed: int = 0
+    pages: int = 0
+    printed: list = field(default_factory=list)
+    note: str = ""
+    parties: int = 0  # the Parties number typed for the day (its price is shared that many ways); 0 = not typed
+    typed: bool = False  # the pages are the Pages field's number, typed in, not the transcript's pages
+
+
+def _join(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Stretches of pages that touch made one: [(1, 19), (20, 40)] -> [(1, 40)]."""
+    out: list[tuple[int, int]] = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _printed_span(printed: list, first: int, last: int) -> str:
+    """'pp. 120-140': the printed numbers of pages first to last of the day, when known and in order; ""."""
+    nums = printed[first - 1:last] if printed else []
+    if not nums or None in nums or any(a > b for a, b in zip(nums, nums[1:])):
+        return ""
+    return f"p. {nums[0]}" if len(nums) == 1 else f"pp. {nums[0]}–{nums[-1]}"
 
 
 def make_doc(ing: Ingested, regex: Extraction, s: Settings, path: str = "") -> Doc:
@@ -864,9 +970,9 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
                         and not (o == "invoice" and (billed_elsewhere or unchecked_here))]
             problems = [f"no {' or '.join(left_out)}: {job.left_out_reason()}"] if left_out else []
             if unchecked_here and job.portions_problem():
-                problems.append(f"invoice not made: check Excerpts… for {job.case.get('dates') or job.title()}")
+                problems.append(f"{NOT_INVOICED} check Excerpts… for {job.case.get('dates') or job.title()}")
             elif unchecked_here:
-                problems.append(f"invoice not made: choose under Whose pages… ({job.ownership_problem()})")
+                problems.append(f"{NOT_INVOICED} choose under Whose pages… ({job.ownership_problem()})")
             job.error = "; ".join(problems)
             done += [p for p in job.saved if p not in done]  # one run sheet takes several days
         except Exception as e:
@@ -889,7 +995,7 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
         held = group_problem(g)
         if held:  # a day with nobody ticked: no invoice until it says who ordered it
             for job in g:
-                job.error = "; ".join(x for x in (job.error, f"invoice not made: {held}") if x)
+                job.error = "; ".join(x for x in (job.error, f"{NOT_INVOICED} {held}") if x)
             continue
         try:
             case, opts = joint_invoice(g)
@@ -940,8 +1046,8 @@ def group_problem(group: list[Job]) -> str:
 def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
     """How many files fill_jobs will make for these jobs: the days of one case share a run sheet, and (as
     Settings.invoice_joint says) the invoices, one for each attorney ticked on any of its days who ordered
-    pages and was not invoiced yet. Days already invoiced (Job.invoiced), and days whose invoice is held (Who
-    ordered... rows to check, or Whose pages... to choose: Job.invoice_hold), get none."""
+    pages and was not invoiced yet. Days already invoiced (Job.invoiced), and days whose invoice is held
+    (Excerpts... rows to check, or Whose pages... to choose: Job.invoice_hold), get none."""
     count = sum(j.file_count(outputs) for j in jobs)
     if "invoice" in outputs:
         groups = invoice_groups([j for j in jobs if not j.invoiced and not j.invoice_hold()], s or Settings())

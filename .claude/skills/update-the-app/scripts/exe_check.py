@@ -9,8 +9,9 @@ P.R.). The inputs are two days of one trial (a transcript each, June 3 and June 
 Smith: PR and DS at the foot of the pages) and an e-mail about another case. Expected: the built version, no
 errors in the log; for each day a minute agreement, a MOFR and the run sheet, and one joint invoice for both
 days (listed under each day) that bills Pat's own 10 of the 20 transcript pages, for one party, and has its
-amounts as fields (and no "Lock fields" button, removed in 1.3.1); one run sheet with the 4 takes of each day.
-Exit code 1 if something is off.
+amounts as fields (and no "Lock fields" button, removed in 1.3.1); one run sheet with the 4 takes of each day;
+and --selftest says the Records' Fuzzy search works (rapidfuzz is in the build). Exit code 1 if something is
+off.
 """
 import csv
 import json
@@ -102,6 +103,16 @@ if sheets:
         problems.append("one run sheet should have the takes of both days")
 else:
     problems.append("no run sheet was made")
+# --selftest: the libraries the window needs that the batch doesn't use (the Records' Fuzzy search: rapidfuzz)
+try:
+    subprocess.run([str(exe), "--selftest", str(run / "st")], env=env, timeout=120)
+except subprocess.TimeoutExpired:
+    problems.append("--selftest did not finish within 2 minutes")
+st_file = run / "st" / "selftest.json"
+fuzzy = json.loads(st_file.read_text(encoding="utf-8")).get("fuzzy_search") if st_file.exists() else "no selftest.json"
+print("  fuzzy search:", fuzzy)
+if fuzzy is not True:
+    problems.append(f"the Records' Fuzzy search does not work in the build ({fuzzy}): is rapidfuzz bundled?")
 log_file = run / "appdata" / "DjinnItAgreementForm" / "logs" / "app.log"
 log = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
 started = [l for l in log.splitlines() if "started: version" in l]

@@ -12,7 +12,8 @@ from pathlib import Path
 
 def selftest(out_dir: str, files: list[str]) -> int:
     """Headless check of a build: reads each file and fills its agreement on both forms (clean and original),
-    then writes selftest.json into out_dir. The default settings are used; the saved ones are not touched."""
+    checks that the Records' fuzzy search works (fuzzy_search: True, else the error), then writes selftest.json
+    into out_dir. The default settings are used; the saved ones are not touched."""
     import json
     from minute_filler.extract_regex import RegexExtractor
     from minute_filler.fill import fill_all
@@ -25,6 +26,11 @@ def selftest(out_dir: str, files: list[str]) -> int:
     s = Settings()
     report = {"ocr_available": ocr_available(), "rate_sheet": s.sheet().name,
               "speeds": [sp.label() for sp in s.sheet().speeds], "results": []}
+    try:  # the Records search's Fuzzy box needs rapidfuzz in the build: a misspelled firm must still be found
+        from minute_filler.records import matcher
+        report["fuzzy_search"] = matcher("Counsle", "fuzzy")(["Counsel & Counsel"])
+    except Exception as e:
+        report["fuzzy_search"] = f"{type(e).__name__}: {e}"
     for f in files:
         try:
             case = merge([RegexExtractor(s.profile).extract(ingest_file(f))], s)
@@ -146,7 +152,7 @@ def main() -> int:
         app.setWindowIcon(QIcon(str(icon)))
     settings = Settings.load()
     from minute_filler.gui.zoom import set_zoom
-    set_zoom(settings.zoom)  # View → Zoom, kept from last time
+    set_zoom(settings.zoom)  # the zoom (Ctrl + / Ctrl -), kept from last time
     apply_theme(app, settings.theme)
     win = MainWindow(settings, app)
     win.show()

@@ -271,3 +271,90 @@ def test_the_trash_shows_every_year_without_totals_and_reports_keep_to_the_recor
     assert [sorted(i.invoice_no for i in r) for r in reported] == [["2026-0001", "2026-0002"]] * 2
     win.i_trash.setChecked(False)
     assert win.kpi["count"].text() == "2"
+
+
+def test_search_words_regex_and_fuzzy(tmp_path):
+    """The search box finds words anywhere (a firm, an index number written with a dash); Regex reads it as a
+    regular expression, Fuzzy also finds misspellings; a pattern that can't be read is a ValueError."""
+    lg = Ledger(tmp_path / "records.db")
+    lg.add_invoice(inv("2026-0001", index_no="712345/2021"))
+    lg.add_invoice(Invoice("2026-0002", "2026-03-02", "Lee v. Park", index_no="700001/2025", firm="Smith Law",
+                           bill_to="Dana Smith", amounts={"Regular": "43.00"}, billed_speed="Regular"))
+    lg.log_activity("agreement", case_name="Roe", firm="Smith Law", file_path=r"C:\out\Minute Agreement - Roe.pdf")
+    nos = lambda text, how="words": [i.invoice_no for i in lg.invoices(text=text, how=how)]  # noqa: E731
+    assert nos("smith law") == ["2026-0002"] and nos("712345-2021") == ["2026-0001"]
+    assert nos("Smiht") == [] and nos("Smiht", "fuzzy") == ["2026-0002"]
+    assert nos("Counsle", "fuzzy") == ["2026-0001"]
+    assert nos(r"^2026-000[12]$", "regex") == ["2026-0002", "2026-0001"] and nos("^smith", "regex") == ["2026-0002"]
+    with pytest.raises(ValueError):
+        lg.invoices(text="(smith", how="regex")
+    assert [a.firm for a in lg.activity(text="minute agreement - roe")] == ["Smith Law"]  # the file's name
+
+
+def test_search_boxes_in_the_window(records):
+    win, _, _ = records
+    win.i_text.setText("Holding")
+    assert win.inv_table.rowCount() == 2
+    win.i_regex.setChecked(True)
+    win.i_text.setText("(Holding")  # not a pattern (yet): nothing listed, the box says why
+    assert win.inv_table.rowCount() == 0 and win.i_text.property("review") and "regular" in win.i_text.toolTip()
+    win.i_fuzzy.setChecked(True)  # the boxes exclude each other
+    assert not win.i_regex.isChecked()
+    win.i_text.setText("Holdng Corporaton")
+    assert win.inv_table.rowCount() == 2 and not win.i_text.property("review")
+
+
+def test_fuzzy_search_without_rapidfuzz_says_so(records, monkeypatch):
+    """A build without rapidfuzz: the Fuzzy box is marked like a pattern that can't be read, not a crash."""
+    import sys
+    from minute_filler.records import matcher
+    monkeypatch.setitem(sys.modules, "rapidfuzz", None)  # (import rapidfuzz now fails)
+    with pytest.raises(ValueError, match="rapidfuzz"):
+        matcher("Counsle", "fuzzy")
+    win, _, _ = records
+    win.i_fuzzy.setChecked(True)
+    win.i_text.setText("Counsle")
+    assert win.inv_table.rowCount() == 0 and win.i_text.property("review") and "rapidfuzz" in win.i_text.toolTip()
+    win.a_fuzzy.setChecked(True)
+    win.a_text.setText("Roe")
+    assert win.a_text.property("review") and "rapidfuzz" in win.a_text.toolTip()
+
+
+def test_a_search_that_cannot_be_read_is_not_exported(records, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    import minute_filler.gui.records_window as rw
+    win, _, lg = records
+    told, asked, exported = [], [], []
+    monkeypatch.setattr(QMessageBox, "information", lambda parent, title, text, *a: told.append(text))
+    monkeypatch.setattr(rw.RecordsWindow, "_ask_path", lambda self, *a: asked.append(a) or tmp_path / "r.html")
+    monkeypatch.setattr(rw, "open_path", lambda *a: None)
+    monkeypatch.setattr(lg, "export_html", lambda p, invoices, title="": exported.append(invoices) or p)
+    monkeypatch.setattr(lg, "export_xlsx", lambda p, invoices=None: exported.append(invoices) or p)
+    win.ledger = lg
+    win.i_regex.setChecked(True)
+    for trash in (False, True):
+        win.i_trash.setChecked(trash)
+        win.i_text.setText("(Holding")  # not a pattern: nothing is exported, and the window says why
+        win.export_html()
+        win.export_xlsx()
+    assert len(told) == 4 and all(t.startswith("Fix the search first: not a valid regular") for t in told)
+    assert not asked and not exported
+    win.i_trash.setChecked(False)
+    win.i_text.setText("Holding")
+    win.export_html()
+    assert len(exported) == 1 and len(exported[0]) == 2
+
+
+def test_words_find_dashes_and_slashes_both_ways(tmp_path):
+    lg = Ledger(tmp_path / "records.db")
+    lg.add_invoice(inv("2026-0001", index_no="712345-2021"))
+    lg.log_activity("agreement", case_name="Roe", file_path=r"C:\out\Minute Agreement - Roe - 6-3-2026.pdf")
+    assert [i.invoice_no for i in lg.invoices(text="712345/2021")] == ["2026-0001"]
+    assert [a.case_name for a in lg.activity(text="6/3/2026")] == ["Roe"]
+
+
+def test_an_unknown_search_mode_is_refused():
+    from minute_filler.records import SEARCH_MODES, matcher
+    assert SEARCH_MODES == ("words", "regex", "fuzzy")
+    with pytest.raises(ValueError, match="unknown search mode"):
+        matcher("Roe", "exact")

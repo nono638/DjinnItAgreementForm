@@ -363,3 +363,19 @@ def test_generate_asks_about_the_case_as_whose_pages_left_it(make_window, monkey
     monkeypatch.setattr(win, "_saved_box", lambda *a, **k: None)
     win.fill()
     assert asked == [["case_name"]] and not made
+
+
+def test_selftest_checks_the_fuzzy_search(tmp_path):
+    """--selftest says whether the Records' Fuzzy search works (the release check runs it on the build)."""
+    from minute_filler.main import selftest
+    assert selftest(str(tmp_path / "st"), []) == 0
+    report = json.loads((tmp_path / "st" / "selftest.json").read_text(encoding="utf-8"))
+    assert report["fuzzy_search"] is True
+
+
+def test_browse_offers_every_kind_of_file_a_folder_takes(qt):
+    from minute_filler.batch import BATCH_EXT
+    from minute_filler.gui.main_window import FILE_FILTER
+    documents, everything = FILE_FILTER.split(";;")
+    assert all(f"*{e}" in documents.split("(")[1] for e in BATCH_EXT) and everything == "All files (*.*)"
+    assert {"*.htm", "*.html", "*.gif", "*.heif"} <= set(documents.strip(")").split("(")[1].split())

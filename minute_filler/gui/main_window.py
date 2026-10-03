@@ -17,7 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QSignalBlocker, Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -28,8 +28,8 @@ from PySide6.QtWidgets import (
 
 from .. import log as logfile
 from ..log import log
-from ..batch import (Job, expand_paths, files_to_make, fill_jobs, group, ident, input_folders, out_dir_for,
-                     read_loaders, remerge, same_case)
+from ..batch import (BATCH_EXT, NOT_INVOICED, Job, expand_paths, files_to_make, fill_jobs, group, ident,
+                     input_folders, out_dir_for, read_loaders, remerge, same_case)
 from ..extract_llm import OllamaExtractor
 from ..dates import quick_date
 from ..deliver import generate
@@ -47,10 +47,14 @@ from .workers import Runner
 from . import zoom as zooming
 from .zoom import sized, z
 
-FILE_FILTER = ("Documents (*.pdf *.jpg *.jpeg *.png *.heic *.tif *.tiff *.bmp *.webp *.eml *.txt *.docx);;"
+# every kind of file a dropped folder takes (batch.BATCH_EXT), so Browse... offers the same
+FILE_FILTER = (f"Documents ({' '.join('*' + e for e in sorted(BATCH_EXT, key=lambda e: (e != '.pdf', e)))});;"
                "All files (*.*)")
 ATT_COLS = ["", "Name", "Firm", "Address", "Phone", "Fax", "Email", "Party / role", "Source"]
 ATT_FIELDS = [None, "name", "firm", "address", "phone", "fax", "email", "party", "source"]
+ORDER_COLS = ["Day", "Attorney", "Pages ordered", "Printed page numbers", "Shared with", "Your pages billed"]
+# the Who ordered what row of a day nobody is ticked on, when other days of its case have attorneys ticked
+NOBODY_DAY = "⚠ nobody ticked on this day: no invoice for the case until you tick who ordered it"
 
 
 PARTIES_TIP = ("How many parties ordered: the original and the index are split between them,\n"
@@ -700,6 +704,34 @@ class MainWindow(QMainWindow):
         br.addWidget(hint)
         cl.addLayout(br)
         rl.addWidget(c)
+
+        # Who ordered what: every attorney's order of every day the invoice covers, spelled out (shown when an
+        # invoice is to be made from a transcript)
+        self.orders_card, cl = card("Who ordered what")
+        top = QHBoxLayout()
+        self.orders_info = QLabel("")
+        self.orders_info.setObjectName("muted")
+        self.orders_info.setWordWrap(True)
+        top.addWidget(self.orders_info, 1)
+        self.orders_edit = QPushButton("Edit excerpts…")
+        self.orders_edit.clicked.connect(self._edit_orders)
+        top.addWidget(self.orders_edit)
+        cl.addLayout(top)
+        self.orders = QTableWidget(0, len(ORDER_COLS))
+        self.orders.setHorizontalHeaderLabels(ORDER_COLS)
+        self.orders.verticalHeader().setVisible(False)
+        self.orders.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.orders.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.orders.setWordWrap(True)
+        self.orders.horizontalHeader().setStretchLastSection(True)
+        self.orders.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # as tall as its rows (see _show_orders)
+        self.orders.setToolTip("Double-click a row to set who ordered which pages of that day")
+        self.orders.itemDoubleClicked.connect(self._order_row_clicked)
+        # the scroll bar comes and goes with the window's width: the table's height makes room for it
+        self.orders.horizontalScrollBar().rangeChanged.connect(lambda *_: self._fit_orders_height())
+        cl.addWidget(self.orders)
+        self.orders_card.setVisible(False)
+        rl.addWidget(self.orders_card)
         rl.addStretch(1)
 
         # footer: the Outputs box - the Generate buttons by its title, then a column per output with its own options
@@ -900,12 +932,13 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.fill)
         QShortcut(QKeySequence("Ctrl+Shift+Return"), self, activated=self.fill_all_jobs)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=self.open_records)
+        QShortcut(QKeySequence("F1"), self, activated=self.show_guide)
         for keys, step in (("Ctrl++", 1), ("Ctrl+=", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):
             QShortcut(QKeySequence(keys), self, activated=lambda s=step: self.zoom_step(s))
 
     def _build_menu(self):
-        """The File, View (zoom) and Help menus."""
-        from .dialogs import AboutDialog, FEEDBACK_URL
+        """The File and Help menus (zoom has no menu: Ctrl + / Ctrl - / Ctrl 0 and Ctrl + wheel)."""
+        from .dialogs import AboutDialog, FEEDBACK_URL, WEBSITE_URL
         mb = self.menuBar()
         m = mb.addMenu("&File")
         m.addAction("&New job", self.new_job)          # Ctrl+N handled by the window shortcut
@@ -920,11 +953,10 @@ class MainWindow(QMainWindow):
         m.addAction("&Lock finished PDFs (no more changes)…", self.lock_pdfs)
         m.addSeparator()
         m.addAction("E&xit", self.close)
-        m = mb.addMenu("&View")  # (the keys are the window's shortcuts: a menu shortcut would clash with them)
-        m.addAction("Zoom &in\tCtrl++", lambda: self.zoom_step(1))
-        m.addAction("Zoom &out\tCtrl+-", lambda: self.zoom_step(-1))
-        m.addAction("&Actual size\tCtrl+0", lambda: self.zoom_step(0))
         m = mb.addMenu("&Help")
+        m.addAction("&How to use DjinnItAgreementForm…\tF1", self.show_guide)
+        m.addAction("The &website (pictures and the latest version)", lambda: open_url(WEBSITE_URL))
+        m.addSeparator()
         m.addAction("Set up the &AI helper (Ollama)…", self._ai_help)
         m.addAction("Send &feedback…", lambda: open_url(FEEDBACK_URL))
         m.addAction("Open the &log folder", self._open_log_folder)
@@ -938,6 +970,11 @@ class MainWindow(QMainWindow):
         if not self.s.profile.name:
             self.open_settings(first_run=True)
         self._check_ai()
+
+    def show_guide(self):
+        """Help -> How to use (F1): what goes in, what comes out, the steps and tips."""
+        from .dialogs import GuideDialog
+        GuideDialog(self).exec()
 
     def _ai_help(self, _link=""):
         """Shows the Ollama setup help, then checks the AI again (a model may have been installed)."""
@@ -1223,9 +1260,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ jobs
     def _job_text(self, job: Job) -> str:
         """A job's line in the list, e.g. "✓ Jane Roe v. Sam Poe  ·  9/14/2026  ·  712345/2021".
-        ✓ = saved (or billed on another day's invoice), ⚠ = it failed or needs a look."""
+        ✓ = saved (or billed on another day's invoice), ⚠ = it failed or needs a look: something missing for
+        the outputs ticked, or an invoice held until a choice is made (its tooltip says which, see _job_tip)."""
         done = (job.saved or job.invoiced) and not job.error
-        mark = "✓ " if done else "⚠ " if job.error or job.problems() else ""
+        need = job.error or job.problems() or job.output_problems(self.s.outputs)
+        mark = "✓ " if done else "⚠ " if need else ""
         title = job.title()  # kept short so the date, which tells a case's jobs apart, stays in view
         bits = [title if len(title) <= 30 else title[:29].rstrip() + "…"]
         bits += [v for v in (job.case.get("dates"), job.case.get("index_no")) if v]
@@ -1317,10 +1356,12 @@ class MainWindow(QMainWindow):
         self._show_job()
 
     def _job_ticked(self, item):
-        """A job's tick changed: Generate all includes or leaves out that job."""
+        """A job's tick changed: Generate all includes or leaves out that job (and the days it bills together,
+        shown in the Invoice panel and the Who ordered what card, change with it)."""
         row = self.job_list.row(item)
         if 0 <= row < len(self.jobs):
             self.jobs[row].include = item.checkState() == Qt.Checked
+            self._refresh_outputs()
             self._refresh_job_labels()
 
     def _job_menu(self, pos):
@@ -1339,6 +1380,7 @@ class MainWindow(QMainWindow):
         if act in (tick, untick):
             for j in self.jobs:
                 j.include = act == tick
+            self._refresh_outputs()  # the days Generate all bills together
             self._refresh_job_labels()
             return
         if act is not rem or job not in self.jobs:  # (the list may have changed while the menu was open)
@@ -1858,13 +1900,52 @@ class MainWindow(QMainWindow):
                 if self._batch_running():
                     return
             chosen = [j for j in chosen if j in self.jobs]
-        gaps = [j for j in chosen if j.output_problems(outputs)]
+        # Days whose invoice still waits for a choice (Excerpts... to check, whose pages to bill): say which,
+        # before anything is made. Going on bills the other days of their case without them. A case with a day
+        # nobody is ticked on gets no invoice at all (batch.group_problem): said too, as fill_jobs groups them.
+        held = [j for j in chosen if "invoice" in outputs and not j.invoiced and j.invoice_hold()]
+        stuck: list[tuple[list[Job], str]] = []  # (the days of a case, why none of them is invoiced)
+        if "invoice" in outputs:
+            from ..batch import group_problem, invoice_groups
+            billed = [j for j in chosen if not j.invoiced and not j.invoice_hold()]
+            stuck = [(g, group_problem(g)) for g in invoice_groups(billed, self.s) if group_problem(g)]
+        if held or stuck:
+            lines = [f"•  {j.title()} {j.case.get('dates')}: {j.invoice_hold()}" for j in held]
+            lines += [f"•  {g[0].title()} ({plural(len(g), 'day')}): {why}; going on makes no invoice for this "
+                      "case" for g, why in stuck]
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("Not every day is decided")
+            box.setText("Some days still need your choice before they can be invoiced:\n\n"
+                        + "\n".join(lines[:8]) + ("\n…" if len(lines) > 8 else "")
+                        + "\n\nGo back and make the choices (Whose pages… or Excerpts… in the Invoice panel, or "
+                        "tick who ordered a day in its attorney table), or go on anyway: the days listed get no "
+                        "invoice now, and the other days of their case are invoiced without them, unless the case "
+                        "has a day nobody is ticked on (they can be invoiced later).")
+            back = box.addButton("Go back and decide", QMessageBox.RejectRole)
+            go_on = box.addButton("Go on anyway", QMessageBox.AcceptRole)
+            box.setDefaultButton(back)
+            box.setEscapeButton(back)
+            box.exec()
+            if box.clickedButton() is not go_on or self._batch_running():  # (closed: as Go back)
+                # show the first day to decide (for a case, its day with nobody ticked)
+                first = held[0] if held else next(j for j in stuck[0][0] if not j.ticked_keys())
+                if first in self.jobs and first is not self.cur and not self._batch_running():
+                    self.job_list.setCurrentRow(self.jobs.index(first))
+                return
+            chosen = [j for j in chosen if j in self.jobs]
+
+        def problems(j: Job) -> list[str]:
+            """What is incomplete about a job, less the invoice choices just warned about."""
+            return [p for p in j.output_problems(outputs) if not (j in held and p == j.invoice_hold())]
+
+        gaps = [j for j in chosen if problems(j)]
         if gaps:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Question)
             box.setWindowTitle("Some jobs are incomplete")
             box.setText(f"{len(gaps)} of {len(chosen)} jobs (marked ⚠) are incomplete:\n\n"
-                        + "\n".join(f"•  {j.title()}:  {', '.join(j.output_problems(outputs))}" for j in gaps[:8])
+                        + "\n".join(f"•  {j.title()}:  {', '.join(problems(j))}" for j in gaps[:8])
                         + ("\n…" if len(gaps) > 8 else ""))
             ready = box.addButton(f"Do the {len(chosen) - len(gaps)} complete ones", QMessageBox.AcceptRole)
             everything = box.addButton("Do all (blanks left, no invoice or run sheet without a transcript)",
@@ -1873,7 +1954,7 @@ class MainWindow(QMainWindow):
             ready.setEnabled(len(chosen) > len(gaps))
             box.exec()
             if box.clickedButton() == ready:
-                chosen = [j for j in chosen if not j.output_problems(outputs)]
+                chosen = [j for j in chosen if not problems(j)]
             elif box.clickedButton() != everything:
                 return
         # Where each case's takes go: asked once per case (the days of a trial share one run sheet)
@@ -1932,17 +2013,24 @@ class MainWindow(QMainWindow):
                     changed.add(id(j))
                 else:
                     j.invoiced, j.invoiced_keys = copy.invoiced, copy.invoiced_keys
-            failed = [j for j in chosen if j.error and not j.saved]
-            partial = [j for j in chosen if j.error and j.saved]
+            # days whose only "error" is the invoice held back, as the user chose before it started (see
+            # batch.fill_jobs: those messages come last, so an error that starts with one has nothing else)
+            unbilled = [j for j in chosen if j.error.startswith(NOT_INVOICED)]
+            failed = [j for j in chosen if j.error and not j.saved and j not in unbilled]
+            partial = [j for j in chosen if j.error and j.saved and j not in unbilled]
+            made = len(chosen) - len(failed) - sum(1 for j in unbilled if not j.saved)
             for j in chosen:
                 if (j.saved or j.invoiced) and not j.error and id(j) not in changed:
                     j.include = False  # "Generate all" again only does what is left
             changed = [j for j in chosen if id(j) in changed and any(j is k for k in self.jobs)]
             self._update_status()
             folders = list(dict.fromkeys(str(p.parent) for p in paths))
-            text = f"Saved {len(paths)} file{'s' if len(paths) != 1 else ''} for " \
-                   f"{len(chosen) - len(failed)} job{'s' if len(chosen) - len(failed) != 1 else ''}"
+            text = f"Saved {len(paths)} file{'s' if len(paths) != 1 else ''} for {plural(made, 'job')}"
             text += f" in\n{folders[0]}" if len(folders) == 1 else f" in {len(folders)} folders." if folders else "."
+            if unbilled:
+                text += f"\n\n{plural(len(unbilled), 'day')} not invoiced, as you chose:\n" + "\n".join(
+                    f"•  {j.title()} {j.case.get('dates')}: {_reason(j.error[len(NOT_INVOICED):].strip())}"
+                    for j in unbilled[:6])
             if failed:
                 text += f"\n\n{len(failed)} could not be saved (is a file - a PDF or the Excel run sheet - open in " \
                         "another program?):\n" + "\n".join(f"•  {j.title()}: {_reason(j.error)}" for j in failed[:6])
@@ -2043,6 +2131,7 @@ class MainWindow(QMainWindow):
                              "⚠ no transcript PDF: no run sheet for this job")
         self.rs_info.setVisible(bool(self.rs_info.text()))
         self._show_invoice_prices()
+        self._show_orders()
         self._place_output_cols()  # the prices may need more room than the panels have
 
     def _show_invoice_prices(self):
@@ -2162,6 +2251,135 @@ class MainWindow(QMainWindow):
         self._remerge(job)  # the Pages field shows the pages billed
         self._update_status()
         return True
+
+    def _show_orders(self):
+        """The "Who ordered what" card: for every day the current job's invoice covers (the days of the case
+        Generate all bills together, else the day shown), a row per attorney saying which pages it ordered (the
+        whole day, or which stretch), who shares them and how many of your pages that bills. Nothing is left to
+        guess: an attorney not ticked on a day says it orders nothing, a day waiting for a choice says so, a day
+        nobody is ticked on holds the whole case's invoice back (batch.group_problem), and a row that bills
+        none of the pages says it gets no invoice for them. Shown only while Invoice is ticked and the job has
+        a transcript; never an empty table (a row says why there is nothing to bill)."""
+        job = self.cur
+        on = self.output_boxes["invoice"].isChecked() and bool(job.transcript_pages())
+        self.orders_card.setVisible(on)
+        if not on:
+            return
+        group = self._invoice_group()
+        from ..batch import OrderLine, group_attorneys, group_problem
+        everyone = group_attorneys(group) if len(group) > 1 else []
+        stuck = group_problem(group)  # a day nobody is ticked on: no invoice for the case (see batch.fill_jobs)
+        lines: list[tuple[Job, OrderLine]] = []
+        for j in group:
+            if stuck and not j.ticked_keys():
+                lines.append((j, OrderLine(j.case.get("dates"), "", "(nobody ticked)", note=NOBODY_DAY)))
+            else:
+                lines += [(j, line) for line in j.order_lines(everyone)]
+        if not lines:  # say why there is nothing to bill rather than show an empty table
+            why = (job.invoice_hold() or ("the Pages field says 0: no invoice for this job"
+                                          if not job.invoice_pages() else
+                                          "tick the attorneys who ordered in the Attorneys table"))
+            lines = [(job, OrderLine(job.case.get("dates"), "", "—" if job.ticked_keys() else "(nobody ticked)",
+                                     note="⚠ " + why))]
+        mine = all(j.page_basis.get(d.key(), "me") == "me" for j in group for d in j.transcripts())
+        none = "none of these pages are yours" if mine else "none of these pages are the ones billed"
+        t = self.orders
+        t.setRowCount(0)
+        for j, line in lines:
+            r = t.rowCount()
+            t.insertRow(r)
+            if line.note:
+                ordered, printed, shared, billed = line.note, "", "", ""
+            else:
+                part = ", ".join(f"{a}–{b}" if a != b else str(a) for a, b in line.spans)
+                if line.typed:  # the Pages field's number is billed, not the transcript's pages: say so
+                    ordered = (f"every page (Pages field typed: {line.pages} billed)" if line.whole else
+                               f"excerpt: {part} of the {line.pages} pages typed in the Pages field")
+                else:
+                    ordered = f"every page, 1–{line.pages}" if line.whole else f"excerpt: {part} of {line.pages}"
+                printed = ", ".join(p for p in line.printed if p)
+                shared = "; ".join(f"{self._name_of(group, o)} ({', '.join(f'{a}–{b}' for a, b in spans)})"
+                                   for o, spans in line.shared.items()) or "nobody (alone)"
+                if line.parties:
+                    shared = f"split {line.parties} ways (the Parties number)"
+                billed = str(line.billed)
+                if not line.billed:  # an attorney with no pages billed gets no invoice for them (see firm_pages)
+                    elsewhere = any(o.key == line.key and o.billed and not o.note for _, o in lines)
+                    billed = f"0 ({none})" if elsewhere else f"0 (no invoice: {none})"
+                elif stuck:
+                    billed += " (held: no invoice yet, see ⚠)"
+            for c, text in enumerate((line.day, line.name, ordered, printed, shared, billed)):
+                it = QTableWidgetItem(text)
+                it.setData(Qt.UserRole, id(j))
+                if (c == 2 and line.note.startswith("⚠")) or (c == 5 and "no invoice" in text):
+                    it.setForeground(QColor("#d97706"))  # (the amber of the warnings, light and dark)
+                t.setItem(r, c, it)
+        t.resizeColumnsToContents()
+        for c in range(2, len(ORDER_COLS)):  # long notes wrap instead of making the table wider than the card
+            t.setColumnWidth(c, min(t.columnWidth(c), z(320)))
+        t.resizeRowsToContents()
+        self._fit_orders_height()
+        whose = bool(job.ownership_problem()) and not job.portions_problem()
+        self.orders_edit.setText("⚠ Whose pages…" if whose else "Edit excerpts…")
+        self.orders_edit.setToolTip(
+            "Choose whose pages of the day shown are billed (the same as Whose pages… in the Invoice panel)"
+            if whose else "Who ordered which pages of the day shown (the same as Excerpts… in the Invoice panel)")
+        days = len(group)
+        if stuck:
+            where = f"⚠ No invoice for these {days} days of the case yet: {stuck}."
+        elif days > 1:
+            where = f"Generate all bills these {days} days of the case on one invoice per attorney."
+        elif job.invoiced:
+            where = "The day shown, invoiced already: Generate all won't bill it again (Generate this job does)."
+        elif len(self.jobs) > 1 and not job.include:
+            where = "The day shown, unticked in the job list: Generate all leaves it out."
+        elif len(self.jobs) > 1 and not job.invoice_hold():
+            where = "The day shown. Generate all may bill it with other days."
+        else:
+            where = "The day shown."
+        self.orders_info.setText(where + " Each attorney is billed for the pages written in its row and nothing "
+                                 "else; \"Your pages billed\" counts the pages billed among them: on a transcript "
+                                 "of several reporters only yours (or those chosen under Whose pages…), and the "
+                                 "Pages field's number when you typed one.")
+
+    def _fit_orders_height(self) -> None:
+        """The card's table as tall as its rows (it doesn't scroll up and down), with room for the horizontal
+        scroll bar when the columns are wider than the card: else it covers the last row."""
+        t = self.orders
+        head = t.horizontalHeader()
+        bar = t.horizontalScrollBar()
+        height = (max(head.height(), head.sizeHint().height()) + sum(t.rowHeight(r) for r in range(t.rowCount()))
+                  + 2 * t.frameWidth() + (bar.sizeHint().height() if bar.maximum() > 0 else 0))
+        t.setFixedHeight(max(height, z(60)))
+
+    def _edit_orders(self) -> None:
+        """The card's button (and a row double-clicked): Excerpts… for the day shown, or Whose pages… when that
+        is what holds its invoice back (Excerpts… has no pages to split until it is chosen)."""
+        job = self.cur
+        if job.ownership_problem() and not job.portions_problem():
+            self._whose_pages(job, job.ownership_problem())
+        else:
+            self._who_ordered()
+
+    @staticmethod
+    def _name_of(group: list[Job], key: str) -> str:
+        """An attorney's name (or firm) by Attorney.key(), from the days of an invoice."""
+        for j in group:
+            for a in j.case.attorneys:
+                if a.key() == key:
+                    return a.name or a.firm
+        return key
+
+    def _order_row_clicked(self, item) -> None:
+        """A row of "Who ordered what" double-clicked: shows its day and opens its Excerpts window (or Whose
+        pages…, see _edit_orders)."""
+        job = next((j for j in self.jobs if id(j) == item.data(Qt.UserRole)), None)
+        if job is None:
+            return
+        if job is not self.cur:
+            self.job_list.setCurrentRow(self.jobs.index(job))
+        if job is self.cur:
+            self._edit_orders()
 
     def _who_ordered_why(self, job: Job) -> str:
         """Why Excerpts… can't be used for this job ("" when it can): it needs one day with pages, and two
@@ -2475,7 +2693,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- zoom and screen
     def zoom_step(self, step: int) -> None:
-        """Zoom in (1), out (-1) or back to 100 % (0): View menu, Ctrl + / Ctrl - / Ctrl 0, Ctrl + wheel."""
+        """Zoom in (1), out (-1) or back to 100 % (0): Ctrl + / Ctrl - / Ctrl 0, Ctrl + wheel."""
         now = zooming.zoom()
         self.set_zoom(1.0 if step == 0 else now + step * zooming.STEP)
 
@@ -2491,6 +2709,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._place_pairs)  # again once the new sizes are laid out
         self._fit_minimum()
         self._refresh_jobs()
+        # the Who ordered what table is as tall as its rows, which are taller or shorter now
+        self._show_orders()
+        QTimer.singleShot(0, self, self._show_orders)  # again once the new sizes are laid out
         self._set_opt("zoom", f)
         self._toast(f"Zoom {round(f * 100)} %")
 

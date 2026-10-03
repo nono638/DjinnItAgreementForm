@@ -1,5 +1,5 @@
-"""Zoom: everything in the windows bigger or smaller (View → Zoom in / Zoom out / Actual size, Ctrl + / Ctrl − /
-Ctrl 0, or Ctrl and the mouse wheel), on top of the Windows display scaling.
+"""Zoom: everything in the windows bigger or smaller (Ctrl + / Ctrl − / Ctrl 0, or Ctrl and the mouse
+wheel), on top of the Windows display scaling.
 
 Qt already follows the Windows scale setting (125 %, 150 %...) by itself; this is for a user who wants the
 text bigger or smaller than that. Qt can only change its own scale factor before the app starts, so the zoom
