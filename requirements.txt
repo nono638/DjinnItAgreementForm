@@ -5,6 +5,8 @@ pillow==12.3.0
 ollama==0.6.3
 openpyxl==3.1.5  # the run sheet, the Excel export of the records and the invoice template
 rapidfuzz==3.14.6  # the Records search's "Fuzzy" box
+regex==2026.9.29  # the Records search's "Regex" box: a search that takes too long is stopped
+pillow-heif==1.8.0  # iPhone photos (.heic/.heif)
 # Windows built-in OCR (for photos and scanned PDFs)
 winrt-runtime==3.2.1
 winrt-Windows.Foundation==3.2.1

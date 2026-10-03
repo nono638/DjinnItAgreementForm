@@ -10,7 +10,8 @@ Smith: PR and DS at the foot of the pages) and an e-mail about another case. Exp
 errors in the log; for each day a minute agreement, a MOFR and the run sheet, and one joint invoice for both
 days (listed under each day) that bills Pat's own 10 of the 20 transcript pages, for one party, and has its
 amounts as fields (and no "Lock fields" button, removed in 1.3.1); one run sheet with the 4 takes of each day;
-and --selftest says the Records' Fuzzy search works (rapidfuzz is in the build). Exit code 1 if something is
+and --selftest says the libraries only the window uses are in the build (the Records' Fuzzy and Regex
+searches, HEIC photos, the look for a newer version, printing). Exit code 1 if something is
 off.
 """
 import csv
@@ -103,16 +104,22 @@ if sheets:
         problems.append("one run sheet should have the takes of both days")
 else:
     problems.append("no run sheet was made")
-# --selftest: the libraries the window needs that the batch doesn't use (the Records' Fuzzy search: rapidfuzz)
+# --selftest: the libraries the window needs that the batch doesn't use (rapidfuzz, regex, pillow-heif, ssl, Qt print)
 try:
     subprocess.run([str(exe), "--selftest", str(run / "st")], env=env, timeout=120)
 except subprocess.TimeoutExpired:
     problems.append("--selftest did not finish within 2 minutes")
 st_file = run / "st" / "selftest.json"
-fuzzy = json.loads(st_file.read_text(encoding="utf-8")).get("fuzzy_search") if st_file.exists() else "no selftest.json"
-print("  fuzzy search:", fuzzy)
-if fuzzy is not True:
-    problems.append(f"the Records' Fuzzy search does not work in the build ({fuzzy}): is rapidfuzz bundled?")
+st = json.loads(st_file.read_text(encoding="utf-8")) if st_file.exists() else {}
+for key, what, lib in (("fuzzy_search", "the Records' Fuzzy search", "rapidfuzz"),
+                       ("regex_search", "the Records' Regex search", "regex"),
+                       ("heic_photos", "reading iPhone HEIC photos", "pillow-heif"),
+                       ("update_check", "the look for a newer version", "ssl"),
+                       ("printing", "Print…", "PySide6.QtPrintSupport")):
+    got = st.get(key, "no selftest.json" if not st else "missing from selftest.json")
+    print(f"  {key.replace('_', ' ')}:", got)
+    if got is not True:
+        problems.append(f"{what} does not work in the build ({got}): is {lib} bundled?")
 log_file = run / "appdata" / "DjinnItAgreementForm" / "logs" / "app.log"
 log = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
 started = [l for l in log.splitlines() if "started: version" in l]

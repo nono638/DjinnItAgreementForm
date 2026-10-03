@@ -6,6 +6,9 @@ The tables here name the choices the window and the Settings dialog offer: the o
 ordered together (INDEX_SHARED), what "Show granular detail" adds to an invoice (DETAIL_ITEMS), and where the
 invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN, default_invoice_texts), and the folders
 the outputs go to when they have none of their own (OUTPUT_FOLDERS, see Settings.folder_for).
+
+The settings can be saved to a file and read back on another computer (export_to, import_from): everything but
+what belongs to this computer (LOCAL), with the rate sheets.
 """
 from __future__ import annotations
 
@@ -18,6 +21,11 @@ APP_NAME = "DjinnItAgreementForm"
 FILENAME_PATTERN = "Minute Agreement - {case} - {index} - {attorney} - {today}"
 OLD_FILENAME_PATTERN = "Minute Agreement - {case} - {index} - {attorney}"  # the default before settings v3
 OLD_APP_NAME = "MinuteAgreementFiller"  # folder used before the rename
+RECENT_MAX = 10  # how many documents and folders File -> Open recent keeps
+# What belongs to this computer and this copy of the app: left out of an exported settings file, and kept as
+# it is when one is imported
+LOCAL = ("window_geometry", "recent_files", "update_checked", "recap_month", "recap_year", "welcomed",
+         "signature_image")
 
 
 def settings_dir() -> Path:
@@ -220,6 +228,9 @@ class Settings:
     # the columns shown in the Records window: "invoices" / "activity" -> column keys (see records_window);
     # a table not listed shows its usual columns
     records_columns: dict = field(default_factory=dict)
+    # the Records search's Fuzzy box also matches numbers loosely ("2026-0001" finds "2026-0002"); False: a word
+    # with a digit in it must be found as typed (Settings -> Options)
+    fuzzy_numbers: bool = True
 
     # Run sheets (who wrote which pages of a trial; see runsheet.py)
     runsheet_filename_pattern: str = RUNSHEET_FILENAME_PATTERN
@@ -238,6 +249,18 @@ class Settings:
     show_djinn: bool = True
     window_geometry: str = ""
     zoom: float = 1.0                 # Ctrl + / Ctrl - zoom (1.0 = 100 %), on top of the Windows display scaling
+    recent_files: list = field(default_factory=list)  # documents and folders opened, newest first (Open recent)
+    preview_before_saving: bool = True  # Generate shows the files as pictures first; saved only on Save
+    welcomed: bool = False            # the first-run "Welcome" questions were shown (once, while there is no name)
+
+    # The only time the app goes online: once a day it asks GitHub for the number of the latest version
+    check_updates: bool = True
+    update_checked: str = ""          # the day it last asked ("2026-10-03")
+
+    # Records: "last month you made ..." when Records is first opened in a month (and "last year" in a year)
+    recaps: bool = True
+    recap_month: str = ""             # the month a recap was last shown in ("2026-10")
+    recap_year: str = ""              # the year the yearly one was last shown in ("2026")
 
     @property
     def path(self) -> Path:
@@ -317,6 +340,12 @@ class Settings:
         from .rates import speed_key
         return next((v for k, v in self.invoice_turnaround.items() if speed_key(k) == speed_key(speed)), "")
 
+    def remember_file(self, path: str) -> None:
+        """Puts a document or folder just opened at the top of recent_files (once, RECENT_MAX at most)."""
+        key = os.path.normcase(os.path.abspath(path))
+        rest = [p for p in self.recent_files if os.path.normcase(os.path.abspath(p)) != key]
+        self.recent_files = ([os.path.abspath(path)] + rest)[:RECENT_MAX]
+
     def save(self) -> None:
         """Writes settings.json. It goes to a .tmp file first and then replaces the old one, so a crash
         halfway leaves the old settings, not a broken file."""
@@ -324,10 +353,87 @@ class Settings:
         tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         tmp.replace(self.path)
 
+    def export_to(self, path: Path | str) -> Path:
+        """Saves the settings as one file to carry to another computer or give to a colleague: everything but
+        what belongs to this computer (LOCAL: the window's place, the recent files, the signature picture...),
+        and the rate sheets (the CSV files of the rate sheet folder, as text). The records are not in it."""
+        from .rates import sheets_dir
+        data = {k: v for k, v in asdict(self).items() if k not in LOCAL}
+        data["app"] = APP_NAME
+        sheets = {}
+        for p in sorted(sheets_dir(self.rate_sheets_dir).glob("*.csv")):
+            try:
+                sheets[p.name] = p.read_text(encoding="utf-8-sig")
+            except (OSError, ValueError):
+                continue  # (a sheet open in Excel, or not text: left out)
+        data["rate_sheets"] = sheets
+        path = Path(path)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return path
+
+    @classmethod
+    def import_from(cls, path: Path | str, current: "Settings") -> "Settings":
+        """The settings in a file made by export_to, as new Settings. Nothing is written: the caller saves
+        them, after write_imported_sheets() has put the file's rate sheets in the rate sheet folder. What
+        belongs to this computer (LOCAL) is taken from `current`. A folder that isn't on this computer (a
+        colleague's Documents) is left blank, so the usual one is used. ValueError when the file is not a
+        settings file."""
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise ValueError(f"this file can't be read as settings: {e}") from None
+        if not isinstance(data, dict) or data.get("app") != APP_NAME:
+            raise ValueError("this is not a settings file saved by DjinnItAgreementForm (File → Export settings)")
+        try:
+            s = cls.from_dict(data)
+        except (TypeError, AttributeError) as e:  # (a value of a kind from_dict doesn't expect)
+            raise ValueError(f"this settings file is damaged: {e}") from None
+        for k in LOCAL:
+            setattr(s, k, getattr(current, k))
+
+        def here(folder: str) -> str:
+            """The folder when it, or the folder it is in, is on this computer; else ""."""
+            p = Path(folder) if folder else None
+            return folder if p is not None and (p.is_dir() or p.parent.is_dir()) else ""
+
+        s.output_dir, s.records_dir, s.rate_sheets_dir = here(s.output_dir), here(s.records_dir), here(s.rate_sheets_dir)
+        s.output_dirs = {k: v for k, v in s.output_dirs.items() if here(v)}
+        sheets = data.get("rate_sheets")
+        s._imported_sheets = {name: text for name, text in (sheets.items() if isinstance(sheets, dict) else ())
+                              if isinstance(name, str) and isinstance(text, str) and name.lower().endswith(".csv")}
+        return s
+
+    def write_imported_sheets(self) -> None:
+        """Writes the rate sheets of the settings file these settings were imported from (import_from) into the
+        rate sheet folder, once the user has said yes to the import. A sheet already there with other prices is
+        kept, and the file's is saved next to it as "Name (imported)" ("Name (imported 2)" when that is taken by
+        yet other prices), and used when it is the one the settings name."""
+        from .rates import sheets_dir
+        folder = sheets_dir(self.rate_sheets_dir)
+
+        def same(target: Path, text: str) -> bool:
+            """Whether a sheet on disk says what `text` does (spaces and line ends aside)."""
+            try:
+                return target.read_text(encoding="utf-8-sig").split() == text.split()
+            except (OSError, ValueError):
+                return False
+
+        for name, text in getattr(self, "_imported_sheets", {}).items():
+            first = folder / Path(name).name  # (the name only: never a path out of the folder)
+            target, n = first, 1
+            while target.exists() and not same(target, text):
+                target = first.with_name(f"{first.stem} (imported{'' if n == 1 else f' {n}'}).csv")
+                n += 1
+            if target != first and self.rate_sheet == first.stem:
+                self.rate_sheet = target.stem
+            if not target.exists():
+                target.write_text(text, encoding="utf-8")
+        self._imported_sheets = {}
+        self.reload_rates()
+
     @classmethod
     def load(cls) -> "Settings":
-        """The saved settings; the defaults when there is no file or it can't be read. Unknown keys and
-        values of the wrong type are ignored, and files from older versions are brought up to date."""
+        """The saved settings; the defaults when there is no file or it can't be read (see from_dict)."""
         s = cls()
         try:
             data = json.loads(s.path.read_text(encoding="utf-8"))
@@ -335,6 +441,13 @@ class Settings:
             return s
         if not isinstance(data, dict):  # a damaged file must not keep the app from starting
             return s
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Settings":
+        """Settings from the contents of a settings file. Unknown keys and values of the wrong type are
+        ignored, and files from older versions are brought up to date."""
+        s = cls()
         known = {f.name for f in fields(cls)}
         for k, v in data.items():
             if k == "profile":
@@ -343,9 +456,12 @@ class Settings:
                     s.profile = Profile(**{a: b for a, b in v.items() if a in pk and isinstance(b, str)})
             elif k in known and type(v) is type(getattr(s, k)):  # a value of the wrong kind keeps its default
                 setattr(s, k, v)
-        if data.get("settings_version", 1) < 2:  # v2: the court's fillable UCS form became the default
+        version = data.get("settings_version", 1)
+        if not isinstance(version, int) or isinstance(version, bool):  # ("9", null: a file edited by hand)
+            version = 1
+        if version < 2:  # v2: the court's fillable UCS form became the default
             s.form_choice = "ucs"
-        if data.get("settings_version", 1) < 3:  # v3: instructions page included, today's date in the file name
+        if version < 3:  # v3: instructions page included, today's date in the file name
             s.include_instructions = True
             if s.filename_pattern == OLD_FILENAME_PATTERN:
                 s.filename_pattern = FILENAME_PATTERN
@@ -390,5 +506,6 @@ class Settings:
         if isinstance(data.get("zoom"), int) and not isinstance(data.get("zoom"), bool):
             s.zoom = float(data["zoom"])  # "zoom": 1 typed by hand
         s.zoom = min(1.6, max(0.7, s.zoom)) if s.zoom == s.zoom else 1.0
+        s.recent_files = [p for p in s.recent_files if isinstance(p, str) and p.strip()][:RECENT_MAX]
         s.settings_version = cls.settings_version
         return s

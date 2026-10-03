@@ -2,11 +2,17 @@
 changed) and the history of everything made. Each table has many columns (INVOICE_COLS, ACTIVITY_COLS); the
 user picks which are shown (Columns..., or a right-click on the headings), and the choice is kept in
 Settings.records_columns. Records can be deleted to the trash (restored for 30 days; the files are not
-touched); the Trash button shows what is in it."""
+touched); the Trash button shows what is in it.
+
+Along the bottom: the exports, Summary... (a month or a year summed up, SummaryDialog), Backups... (the daily
+copies of the records, BackupsDialog) and Undo (Ctrl+Z: the last change made here - paid, void, amounts, notes,
+a delete - is taken back). A right-click also prints a record's file and opens its job again in the main
+window (RecordsWindow.on_reopen)."""
 from __future__ import annotations
 
 import calendar
 import html
+import json
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -16,16 +22,17 @@ from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QTabWidget, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
+    QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from ..deliver import ledger_for
+from ..deliver import backup_folder, ledger_for
 from ..fill import safe_filename
 from ..invoice_calc import fmt, money
 from ..log import error as log_error
 from ..rates import parse_amount
-from ..records import KINDS, TRASH_DAYS, Activity, Invoice, _month_name, gone_for_good, summarize, us_date
+from ..records import (BACKUPS_KEPT, FORCED_KEPT, KINDS, PERIODS, TRASH_DAYS, Activity, Invoice, _month_name, backup_counts,
+                       backup_day, backups, gone_for_good, period, period_stats, stats_rows, summarize, us_date)
 from ..settings import Settings
 from .widgets import open_path, plural, refill_combo, show_save_error
 from .zoom import z
@@ -35,6 +42,7 @@ STATUS_FILTERS = [("All", ""), ("Unpaid", "open"), ("Paid", "paid"), ("Void", "v
 SEARCH_TIP = ("Words found anywhere in a record, in any order: a firm, an attorney, a case,\n"
               "an index number (712345/2021 or 712345-2021), an invoice number, a judge…")
 STATUS_COLORS = {"open": "#d97706", "paid": "#16a34a", "void": "#8a8797"}  # readable on light and dark
+UNDO_MAX = 30  # changes Undo can take back, the latest first
 
 
 @dataclass(frozen=True)
@@ -274,6 +282,151 @@ class AmountsDialog(QDialog):
         return {sp: str(parse_amount(box.text()) or money(box.text())) for sp, box in self.boxes.items()}
 
 
+class SummaryDialog(QDialog):
+    """Summary...: a period summed up (invoices, pages, billed, paid, owed, payments received, the firms billed
+    most), for this or last month, this or last year, or all time. Copy puts it on the clipboard as text."""
+
+    def __init__(self, invoices: list[Invoice], parent=None, today: date | None = None):
+        """invoices: every invoice not in the trash; today: the day the periods are counted from."""
+        super().__init__(parent)
+        self.invoices, self.today = invoices, today or date.today()
+        self.setWindowTitle("Summary")
+        self.resize(z(520), z(560))
+        lay = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Period:"))
+        self.period = QComboBox()
+        self.period.addItems(PERIODS)
+        self.period.setCurrentText("This year")
+        self.period.currentIndexChanged.connect(self.show_period)
+        row.addWidget(self.period)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.text = QTextBrowser()
+        lay.addWidget(self.text, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        copy = bb.addButton("Copy", QDialogButtonBox.ActionRole)
+        copy.clicked.connect(self._copy)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.plain = ""
+        self.show_period()
+
+    def show_period(self, _=None) -> None:
+        """Sums up the period chosen and shows it."""
+        since, until, title = period(self.period.currentText(), self.today)
+        st = period_stats(self.invoices, since, until)
+        rows = stats_rows(st)
+        firms = [(name, f"{fmt(sm.billed)} ({plural(sm.count, 'invoice')})") for name, sm in st.firms[:5]]
+        e = html.escape
+        table = "".join(f"<tr><td style='padding:3px 18px 3px 0'>{e(k)}</td><td align='right'><b>{e(v)}</b></td></tr>"
+                        for k, v in rows)
+        top = "".join(f"<tr><td style='padding:3px 18px 3px 0'>{e(k)}</td><td align='right'>{e(v)}</td></tr>"
+                      for k, v in firms)
+        self.text.setHtml(f"<h3>{e(title)}</h3><table>{table}</table>"
+                          + (f"<h4>Billed most</h4><table>{top}</table>" if firms else "")
+                          + ("" if st.invoices else "<p>No invoices were made in this period.</p>"))
+        self.plain = "\n".join([title] + [f"{k}: {v}" for k, v in rows]
+                               + (["", "Billed most:"] + [f"{k}: {v}" for k, v in firms] if firms else []))
+
+    def _copy(self) -> None:
+        """Copy: the period shown, as plain text on the clipboard."""
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self.plain)
+
+
+class BackupsDialog(QDialog):
+    """Backups...: the copies of the records the app makes (one a day when it starts, the last BACKUPS_KEPT
+    days are kept). Back up now makes one more; Restore puts the records back as they were in the copy chosen
+    (the records as they are now are copied first, so that can be taken back too). `restored` is True
+    afterwards. busy, when given, says whether files are being made right now (Generate all): no copy is put
+    back then, as the invoices being made would leave the records."""
+
+    def __init__(self, s: Settings, ledger, parent=None, busy: Callable[[], bool] | None = None):
+        super().__init__(parent)
+        self.s, self.ledger, self.restored, self.busy = s, ledger, False, busy
+        self.folder = backup_folder(s)
+        self.setWindowTitle("Backups of the records")
+        self.resize(z(560), z(420))
+        lay = QVBoxLayout(self)
+        note = QLabel(f"A copy of your records is made each day you open the app; the last {BACKUPS_KEPT} days' "
+                      f"are kept (and the last {FORCED_KEPT} made with Back up now or before a restore), "
+                      f"in\n{self.folder}\nYour PDF files are not in them: only the records (invoices, paid or "
+                      "not, and the list of everything made).")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _: self.restore())
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        self.restore_btn = QPushButton("Restore this copy…")
+        self.restore_btn.clicked.connect(lambda: self.restore())  # (not the button's "checked" as `ask`)
+        now = QPushButton("Back up now")
+        now.clicked.connect(self.backup_now)
+        folder = QPushButton("Open folder")
+        folder.clicked.connect(lambda: (self.folder.mkdir(parents=True, exist_ok=True), open_path(self.folder)))
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        for b in (self.restore_btn, now, folder):
+            b.setAutoDefault(False)
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(close)
+        lay.addLayout(row)
+        self.refill()
+
+    def refill(self) -> None:
+        """Lists the copies in the folder, newest first, with what each holds."""
+        self.list.clear()
+        for p in backups(self.folder):
+            counts = backup_counts(p)
+            what = f"{plural(counts[0], 'invoice')}, {plural(counts[1], 'file')} made" if counts else "can't be read"
+            item = QListWidgetItem(f"{backup_day(p)}   ·   {what}")
+            item.setData(Qt.UserRole, str(p))
+            if counts is None:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            self.list.addItem(item)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+        self.restore_btn.setEnabled(self.list.count() > 0)
+
+    def backup_now(self) -> None:
+        """Makes a copy now, whatever today's holds."""
+        try:
+            made = self.ledger.backup(self.folder, force=True)
+        except Exception as e:
+            show_save_error(self, e, "Could not back up the records")
+            return
+        if made is None:
+            QMessageBox.information(self, "Nothing to back up", "There are no records yet.")
+        self.refill()
+
+    def restore(self, ask: bool = True) -> None:
+        """Puts the records back as they were in the copy chosen, after asking."""
+        item = self.list.currentItem()
+        if item is None:
+            return
+        copy = Path(item.data(Qt.UserRole))
+        if self.busy is not None and self.busy():
+            QMessageBox.information(self, "Restore", "Files are being made right now (Generate all). Restore a "
+                                    "copy once that is done.")
+            return
+        if ask and QMessageBox.question(
+                self, "Restore", f"Put the records back as they were on {backup_day(copy)}?\n\nInvoices made and "
+                "payments entered since then leave the records (the PDF files stay where they are). The records "
+                "as they are now are backed up first, so you can come back to them.") != QMessageBox.Yes:
+            return
+        try:
+            self.ledger.restore_backup(copy, self.folder)
+        except Exception as e:
+            log_error("could not restore a backup of the records", e)
+            QMessageBox.warning(self, "Could not restore", f"{type(e).__name__}: {e}")
+            return
+        self.restored = True
+        self.refill()
+
+
 class RecordsWindow(QDialog):
     """The Records window. Two tabs: Invoices (filters, totals, paid ticks, by-firm and by-month sums) and
     Everything made (each file the app made). Each has the Columns... choice and the Trash. The window does not
@@ -285,6 +438,8 @@ class RecordsWindow(QDialog):
         self.ledger = ledger_for(s)
         self.shown: list[Invoice] = []
         self.act_shown: dict[int, Activity] = {}  # the rows of everything made shown, by id
+        self.on_reopen: Callable[[str], bool] | None = None  # opens a job again in the main window (set by it)
+        self.undo_stack: list[tuple[str, Callable]] = []  # (what was done, how to take it back), latest last
         self.setWindowTitle("Records")
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         self.resize(z(1180), z(760))
@@ -305,6 +460,19 @@ class RecordsWindow(QDialog):
             b.setToolTip(tip)
             b.clicked.connect(slot)
             bottom.addWidget(b)
+        bottom.addSpacing(z(14))
+        for label, slot, tip in (
+                ("Summary…", self.show_summary, "A month or a year summed up: invoices, pages, billed, paid, owed"),
+                ("Backups…", self.show_backups, "The daily copies of your records, to go back to one")):
+            b = QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            bottom.addWidget(b)
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.clicked.connect(self.undo)
+        bottom.addWidget(self.undo_btn)
+        QShortcut(QKeySequence.Undo, self, activated=self._undo_key)
+        self._show_undo()
         bottom.addStretch(1)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
@@ -570,7 +738,8 @@ class RecordsWindow(QDialog):
         """The Invoices tab's filters as keyword arguments for Ledger.invoices ("All" is None or "")."""
         return dict(year=self.i_year.currentData() or None, month=self.i_month.currentData() or None,
                     client=self.i_client.currentData() or "", status=self.i_status.currentData() or "",
-                    text=self.i_text.text().strip(), how=self._how(self.i_regex, self.i_fuzzy))
+                    text=self.i_text.text().strip(), how=self._how(self.i_regex, self.i_fuzzy),
+                    fuzzy_numbers=self.s.fuzzy_numbers)
 
     def show_invoices(self, _=None) -> None:
         """Lists the invoices that match the filters (those in the trash with the Trash button) and updates the
@@ -643,7 +812,8 @@ class RecordsWindow(QDialog):
             since, until = f"{y}-{m or 1:02}-01", f"{y}-{m or 12:02}-{calendar.monthrange(y, m or 12)[1]:02}"
         try:
             rows = self.ledger.activity(self.a_kind.currentData() or "", since, until, self.a_text.text().strip(),
-                                        trash=self.a_trash.isChecked(), how=self._how(self.a_regex, self.a_fuzzy))
+                                        trash=self.a_trash.isChecked(), how=self._how(self.a_regex, self.a_fuzzy),
+                                        fuzzy_numbers=self.s.fuzzy_numbers)
             self._search_problem(self.a_text, "")
         except ValueError as e:  # a regular expression still being typed
             rows = []
@@ -713,10 +883,12 @@ class RecordsWindow(QDialog):
                 dlg = PaidDialog(inv, self)
                 if dlg.exec() == QDialog.Accepted:
                     self.ledger.mark_paid(inv.invoice_no, *dlg.values())
+                    self._undoable(f"invoice {inv.invoice_no} marked paid", inv)
             elif inv is not None and not paid and inv.status == "paid":
                 if QMessageBox.question(self, "Not paid", f"Mark invoice {inv.invoice_no} as not paid?") \
                         == QMessageBox.Yes:
                     self.ledger.mark_unpaid(inv.invoice_no)
+                    self._undoable(f"invoice {inv.invoice_no} marked not paid", inv)
         except Exception as e:
             log_error("could not update an invoice", e)
             QMessageBox.warning(self, "Could not save", f"{type(e).__name__}: {e}")
@@ -745,6 +917,9 @@ class RecordsWindow(QDialog):
         m = QMenu(self)
         m.addAction("Open the PDF", lambda: self._open_invoice(inv))
         m.addAction("Show in folder", lambda: open_path(str(Path(inv.file_path).parent)) if inv.file_path else None)
+        m.addAction(f"Print {plural(len(many), 'invoice')}…", lambda: self._print([i.file_path for i in many]))
+        if self.on_reopen is not None:
+            m.addAction("Open this job again (in the main window)", lambda: self.reopen(inv))
         m.addSeparator()
         if inv.deleted:
             self._trash_actions(m, "invoices", many)
@@ -756,8 +931,7 @@ class RecordsWindow(QDialog):
             if inv.status != "void":
                 m.addAction("Void (cancelled, not counted)", lambda: self._set_void(inv))
             else:
-                m.addAction("Restore (not void)",
-                            lambda: (self.ledger.mark_unpaid(inv.invoice_no), self.show_invoices()))
+                m.addAction("Restore (not void)", lambda: self._unvoid(inv))
             if inv.amounts:
                 m.addAction("Change amounts…", lambda: self._change_amounts(inv))
             m.addAction("Notes…", lambda: self._notes(inv))
@@ -779,6 +953,9 @@ class RecordsWindow(QDialog):
         m = QMenu(self)
         m.addAction("Open the file", lambda: open_path(a.file_path) if a.file_path else None)
         m.addAction("Show in folder", lambda: open_path(str(Path(a.file_path).parent)) if a.file_path else None)
+        m.addAction(f"Print {plural(len(many), 'file')}…", lambda: self._print([x.file_path for x in many]))
+        if self.on_reopen is not None:
+            m.addAction("Open this job again (in the main window)", lambda: self.reopen(a))
         m.addSeparator()
         if a.deleted:
             self._trash_actions(m, "activity", many)
@@ -814,11 +991,15 @@ class RecordsWindow(QDialog):
                 self, "Delete", f"Move {what} to the trash?\n\nThey can be restored for {TRASH_DAYS} days "
                 "(Trash button). The files themselves are not deleted.") != QMessageBox.Yes:
             return
-        self._try_change(lambda: self.ledger.delete(**self._keys(which, records)))
+        keys = self._keys(which, records)
+        if self._try_change(lambda: self.ledger.delete(**keys)):
+            self._undoable(f"{what} deleted", back=lambda: self.ledger.restore(**keys))
 
     def restore(self, which: str, records: list) -> None:
         """Takes records out of the trash."""
-        self._try_change(lambda: self.ledger.restore(**self._keys(which, records)))
+        keys = self._keys(which, records)
+        if self._try_change(lambda: self.ledger.restore(**keys)):
+            self._undoable(f"{plural(len(records), 'record')} restored", back=lambda: self.ledger.delete(**keys))
 
     def delete_forever(self, which: str, records: list, ask: bool = True) -> None:
         """Deletes records in the trash for good, after asking."""
@@ -828,14 +1009,107 @@ class RecordsWindow(QDialog):
             return
         self._try_change(lambda: self.ledger.delete_forever(**self._keys(which, records)))
 
-    def _try_change(self, fn) -> None:
-        """Makes a change to the records, says so if it fails, and shows both lists afresh."""
+    def _try_change(self, fn) -> bool:
+        """Makes a change to the records, says so if it fails, and shows both lists afresh. True when it was
+        made."""
+        ok = True
         try:
             fn()
         except Exception as e:
+            ok = False
             log_error("could not change the records", e)
             QMessageBox.warning(self, "Could not save", f"{type(e).__name__}: {e}")
         self.reload()
+        return ok
+
+    # ------------------------------------------------------------ undo
+    def _undoable(self, what: str, before: Invoice | None = None, back: Callable | None = None) -> None:
+        """Notes a change just made so Undo can take it back: an invoice as it was before it (before), or the
+        call that reverses it (back). what: said on the Undo button's tooltip ("invoice 2026-0003 marked paid")."""
+        if before is not None:
+            back = lambda: self.ledger.put_back(before)  # noqa: E731
+        self.undo_stack = (self.undo_stack + [(what, back)])[-UNDO_MAX:]
+        self._show_undo()
+
+    def _show_undo(self) -> None:
+        """The Undo button: greyed out with nothing to take back, else its tooltip says what."""
+        self.undo_btn.setEnabled(bool(self.undo_stack))
+        self.undo_btn.setToolTip(f"Take back: {self.undo_stack[-1][0]} (Ctrl+Z)" if self.undo_stack else
+                                 "Takes back the last change made in this window (Ctrl+Z)")
+
+    def _undo_key(self) -> None:
+        """Ctrl+Z: in a search box it undoes the typing, as everywhere; else the last change to the records."""
+        w = self.focusWidget()
+        if isinstance(w, QLineEdit):
+            w.undo()
+        else:
+            self.undo()
+
+    def undo(self) -> None:
+        """Takes back the last change made in this window (paid, not paid, void, amounts, notes, a delete or a
+        restore) and shows the lists afresh."""
+        if not self.undo_stack:
+            return
+        what, back = self.undo_stack.pop()
+        self._try_change(back)
+        self._show_undo()
+
+    # ------------------------------------------------------------ summary, backups, print, open again
+    def show_summary(self) -> None:
+        """Summary...: a month or a year summed up (SummaryDialog), whatever the filters show."""
+        try:
+            invoices = self.ledger.invoices()
+        except Exception as e:
+            log_error("could not read the records", e)
+            QMessageBox.warning(self, "Summary", f"{type(e).__name__}: {e}")
+            return
+        SummaryDialog(invoices, self).exec()
+
+    def show_backups(self) -> None:
+        """Backups...: the copies of the records (BackupsDialog). After a restore the lists are read again, and
+        Undo forgets what it had: those changes were to the records as they were."""
+        dlg = BackupsDialog(self.s, self.ledger, self, busy=lambda: bool(getattr(self.parent(), "filling", False)))
+        dlg.exec()
+        if dlg.restored:
+            self.undo_stack = []
+            self._show_undo()
+            self.reload()
+
+    def _print(self, files: list[str]) -> None:
+        """Prints the files of the records selected (those still where they were saved)."""
+        from .preview import print_files
+        there = [f for f in files if f and Path(f).exists()]
+        if not there:
+            QMessageBox.information(self, "Print", "The file is no longer where it was saved.")
+            return
+        print_files(self, there)
+
+    @staticmethod
+    def origin_of_columns(record) -> str:
+        """Where a record came from, for one made before the app kept that (no Activity.origin): the case and
+        the attorney as the record's own columns have them, in the same form (see batch.job_from_origin)."""
+        get = lambda name: getattr(record, name, "") or ""  # noqa: E731
+        fields = {k: [v, "regex", 0.9] for k, v in (
+            ("case_name", get("case_name")), ("index_no", get("index_no")), ("dates", get("dates")),
+            ("judge", get("judge")), ("part", get("part")), ("court", get("court"))) if v}
+        name = get("bill_to") or get("attorney")
+        attorneys = [{"name": name, "firm": get("firm"), "email": get("email"), "checked": True}] \
+            if name or get("firm") else []
+        return json.dumps({"sources": [], "case": {"fields": fields, "attorneys": attorneys}})
+
+    def reopen(self, record) -> None:
+        """Open this job again: hands the record's origin to the main window (on_reopen), which puts the case
+        back in its editor and reads the documents again. An invoice's origin is kept with its row of
+        everything made."""
+        if self.on_reopen is None:
+            return
+        try:
+            origin = record.origin if isinstance(record, Activity) else self.ledger.origin_of(record.invoice_no)
+        except Exception as e:
+            log_error("could not read where a record came from", e)
+            origin = ""
+        if self.on_reopen(origin or self.origin_of_columns(record)):
+            self.close()  # (this window stays in front of the main window otherwise: the job would be behind it)
 
     def _change_amounts(self, inv: Invoice) -> None:
         """Change amounts…: what each speed of the invoice costs, as corrected in its PDF; the list and the
@@ -846,6 +1120,7 @@ class RecordsWindow(QDialog):
             return
         try:
             self.ledger.set_amounts(inv.invoice_no, dlg.values())
+            self._undoable(f"the amounts of invoice {inv.invoice_no} changed", inv)
         except Exception as e:
             log_error("could not change an invoice's amounts", e)
             QMessageBox.warning(self, "Could not save", f"{type(e).__name__}: {e}")
@@ -855,15 +1130,26 @@ class RecordsWindow(QDialog):
         """Voids the invoice after asking: it stays listed but leaves the totals."""
         if QMessageBox.question(self, "Void invoice", f"Void invoice {inv.invoice_no}? It stays in the list but is "
                                 "no longer counted in the totals.") == QMessageBox.Yes:
+            before = self.ledger.invoice(inv.invoice_no) or inv
             self.ledger.void(inv.invoice_no)
+            self._undoable(f"invoice {inv.invoice_no} voided", before)
             self.show_invoices()
+
+    def _unvoid(self, inv: Invoice) -> None:
+        """Restore (not void): the invoice counts again, as unpaid."""
+        before = self.ledger.invoice(inv.invoice_no) or inv
+        self.ledger.mark_unpaid(inv.invoice_no)
+        self._undoable(f"invoice {inv.invoice_no} restored from void", before)
+        self.show_invoices()
 
     def _notes(self, inv: Invoice) -> None:
         """Edits the invoice's free-text notes."""
         from PySide6.QtWidgets import QInputDialog
         text, ok = QInputDialog.getText(self, f"Invoice {inv.invoice_no}", "Notes:", text=inv.notes)
         if ok:
+            before = self.ledger.invoice(inv.invoice_no) or inv
             self.ledger.set_notes(inv.invoice_no, text)
+            self._undoable(f"the notes of invoice {inv.invoice_no} changed", before)
             self.show_invoices()
 
     # ------------------------------------------------------------ exports

@@ -291,6 +291,64 @@ def test_search_words_regex_and_fuzzy(tmp_path):
     assert [a.firm for a in lg.activity(text="minute agreement - roe")] == ["Smith Law"]  # the file's name
 
 
+def test_fuzzy_numbers_can_be_kept_exact(tmp_path):
+    """By default Fuzzy matches numbers loosely too ("2026-0001" finds 2026-0002); with fuzzy_numbers off
+    (Settings -> Options) a word with a digit must be found as typed, while names still forgive a typo."""
+    lg = Ledger(tmp_path / "records.db")
+    lg.add_invoice(inv("2026-0001", index_no="712345/2021"))
+    lg.add_invoice(Invoice("2026-0002", "2026-03-02", "Lee v. Park", index_no="700001/2025", firm="Smith Law",
+                           bill_to="Dana Smith", amounts={"Regular": "43.00"}, billed_speed="Regular"))
+    nos = lambda text, loose=True: [i.invoice_no for i in lg.invoices(text=text, how="fuzzy",  # noqa: E731
+                                                                      fuzzy_numbers=loose)]
+    assert nos("2026-0001") == ["2026-0002", "2026-0001"]  # the default, as before
+    assert nos("2026-0001", loose=False) == ["2026-0001"]
+    assert nos("712345-2021", loose=False) == ["2026-0001"]  # a dash still finds the slash
+    assert nos("Smiht 2026-0002", loose=False) == ["2026-0002"]  # the name still forgives a typo
+    assert [a.invoice_no for a in lg.activity(text="2026-0009", how="fuzzy", fuzzy_numbers=False)] == []
+
+
+def test_fuzzy_numbers_is_a_setting_ticked_by_default(qt, tmp_path):
+    """Settings -> Options -> Records search: ticked by default (as before), saved and loaded again."""
+    from helpers import pat_settings
+    from minute_filler.gui.dialogs import SettingsDialog
+    from minute_filler.settings import Settings
+    s = pat_settings()
+    assert Settings().fuzzy_numbers is True
+    dlg = SettingsDialog(s)
+    assert dlg.o_fuzzy_numbers.isChecked()
+    dlg.o_fuzzy_numbers.setChecked(False)
+    dlg.accept()
+    assert s.fuzzy_numbers is False and Settings.load().fuzzy_numbers is False
+    assert not SettingsDialog(s).o_fuzzy_numbers.isChecked()
+
+
+def test_the_records_window_follows_the_fuzzy_numbers_setting(records):
+    win, _, _ = records
+    win.i_fuzzy.setChecked(True)
+    win.s.fuzzy_numbers = False
+    win.i_text.setText("Holdng Corporaton 2026-0009")  # a typo in the name is fine, a wrong number is not
+    assert win.inv_table.rowCount() == 0
+    win.s.fuzzy_numbers = True
+    win.show_invoices()
+    assert win.inv_table.rowCount() == 2
+
+
+def test_a_regex_that_would_take_minutes_is_stopped(tmp_path, monkeypatch):
+    """"(a|a)+$" against a long run of a's takes minutes, even with the regex library (the window would freeze
+    on every keystroke): the search stops after REGEX_SECONDS with a ValueError saying so (the box turns amber)."""
+    import time
+    from minute_filler import records
+    monkeypatch.setattr(records, "REGEX_SECONDS", 0.3)
+    lg = Ledger(tmp_path / "records.db")
+    lg.add_invoice(Invoice("2026-0001", "2026-03-02", "a" * 40 + "!", bill_to="Dana Smith",
+                           amounts={"Regular": "43.00"}, billed_speed="Regular"))
+    start = time.monotonic()
+    with pytest.raises(ValueError, match="takes too long"):
+        lg.invoices(text="(a|a)+$", how="regex")
+    assert time.monotonic() - start < 3
+    assert [i.invoice_no for i in lg.invoices(text="^a+!$", how="regex")] == ["2026-0001"]  # a quick one works
+
+
 def test_search_boxes_in_the_window(records):
     win, _, _ = records
     win.i_text.setText("Holding")

@@ -8,7 +8,7 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 
 ![DjinnItAgreementForm](docs/screenshot.png)
 
-- **Works offline, and nothing leaves your computer.** Photos are read by the text recognition built into Windows. An AI helper is optional and runs locally too.
+- **Works offline, and nothing leaves your computer.** Photos are read by the text recognition built into Windows. An AI helper is optional and runs locally too. The one time the app goes online is to ask GitHub, once a day, whether there is a newer version; nothing about you or your cases is sent, and Settings → Options turns it off.
 - **Asks when unsure.** Guesses are highlighted. When there are several candidates (two dates, several attorneys), you pick from a list. It asks about anything important that's missing before filling.
 - **Remembers you.** Your name, address, phone and email are filled in on every form.
 - **"Per email" option.** It can write "per email" on the attorney signature line, since minutes are often ordered by email.
@@ -23,6 +23,9 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 - **Run sheets for shared trials.** When reporters take turns, each puts their initials at the foot of the pages they write. The app reads them and keeps the trial's run sheet in Excel: a row per take with the date, reporter, pages written, start and end page and the witness who took the stand. Filter by reporter for their total pages; the *By Reporter* sheet adds them up.
 - **Records and dashboard.** Every file made is logged. **Records** (Ctrl+R) shows your invoices with totals billed, paid and outstanding, filtered by year, month, firm or status, or found by typing a firm, case or index number (with optional regex or fuzzy matching), broken down by firm and by month. Tick **Paid** when an invoice is paid, and say which speed they chose. Choose the columns you want: your pages and the transcript's, the speeds offered and the one ordered, the excerpt, the e-mailed copy and more. Corrected an amount in the PDF? Right-click the invoice and choose **Change amounts…** so the totals agree. Deleted records go to a **trash** for 30 days. Export a report (HTML), an Excel workbook or CSV files at any time.
 - **Fits your screen.** The window follows Windows' display scaling (125 %, 150 %…) and fits a small screen. **Ctrl +** and **Ctrl −** (or Ctrl and the mouse wheel; Ctrl 0 for 100 %, or Settings → Options → Zoom) make everything bigger or smaller; the size is remembered.
+- **See it before it's saved.** Generate first shows the filled forms and invoices as pictures; nothing is saved until you click Save. The box that says what was saved can print it.
+- **Go back to a past job.** Right-click a record to open its job again, for a corrected invoice or another day of the case. *File → Open recent* lists the documents you opened lately.
+- **Your records are backed up** each day you open the app, and the last 10 copies are kept. Undo (Ctrl+Z) takes back the last change in Records.
 - **A folder for each output.** Minute agreements, invoices, MOFRs and run sheets can each be saved to a folder of their own (Settings → Options → Folders).
 - **Three agreement forms to choose from:** the court's own fillable UCS form (the default), a clean, re-typeset version of it (with room for a long case name, signature/date fields, fax and email), or the original 1999 scan.
 
@@ -33,12 +36,12 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
    - The installer isn't code-signed yet, so Windows may show "Windows protected your PC". Click **More info → Run anyway**.
 3. On first launch, enter your details (name, address, phone, email). You can change them later in **Settings**.
 
-**Requirements:** 64-bit Windows 10 (version 1809 or newer) or Windows 11, and about 200 MB of disk space. Nothing else needs installing: Python and all libraries are included, and no internet connection is needed. Reading photos and scanned PDFs uses Windows' text recognition, which needs the English language pack (normally already there). The optional AI helper needs [Ollama](https://ollama.com).
+**Requirements:** 64-bit Windows 10 (version 1809 or newer) or Windows 11, and about 200 MB of disk space. Nothing else needs installing: Python and all libraries are included, and no internet connection is needed (with one, the app tells you when there is a newer version). Reading photos and scanned PDFs uses Windows' text recognition, which needs the English language pack (normally already there). The optional AI helper needs [Ollama](https://ollama.com).
 
 ## Use
 
 1. **Add the order:**
-   - Drop a PDF (transcript, invoice, scanned document) or a photo onto the drop zone.
+   - Drop a PDF (transcript, invoice, scanned document) or a photo (JPG, PNG, an iPhone HEIC…) onto the drop zone.
    - Or paste an e-mail into the text box and click **Extract from text**.
    - Or paste a screenshot with **Ctrl+V**.
 
@@ -48,6 +51,10 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
    - Amber fields are guesses. A ▾ button lists other candidates.
 3. **Pick the rate sheet and speed**, then tick the attorney(s) who ordered.
 4. **Tick what to make** in the Outputs box (minute agreement, invoice, MOFR, run sheet) and check each one's options, then **Generate** (Ctrl+Enter). The PDFs are saved next to your document, or to the folder chosen in Settings → Options → Folders (a folder for all of them, and one for each kind if you like), and open automatically; the run sheet is kept in its own folder (see Run sheets).
+5. **Look at the preview.** Generate first shows each PDF as it will be saved, a tab for each file (the invoice with the number it will get). **Save** saves them; **Go back** saves nothing, takes no invoice number and records nothing. The run sheet, a spreadsheet, is not shown. *Generate all* (a batch) saves without a preview. Click **Don't show previews anymore** to have Generate save at once; *Show a preview before saving* in Settings → Options turns it back on.
+6. **Print** the PDFs from the box that says what was saved (they go to the printer you pick, every page), or later from Records (right-click → *Print 1 invoice…*). The run sheet is a workbook: print it from Excel.
+
+The first time the app starts it asks for your name, address, rate sheet and where to save files; all of it, and much more, is in **Settings**. **File → Open recent** lists the last 10 documents and folders you opened. **File → Export settings** saves your details, options and rate sheets as one file for another computer or a colleague (your signature picture and your records are not in it), and **File → Import settings** reads it there; the settings you had are kept as *settings before import.json* in the app's settings folder.
 
 **Help → How to use** (F1) sums this up in the app: what it reads, what it makes, the steps, tips and the keyboard shortcuts, with a link to the [website](https://nono638.github.io/DjinnItAgreementForm/).
 
@@ -86,9 +93,17 @@ Each party pays its share, rounded up to the cent so the shares cover the total:
 - **Invoices**: totals (billed, paid, outstanding), filters by year, month, firm and status, and per-firm and per-month breakdowns. Tick **Paid** to record a payment; you're asked which speed they paid for and the amount and date. Right-click an invoice to open it, void it, add a note, or **Change amounts…** when you corrected an amount in the invoice PDF (the records keep the amounts it was made with until you do).
 - **Everything made**: every minute agreement, MOFR and invoice, and every run sheet takes were added to, with the case, attorney, pages and file. Double-click to open the file.
 
-**Search.** Type in the search box of either tab to see only the records that match: a firm ("Smith Law"), an attorney, a case, an index number (712345/2021 or 712345-2021), an invoice number, a judge, a file name. Every word you type must be found somewhere in the record, in any order. Two boxes next to it, unticked unless you tick them, change how it searches: **Regex** reads what you type as a regular expression (`^Smith`, `2026-00(1|2)`, any case; the box turns amber while the expression is incomplete), and **Fuzzy** also finds near misses and misspellings ("Counsle" finds "Counsel & Counsel").
+**Search.** Type in the search box of either tab to see only the records that match: a firm ("Smith Law"), an attorney, a case, an index number (712345/2021 or 712345-2021), an invoice number, a judge, a file name. Every word you type must be found somewhere in the record, in any order. Two boxes next to it, unticked unless you tick them, change how it searches: **Regex** reads what you type as a regular expression (`^Smith`, `2026-00(1|2)`, any case; the box turns amber while the expression is incomplete, or if searching with it takes more than a second, which stops it), and **Fuzzy** also finds near misses and misspellings ("Counsle" finds "Counsel & Counsel"). Fuzzy treats numbers the same way, so "2026-0001" also finds 2026-0002; untick *Records search: Fuzzy search matches numbers loosely too* in Settings → Options to have invoice numbers, index numbers and dates found only as typed (names still forgive a typo).
 
 **Columns.** Click **Columns…** (or right-click a column heading) to choose what each table shows; the choice is remembered. Invoices can show the court, part, judge and dates, the firm and e-mail, the pages billed, **your pages and the transcript's pages** (they differ when several reporters wrote it), who wrote how many ("PR 65, DS 85"), the **excerpt** ordered ("6/3/2026 pp. 120–140", or *Whole*), the parties, the **speeds offered**, the **speed ordered** (the one paid for), whether an **e-mailed copy** and an **index** were charged, the amounts, the status and payment, notes and the file. Click a heading to sort by it. Invoices made by older versions leave the newer columns blank.
+
+**Open a job again.** Right-click an invoice or a file under *Everything made* and choose **Open this job again**: the case comes back into the main window as you left it (the fields, who was ticked, the invoice's Extras and Excerpts), and the documents it was read from are read again when they are still where they were (when one is gone, what was read from it is kept as it was). The Records window closes so you see the job. Use it for a corrected invoice, or to add another day of the case. A joint invoice of several days opens its days from their documents. Records made before version 1.7 bring back the case, index number, dates, judge and attorney they list.
+
+**Undo.** **Undo** (or Ctrl+Z) takes back the last change made in the Records window: paid or not paid, void, changed amounts, a note, a delete or a restore. It goes back up to 30 changes, until the window is closed with the app.
+
+**Summary.** **Summary…** sums up this or last month, this or last year, or all time: invoices made, pages billed, billed, paid, still owed, payments received in the period, the average per page and per invoice, and the firms billed most. **Copy** puts it on the clipboard. The first time you open Records in a month, a box says what last month came to ("Last month (September 2026) you made $870.00 with 243 pages (5 invoices)."), and the first time in a year, last year too. Tick *Don't show me monthly or annual recaps anymore* in it to stop them; *Recaps* in Settings → Options turns them back on.
+
+**Backups.** Each day you open the app, a copy of the records is saved in *Documents\DjinnIt Records\Backups* (the last 10 days' copies are kept, and the last 5 you made yourself or that were made before a restore). **Backups…** lists them, makes one now, and **restores** one: the records go back to what they were that day, after a copy of how they are now is made, so you can come back. Only the records are in a backup, not the PDF files. Invoice numbers given since stay taken.
 
 **Deleting.** Select records and press **Delete** (or right-click → *Delete*): they go to the **🗑 Trash** for 30 days, where you can restore them, and are then deleted for good. Only the records are deleted, never the PDF files; an invoice's number is never given to another invoice.
 
@@ -225,8 +240,9 @@ Never change the `AppId` in `installer/DjinnItAgreementForm.iss`; Windows uses i
 | Fill the MOFR | `mofr.py`, `forms/mofr_map.py` |
 | Price and draw invoices, each firm's share of the pages it ordered (values as fields) | `invoice_calc.py`, `invoice.py` |
 | Read who wrote which pages, keep the run sheet | `takes.py`, `runsheet.py` |
-| Make the chosen outputs and record them; search the records (words, regex, fuzzy) | `deliver.py`, `records.py` |
-| PySide6 interface (zoom: `gui/zoom.py`) | `gui/` |
+| Make the chosen outputs and record them (with where each job came from, to open it again); search the records (words, regex, fuzzy), back them up, sum up a period | `deliver.py`, `records.py` |
+| Ask GitHub for the latest version (once a day, can be turned off) | `update.py` |
+| PySide6 interface (zoom: `gui/zoom.py`; the preview before saving, printing and the first-run welcome: `gui/preview.py`) | `gui/` |
 
 The invoice spreadsheet template is built by `python tools/make_invoice_template.py`. The clean form is generated by `python tools/make_clean_form.py`. The original scan's randomly named fields are mapped in `forms/original_map.py`.
 

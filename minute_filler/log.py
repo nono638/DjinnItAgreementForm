@@ -25,7 +25,7 @@ log = logging.getLogger(NAME)
 _handler: RotatingFileHandler | None = None
 on_crash: Callable[[str], None] | None = None  # the window sets this to tell the user
 
-_FILES = r"pdf|docx?|txt|eml|msg|html?|jpe?g|png|gif|bmp|tiff?|webp|heic|csv|md|xlsx|xlsm|xls"
+_FILES = r"pdf|docx?|txt|eml|msg|html?|jpe?g|png|gif|bmp|tiff?|webp|heic|heif|csv|md|xlsx|xlsm|xls"
 # In this order: a full path to a file keeps only its type, then other paths go, then a bare file name
 # (which is often the case name: "Jane Roe v. Sam Poe.pdf" -> "<file.pdf>"), then e-mail addresses,
 # index and other long numbers, and phone numbers.

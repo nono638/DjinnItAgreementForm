@@ -12,8 +12,9 @@ from pathlib import Path
 
 def selftest(out_dir: str, files: list[str]) -> int:
     """Headless check of a build: reads each file and fills its agreement on both forms (clean and original),
-    checks that the Records' fuzzy search works (fuzzy_search: True, else the error), then writes selftest.json
-    into out_dir. The default settings are used; the saved ones are not touched."""
+    checks the libraries a build can lose without anything else failing (fuzzy_search, regex_search,
+    heic_photos, update_check, printing: True each, else the error), then writes selftest.json into out_dir.
+    The default settings are used; the saved ones are not touched."""
     import json
     from minute_filler.extract_regex import RegexExtractor
     from minute_filler.fill import fill_all
@@ -31,6 +32,31 @@ def selftest(out_dir: str, files: list[str]) -> int:
         report["fuzzy_search"] = matcher("Counsle", "fuzzy")(["Counsel & Counsel"])
     except Exception as e:
         report["fuzzy_search"] = f"{type(e).__name__}: {e}"
+    try:  # the Regex box needs the regex library (it can stop a search that would freeze the window)
+        from minute_filler.records import matcher
+        report["regex_search"] = matcher("^counsel", "regex")(["Counsel & Counsel"])
+    except Exception as e:
+        report["regex_search"] = f"{type(e).__name__}: {e}"
+    try:  # iPhone photos need pillow-heif and its libheif DLL: a small HEIC made and read back
+        import io
+        from PIL import Image
+        from minute_filler.ingest import HEIF_OK
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 64), "white").save(buf, format="HEIF")
+        report["heic_photos"] = HEIF_OK and Image.open(io.BytesIO(buf.getvalue())).size == (64, 64)
+    except Exception as e:
+        report["heic_photos"] = f"{type(e).__name__}: {e}"
+    try:  # the daily look for a newer version asks GitHub over https: needs ssl and its certificates
+        import ssl
+        from minute_filler import update
+        report["update_check"] = bool(ssl.create_default_context()) and update.version_key("v1.10.2") == (1, 10, 2)
+    except Exception as e:
+        report["update_check"] = f"{type(e).__name__}: {e}"
+    try:  # Print... needs Qt's print support in the build
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter  # noqa: F401
+        report["printing"] = True
+    except Exception as e:
+        report["printing"] = f"{type(e).__name__}: {e}"
     for f in files:
         try:
             case = merge([RegexExtractor(s.profile).extract(ingest_file(f))], s)

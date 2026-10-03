@@ -671,6 +671,72 @@ def _printed_span(printed: list, first: int, last: int) -> str:
     return f"p. {nums[0]}" if len(nums) == 1 else f"pp. {nums[0]}–{nums[-1]}"
 
 
+# The choices of a job's invoice that are kept with its records (job_origin) and put back (job_from_origin)
+_ORIGIN_CHOICES = ("parties", "invoice_email", "invoice_index", "invoice_show", "invoice_detail", "portions",
+                   "page_basis", "front_owner")
+# Not put back when a job is opened again: they are worked out afresh (today's date, the delivery date from it)
+_ORIGIN_SKIP = ("agreement_date", "delivery_date")
+
+
+def job_origin(job: Job) -> dict:
+    """Where a job came from, kept with the record of each file made from it (deliver.generate adds the case):
+    the documents read (their paths; pasted text has none) and the invoice's own choices (Extras, Excerpts...,
+    Whose pages...)."""
+    return {"sources": [d.path for d in job.docs if d.path],
+            "job": {**{k: getattr(job, k) for k in _ORIGIN_CHOICES},
+                    "proc_touched": job.proc_touched, "att_touched": job.att_touched}}
+
+
+def job_from_origin(origin: dict, s: Settings) -> Job:
+    """A job as it was when a file was made from it (origin: Activity.origin, read from JSON), without its
+    documents: the window reads those again (origin["sources"]) when they are still there. Each field comes
+    back with the source it had, so what the user typed stays theirs and what was read from the documents is
+    read again; the attorneys and proceeding types come back as the user left them (ticks included), the day's
+    invoice choices too. The agreement and delivery dates are today's again. Anything in `origin` that isn't as
+    expected is left out."""
+    job = Job()
+    snap = origin.get("case") if isinstance(origin.get("case"), dict) else {}
+    choices = origin.get("job") if isinstance(origin.get("job"), dict) else {}
+
+    def listed(name: str) -> list:
+        """A list of the case snapshot ([] when it isn't one)."""
+        return snap[name] if isinstance(snap.get(name), list) else []
+
+    for key, state in (snap["fields"] if isinstance(snap.get("fields"), dict) else {}).items():
+        if key in job.case.fields and key not in _ORIGIN_SKIP and isinstance(state, list) and len(state) == 3 \
+                and all(isinstance(x, str) for x in state[:2]) and isinstance(state[2], (int, float)):
+            job.case.fields[key] = FieldState(state[0], state[1], float(state[2]), [state[0]])
+    known = {f for f in Attorney.__dataclass_fields__}
+    for a in listed("attorneys"):
+        if isinstance(a, dict):
+            text = {k: v for k, v in a.items() if k in known and k != "checked" and isinstance(v, str)}
+            job.case.attorneys.append(Attorney(**text, checked=a.get("checked") is True))
+    # (touched: the user had changed them, be it to none at all; records from before that was kept say so
+    # by having some)
+    job.att_touched = bool(job.case.attorneys) or choices.get("att_touched") is True
+    job.case.proc_types = {p for p in listed("proc") if isinstance(p, str)}
+    job.proc_touched = bool(job.case.proc_types) or choices.get("proc_touched") is True
+    if isinstance(choices.get("parties"), int) and not isinstance(choices.get("parties"), bool):
+        job.parties = max(0, choices["parties"])
+    if isinstance(choices.get("invoice_email"), bool):
+        job.invoice_email = choices["invoice_email"]
+    if choices.get("invoice_index") in ("auto", "on", "off"):
+        job.invoice_index = choices["invoice_index"]
+    if isinstance(choices.get("invoice_show"), list):
+        job.invoice_show = [k for k in choices["invoice_show"] if isinstance(k, str)]
+    job.invoice_detail = choices.get("invoice_detail") is True
+    rows = choices.get("portions")
+    if isinstance(rows, list) and all(isinstance(r, list) and len(r) == 2 and isinstance(r[0], int)
+                                      and isinstance(r[1], list) for r in rows):
+        job.portions = [(r[0], [k for k in r[1] if isinstance(k, str)]) for r in rows]
+    for name in ("page_basis", "front_owner"):
+        value = choices.get(name)
+        if isinstance(value, dict):
+            setattr(job, name, {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)})
+    job.own = tuple(sorted(my_initials(s.profile.name, s.profile.initials)))
+    return job
+
+
 def make_doc(ing: Ingested, regex: Extraction, s: Settings, path: str = "") -> Doc:
     """A Doc, with what it says about its case worked out from its regex fields."""
     return Doc(ing, regex, path=path, ident=ident(merge([regex], s)))
@@ -685,9 +751,12 @@ def remerge(job: Job, s: Settings) -> None:
     if job.att_touched:
         known = prev.attorneys
         keys = [(a, a.key()) for a in known]
+        ticks = [(a, a.checked) for a in known]
         new.attorneys = dedupe_attorneys(known + list(new.attorneys), s.profile)
         for a in new.attorneys[len(known):]:
             a.checked = False
+        for a, ticked in ticks:  # an attorney the user unticked stays unticked, though a document read again
+            a.checked = ticked   # ticks its sender (dedupe_attorneys keeps a tick from either copy)
         for a, k in keys:  # a name filled in from a duplicate: Excerpts... follows the attorney
             if any(a is b for b in new.attorneys) and a.key() != k and k not in {b.key() for b in new.attorneys}:
                 job.rename_in_portions(k, a.key())
@@ -964,7 +1033,7 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
                 sheet.target = _started_for(job, started, s)
             job.saved = generate(job.case, s, out_dir_for(job, s), want, job.invoice_opts(), ledger,
                                  dated=names.count(job.name_key()) > 1, runsheet=sheet,
-                                 folders=input_folders(job), invoiced=keys)
+                                 folders=input_folders(job), invoiced=keys, origin=job_origin(job))
             job.invoiced |= "invoice" in want
             left_out = [OUTPUTS[o].lower() for o in outputs if o not in want
                         and not (o == "invoice" and (billed_elsewhere or unchecked_here))]
@@ -999,7 +1068,9 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             continue
         try:
             case, opts = joint_invoice(g)
-            made = generate(case, s, out_dir_for(first, s), ["invoice"], opts, ledger, invoiced=keys)
+            # (opened again from the records, the days are read from their documents: one job each)
+            made = generate(case, s, out_dir_for(first, s), ["invoice"], opts, ledger, invoiced=keys,
+                            origin={"sources": [d.path for j in g for d in j.docs if d.path], "joint": True})
             problem = ""
         except Exception as e:
             made = list(getattr(e, "made", []))

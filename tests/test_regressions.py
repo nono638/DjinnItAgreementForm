@@ -366,11 +366,37 @@ def test_generate_asks_about_the_case_as_whose_pages_left_it(make_window, monkey
 
 
 def test_selftest_checks_the_fuzzy_search(tmp_path):
-    """--selftest says whether the Records' Fuzzy search works (the release check runs it on the build)."""
+    """--selftest says whether the Records' Fuzzy and Regex searches, HEIC photos, the look for a newer version
+    and printing work (the release check runs it on the build)."""
     from minute_filler.main import selftest
     assert selftest(str(tmp_path / "st"), []) == 0
     report = json.loads((tmp_path / "st" / "selftest.json").read_text(encoding="utf-8"))
-    assert report["fuzzy_search"] is True
+    assert report["fuzzy_search"] is True and report["regex_search"] is True and report["heic_photos"] is True
+    assert report["update_check"] is True and report["printing"] is True
+
+
+def test_an_iphone_heic_photo_is_read(tmp_path, monkeypatch):
+    """A .heic photo opens (pillow-heif), upright, and is handed to the text recognition like a JPG.
+    1.6.0 said "this doesn't look like a valid .heic file" because pillow-heif wasn't installed."""
+    from PIL import Image
+    from minute_filler import ingest
+    seen = []
+    monkeypatch.setattr(ingest, "ocr_image", lambda img: seen.append(img.size) or "SUPREME COURT")
+    path = tmp_path / "IMG_0001.heic"
+    Image.new("RGB", (120, 80), "white").save(path, format="HEIF")
+    ing = ingest.ingest_file(path)
+    assert seen == [(120, 80)] and ing.text == "SUPREME COURT" and ing.images
+
+
+def test_a_heic_photo_without_pillow_heif_says_what_is_missing(tmp_path, monkeypatch):
+    """Without pillow-heif, a HEIC photo gets a message saying so and what to do, not "not a valid file"."""
+    import pytest
+    from minute_filler import ingest
+    monkeypatch.setattr(ingest, "HEIF_OK", False)
+    path = tmp_path / "IMG_0002.HEIC"
+    path.write_bytes(b"\x00\x00\x00\x18ftypheic")
+    with pytest.raises(ValueError, match="can't read HEIC photos.*save it as JPG"):
+        ingest.ingest_file(path)
 
 
 def test_browse_offers_every_kind_of_file_a_folder_takes(qt):

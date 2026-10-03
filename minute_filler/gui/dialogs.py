@@ -1,6 +1,7 @@
 """The app's dialogs: Settings, the "please clarify" questions before filling, the run sheet choice, a job's
 invoice Extras, granular detail, excerpts (who ordered which pages) and whose pages of a transcript of several
-reporters to bill, the Ollama setup help (with a model download) and About."""
+reporters to bill, the Ollama setup help (with a model download), About and the How to use guide (GUIDE).
+The preview before saving and the first-run welcome are in preview.py."""
 from __future__ import annotations
 
 import re
@@ -37,20 +38,13 @@ class SettingsDialog(QDialog):
     and saves it to disk. Cancel leaves the settings, and a picked but unsaved signature image,
     untouched.
     """
-    def __init__(self, settings: Settings, parent=None, first_run: bool = False):
-        """settings: the Settings object to edit in place.
-        first_run: show a welcome line above the tabs (first launch, before a name is entered).
-        """
+    def __init__(self, settings: Settings, parent=None):
+        """settings: the Settings object to edit in place."""
         super().__init__(parent)
         self.s = settings
         self.setWindowTitle("Settings")
         self.setMinimumWidth(z(560))
         lay = QVBoxLayout(self)
-        if first_run:
-            hello = QLabel("Welcome! Enter your details once - they are written on every minute agreement.")
-            hello.setWordWrap(True)
-            hello.setObjectName("subtitle")
-            lay.addWidget(hello)
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs)
 
@@ -167,11 +161,15 @@ class SettingsDialog(QDialog):
         self.o_flat.setToolTip("Applies to minute agreements, MOFRs and invoices: they are locked as they are made.\n"
                                "Unticked, they stay fillable; File → Lock finished PDFs locks a copy later.")
         self.o_open = QCheckBox("Open the PDF after saving")
+        self.o_preview = QCheckBox("Show a preview before saving (Generate)")
+        self.o_preview.setToolTip("Generate first shows the files as pictures; nothing is saved until you say so.\n"
+                                  "Generate all (a batch) saves without a preview.")
         self.o_tc = QCheckBox("Convert ALL-CAPS names to Title Case")
         self.o_djinn = QCheckBox("Show the Djinn (working / done / stumped pictures)")
         for cb, val in ((self.o_per_email, settings.per_email),
                         (self.o_today, settings.agreement_today), (self.o_flat, settings.flatten),
-                        (self.o_open, settings.open_after), (self.o_tc, settings.title_case_names),
+                        (self.o_open, settings.open_after), (self.o_preview, settings.preview_before_saving),
+                        (self.o_tc, settings.title_case_names),
                         (self.o_djinn, settings.show_djinn)):
             cb.setChecked(val)
             f.addRow("", cb)
@@ -219,6 +217,24 @@ class SettingsDialog(QDialog):
                                "Also Ctrl + and Ctrl − in the window, or Ctrl and the mouse wheel;\n"
                                "Ctrl 0 goes back to 100 %.")
         f.addRow("Zoom", self.o_zoom)
+        self.o_fuzzy_numbers = QCheckBox("Fuzzy search matches numbers loosely too")
+        self.o_fuzzy_numbers.setToolTip("Records → the search box's Fuzzy box. Ticked: numbers are matched like words, "
+                                        "so \"2026-0001\" also finds 2026-0002.\nUnticked: a word with a digit in "
+                                        "it (an invoice or index number, a date) must be found as typed;\n"
+                                        "names and other words still forgive a typo.")
+        self.o_fuzzy_numbers.setChecked(settings.fuzzy_numbers)
+        f.addRow("Records search", self.o_fuzzy_numbers)
+        self.o_recaps = QCheckBox("Show a recap of last month (and last year) when Records is first opened")
+        self.o_recaps.setToolTip("\"Last month you made $870.00 with 243 pages\": once a month, and once a year for "
+                                 "the year before.")
+        self.o_recaps.setChecked(settings.recaps)
+        f.addRow("Recaps", self.o_recaps)
+        self.o_updates = QCheckBox("Look for a newer version once a day")
+        self.o_updates.setToolTip("The only time the app goes online: it asks GitHub for the number of the latest "
+                                  "version\nand shows a link when there is a newer one. Nothing about you, your "
+                                  "computer or your cases is sent,\nand nothing is installed by itself.")
+        self.o_updates.setChecked(settings.check_updates)
+        f.addRow("New versions", self.o_updates)
         scroll = QScrollArea()  # a long tab: scrolls on small screens
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
@@ -412,7 +428,7 @@ class SettingsDialog(QDialog):
         from PySide6.QtWidgets import QMessageBox
         from ..signature import prepare, signature_path
         src, _ = QFileDialog.getOpenFileName(self, "Picture of your signature", "",
-                                             "Pictures (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.heic)")
+                                             "Pictures (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.heic *.heif)")
         if not src:
             return
         try:
@@ -640,6 +656,9 @@ class SettingsDialog(QDialog):
         s.output_dir, s.filename_pattern = self.o_dir.text().strip(), self.o_pattern.text().strip() or s.filename_pattern
         s.theme = self.o_theme.currentText()
         s.zoom = self.o_zoom.value() / 100
+        s.fuzzy_numbers = self.o_fuzzy_numbers.isChecked()
+        s.preview_before_saving = self.o_preview.isChecked()
+        s.recaps, s.check_updates = self.o_recaps.isChecked(), self.o_updates.isChecked()
         s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
         s.mofr_division = self.o_division.currentData()
         s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
@@ -1578,8 +1597,14 @@ COMPONENTS = [
     ("PyWinRT (Windows OCR bindings)", "MIT", "https://github.com/pywinrt/pywinrt"),
     ("openpyxl (run sheets)", "MIT", "https://openpyxl.readthedocs.io"),
     ("RapidFuzz (the Records search's Fuzzy box)", "MIT", "https://github.com/rapidfuzz/RapidFuzz"),
+    ("regex (the Records search's Regex box)", "Apache-2.0 and CNRI-Python", "https://github.com/mrabarnett/mrab-regex"),
+    ("pillow-heif (iPhone HEIC photos)", "BSD-3-Clause", "https://github.com/bigcat88/pillow_heif"),
+    ("libheif and libde265 (used by pillow-heif)", "LGPL-3.0", "https://github.com/strukturag/libheif"),
+    ("x265 (used by pillow-heif)", "GPL-2.0-or-later", "https://www.videolan.org/developers/x265.html"),
     ("et_xmlfile (used by openpyxl)", "MIT", "https://foss.heptapod.net/openpyxl/et_xmlfile"),
     ("HTTPX (used by ollama-python)", "BSD-3-Clause", "https://www.python-httpx.org"),
+    ("OpenSSL (the look for a newer version)", "Apache-2.0", "https://www.openssl.org"),
+    ("SQLite (the records)", "public domain", "https://www.sqlite.org"),
     ("Python", "PSF License", "https://www.python.org"),
 ]
 
@@ -1669,7 +1694,8 @@ GUIDE = """
 <p>The app reads the documents of an order (a transcript, an invoice, a photo of a court paper, an e-mail),
 finds the court, part, judge, case, index number, dates and attorneys, shows them for you to check, and makes
 the paperwork: the minute agreement, the invoice, the MOFR and the run sheet. Everything stays on this
-computer.</p>
+computer (once a day the app asks GitHub whether there is a newer version, and sends nothing about you or
+your cases; Settings → Options turns that off).</p>
 
 <h3>What you can put in</h3>
 <ul>
@@ -1677,7 +1703,7 @@ computer.</p>
 (the pages with <i>your</i> initials, when several reporters wrote it) is what the invoice bills.</li>
 <li><b>Other PDFs:</b> an invoice, a scanned order, a printed e-mail. Scans are read by Windows' text
 recognition.</li>
-<li><b>Photos and screenshots</b> (JPG, PNG, TIFF, BMP, WebP), or a screenshot pasted with
+<li><b>Photos and screenshots</b> (JPG, PNG, iPhone HEIC, TIFF, BMP, WebP), or a screenshot pasted with
 <b>Ctrl+V</b>.</li>
 <li><b>E-mails:</b> paste the text into the box and click <b>Extract from text</b>, or drop a saved
 <code>.eml</code>. Word (<code>.docx</code>), <code>.txt</code> and web pages work too. Outlook
@@ -1715,6 +1741,9 @@ typed by you).</li>
 <li><b>Pick the rate sheet and speed</b> under Order.</li>
 <li><b>Tick the outputs</b> and click <b>Generate</b> (Ctrl+Enter), or <b>Generate all</b>
 (Ctrl+Shift+Enter) for every ticked job in the list on the left.</li>
+<li><b>Look at the preview</b> and click <b>Save</b>, or <b>Go back</b> to change something: nothing is saved
+until then. (Generate all saves without a preview. <i>Don't show previews anymore</i> turns it off; Settings →
+Options turns it back on.) The box that says what was saved can <b>print</b> it.</li>
 </ol>
 
 <h3>Tips</h3>
@@ -1732,6 +1761,12 @@ text</i>; <b>Preview…</b> shows a made-up invoice with it.</li>
 <li>In <b>Records</b>, type a firm, case or index number to find its invoices, tick <b>Paid</b> when they
 pay, and choose the columns with <b>Columns…</b>. Deleted records stay in the trash for 30 days; the PDFs
 are never deleted.</li>
+<li>Also in <b>Records</b>: right-click a record to <b>open its job again</b> (for a corrected invoice, or
+another day of the case) or to print it; <b>Undo</b> (Ctrl+Z) takes back the last change; <b>Summary…</b> sums
+up a month or a year; <b>Backups…</b> lists the copies of your records made each day, to go back to one.</li>
+<li><b>File → Open recent</b> lists the documents and folders you opened lately.</li>
+<li>A new computer? <b>File → Export settings</b> saves your details, options and rate sheets as one file,
+and <b>File → Import settings</b> reads it there.</li>
 <li>When an invoice is final, <b>File → Lock finished PDFs</b> saves a copy nobody can change.</li>
 <li>Text too small or too big? <b>Ctrl +</b> and <b>Ctrl −</b> (or Ctrl and the mouse wheel) zoom,
 <b>Ctrl 0</b> goes back to 100%.</li>
@@ -1747,6 +1782,7 @@ are never deleted.</li>
 <tr><td><b>Ctrl+Enter</b></td><td>Generate (this job)</td></tr>
 <tr><td><b>Ctrl+Shift+Enter</b></td><td>Generate all</td></tr>
 <tr><td><b>Ctrl+R</b></td><td>Records</td></tr>
+<tr><td><b>Ctrl+Z</b></td><td>In Records: undo the last change</td></tr>
 <tr><td><b>Ctrl + / Ctrl − / Ctrl 0</b></td><td>Zoom in, out, back to 100%</td></tr>
 </table>
 

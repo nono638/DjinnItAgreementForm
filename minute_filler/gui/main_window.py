@@ -5,14 +5,22 @@ job's invoice offers and shows, Excerpts... which attorney ordered which pages o
 which pages of a transcript of several reporters are billed (the user's own, by default); with Generate all, the
 days of one case share one invoice per attorney (batch.joint_invoice).
 File -> Lock finished PDFs saves copies whose fields can no longer be changed.
+Generate shows the files as pictures first (preview.PreviewDialog) unless that is turned off; the box that says
+what was saved can print it. File -> Open recent lists the documents opened lately, and Export / Import settings
+carry the settings to another computer. A job once made can be opened again from the Records window
+(open_past_job). When the window opens it makes the day's backup of the records and, once a day, asks whether
+there is a newer version (update.py); a new user is asked a few questions first (preview.WelcomeDialog).
 
 Documents are read, the AI is asked and batches are made on a thread pool (workers.Runner). Their results
 are applied on the UI thread; the results of work started before "New job" are dropped (see MainWindow.gen)."""
 from __future__ import annotations
 
+import json
 import re
+import tempfile
 import textwrap
 from copy import deepcopy
+from datetime import date
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,14 +37,14 @@ from PySide6.QtWidgets import (
 from .. import log as logfile
 from ..log import log
 from ..batch import (BATCH_EXT, NOT_INVOICED, Job, expand_paths, files_to_make, fill_jobs, group, ident,
-                     input_folders, out_dir_for, read_loaders, remerge, same_case)
+                     input_folders, job_from_origin, job_origin, out_dir_for, read_loaders, remerge, same_case)
 from ..extract_llm import OllamaExtractor
 from ..dates import quick_date
-from ..deliver import generate
+from ..deliver import backup_folder, backup_records, generate, ledger_for
 from ..ingest import ingest_file, ingest_pil, ingest_text
-from ..merge import refresh_delivery_date, refresh_rate
+from ..merge import apply_defaults, refresh_delivery_date, refresh_rate
 from ..models import (Attorney, CaseInfo, FIELD_LABELS, FieldState, PROC_TYPES, REQUIRED_KEYS, SRC_AI,
-                      SRC_USER)
+                      SRC_DEFAULT, SRC_DERIVED, SRC_USER)
 from ..runsheet import find_sheets, run_sheet_summary, runsheets_folder, transcript_pages
 from ..settings import OUTPUTS, Settings
 from .dialogs import ClarifyDialog, RunSheetDialog, SettingsDialog
@@ -944,9 +952,13 @@ class MainWindow(QMainWindow):
         m.addAction("&New job", self.new_job)          # Ctrl+N handled by the window shortcut
         m.addAction("&Open documents…", self.browse)
         m.addAction("Open a &folder of documents (batch)…", self.browse_folder)
+        self.recent_menu = m.addMenu("Open r&ecent")
+        self.recent_menu.aboutToShow.connect(self._fill_recent)
         m.addSeparator()
         m.addAction("Open &rate sheets folder", self._open_sheets_folder)
         m.addAction("&Settings…", self.open_settings)
+        m.addAction("Ex&port settings (for another computer)…", self.export_settings)
+        m.addAction("&Import settings…", self.import_settings)
         m.addSeparator()
         m.addAction("&Records (invoices and history)…", self.open_records)
         m.addAction("Save the invoice &spreadsheet template…", self._save_invoice_template)
@@ -956,6 +968,7 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&Help")
         m.addAction("&How to use DjinnItAgreementForm…\tF1", self.show_guide)
         m.addAction("The &website (pictures and the latest version)", lambda: open_url(WEBSITE_URL))
+        m.addAction("Check for a &newer version", lambda: self._check_update(asked=True))
         m.addSeparator()
         m.addAction("Set up the &AI helper (Ollama)…", self._ai_help)
         m.addAction("Send &feedback…", lambda: open_url(FEEDBACK_URL))
@@ -966,10 +979,132 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------- startup
     def _startup(self):
-        """Runs once the window is on screen: Settings on the first run (no name yet), then the AI check."""
-        if not self.s.profile.name:
-            self.open_settings(first_run=True)
+        """Runs once the window is on screen: the welcome questions on the first run (no name yet; asked once),
+        then the AI check, the day's backup of the records and, once a day, the look for a newer version."""
+        if not self.s.profile.name and not self.s.welcomed:
+            self.s.welcomed = True
+            self.welcome()
         self._check_ai()
+        self.runner.start(backup_records, backup_folder(self.s))  # off the UI thread: a big database takes a moment
+        if self.s.check_updates and self.s.update_checked != date.today().isoformat():
+            self._check_update()
+
+    def welcome(self) -> None:
+        """The first-run questions (name, address, rate sheet, where files go). Skipped: asked no more;
+        Settings has all of it."""
+        from .preview import WelcomeDialog
+        if WelcomeDialog(self.s, self).exec():
+            self._settings_changed()
+        else:
+            self._save_settings()
+
+    def _save_settings(self) -> None:
+        """Saves the settings; a problem is logged, not shown (they are saved again when the window closes)."""
+        try:
+            self.s.save()
+        except OSError as e:
+            logfile.error("could not save the settings", e)
+
+    def _check_update(self, asked: bool = False) -> None:
+        """Asks GitHub, in the background, whether there is a newer version (see update.py) and shows a line
+        with a link in the status bar when there is. asked: Help -> Check for a newer version, which also says
+        so when there is none, or when GitHub can't be reached; the daily look says nothing then."""
+        from .. import update
+
+        def done(found):
+            self.s.update_checked = date.today().isoformat()
+            self._save_settings()
+            if found:
+                self._show_update(*found)
+                if asked:
+                    QMessageBox.information(self, "A newer version", f"Version {found[0]} is available. The link "
+                                            "at the bottom of the window opens its download page.")
+            elif asked:
+                QMessageBox.information(self, "Up to date", f"You have the latest version ({update.__version__}).")
+
+        def failed(msg):
+            if asked:
+                QMessageBox.information(self, "Could not check", "Could not reach GitHub to look for a newer "
+                                        f"version (are you online?).\n\n{msg}")
+
+        self.runner.start(update.newer, on_done=done, on_error=failed)
+
+    def _show_update(self, version: str, page: str) -> None:
+        """A newer version is out: a line in the status bar that stays, with a link to its download page."""
+        if getattr(self, "update_label", None) is None:
+            self.update_label = QLabel()
+            self.update_label.linkActivated.connect(open_url)
+            self.statusBar().addPermanentWidget(self.update_label)
+        self.update_label.setText(f'Version {version} is available: <a href="{page}">get it</a>')
+        self.update_label.setToolTip("Opens the download page in your browser. Nothing is installed by itself.\n"
+                                     "Settings → Options turns this daily check off.")
+
+    # ------------------------------------------------------ recent files, settings to and from a file
+    def _fill_recent(self) -> None:
+        """File -> Open recent, filled as it opens: the documents and folders opened lately, newest first
+        (one that is gone is greyed out)."""
+        m = self.recent_menu
+        m.clear()
+        for p in self.s.recent_files:
+            path = Path(p)
+            act = m.addAction(f"{path.name}   ·   {path.parent}".replace("&", "&&"),
+                              lambda p=p: self.add_files([p], batch=Path(p).is_dir()))
+            act.setEnabled(path.exists())
+        if not self.s.recent_files:
+            m.addAction("(nothing opened yet)").setEnabled(False)
+        m.addSeparator()
+        m.addAction("Clear this list", lambda: self._set_opt("recent_files", [])).setEnabled(bool(self.s.recent_files))
+
+    def export_settings(self) -> None:
+        """File -> Export settings: saves the settings and the rate sheets as one file (Settings.export_to)."""
+        dest, _ = QFileDialog.getSaveFileName(self, "Export settings",
+                                              str(Path.home() / "Documents" / "DjinnIt settings.json"),
+                                              "Settings file (*.json)")
+        if not dest:
+            return
+        try:
+            self.s.export_to(dest)
+        except OSError as e:
+            show_save_error(self, e, "Could not export the settings")
+            return
+        QMessageBox.information(self, "Settings exported", f"Saved as\n{dest}\n\nOn the other computer: File → "
+                                "Import settings.\n\nThe file holds your details (name, address, invoice text), "
+                                "your options and your rate sheets. Your signature picture and your records are "
+                                "not in it.")
+
+    def import_settings(self) -> None:
+        """File -> Import settings: replaces the settings with those of a file made by Export settings, after
+        asking; the settings as they were are kept next to the settings file as "settings before import.json"."""
+        if self._batch_running():
+            return
+        src, _ = QFileDialog.getOpenFileName(self, "Import settings", str(Path.home() / "Documents"),
+                                             "Settings file (*.json)")
+        if not src:
+            return
+        try:
+            new = Settings.import_from(src, self.s)
+        except (ValueError, OSError) as e:
+            QMessageBox.warning(self, "Could not import", str(e))
+            return
+        who = new.profile.name or "(no name)"
+        if QMessageBox.question(self, "Import settings", f"Replace your settings with those of this file "
+                                f"(reporter: {who})?\n\nYour settings as they are now are kept as "
+                                "\"settings before import.json\" in the app's settings folder. "
+                                "Your records are not changed.") != QMessageBox.Yes:
+            return
+        try:
+            new.write_imported_sheets()  # (only now: answering No leaves the rate sheet folder as it was)
+            if self.s.path.exists():
+                self.s.path.with_name("settings before import.json").write_bytes(self.s.path.read_bytes())
+            # the Settings object is shared (the Records window, the AI helper): filled in place
+            for name in Settings.__dataclass_fields__:
+                setattr(self.s, name, getattr(new, name))
+            self.s.save()
+        except OSError as e:
+            show_save_error(self, e, "Could not import the settings")
+            return
+        self._settings_changed()
+        self._toast("Settings imported.")
 
     def show_guide(self):
         """Help -> How to use (F1): what goes in, what comes out, the steps and tips."""
@@ -1057,10 +1192,15 @@ class MainWindow(QMainWindow):
         pil = Image.open(io.BytesIO(bytes(buf.data())))
         self._ingest([lambda: ingest_pil(pil, "Pasted image")], ["Pasted image"])
 
-    def add_files(self, paths: list[str], batch: bool = False):
+    def add_files(self, paths: list[str], batch: bool = False, same_job: bool = False):
         """Reads files, and the documents in folders. Files already loaded or still being read are skipped.
-        Several documents about different cases (or batch=True) start a batch."""
+        Several documents about different cases (or batch=True) start a batch; same_job: they all go to the job
+        on screen whatever they say (a past job opened again: that is how it was put together). What was opened
+        is kept for File -> Open recent."""
         gen = self.gen
+        for p in reversed(paths):
+            self.s.remember_file(p)
+        self._save_settings()
 
         def find():  # off the UI thread: a big folder takes a while to go through
             return [(p, _path_key(p)) for p in expand_paths(paths)]
@@ -1076,7 +1216,7 @@ class MainWindow(QMainWindow):
             if fresh:
                 files = [p for p, _ in fresh]
                 self._ingest([(lambda p=p: ingest_file(p)) for p in files], [Path(p).name for p in files],
-                             files, batch, {key for _, key in fresh})
+                             files, batch, {key for _, key in fresh}, same_job)
             else:
                 self._update_status()
                 if not everything:
@@ -1103,13 +1243,14 @@ class MainWindow(QMainWindow):
         self._idle()
         return True
 
-    def _ingest(self, loaders, names, paths=None, batch=False, keys=frozenset()):
+    def _ingest(self, loaders, names, paths=None, batch=False, keys=frozenset(), same_job=False):
         """Reads inputs in the background and adds them to the jobs.
 
         loaders: one function per input that returns the Ingested document; names: what to call each in
         messages; paths: the files (None for pasted text or pictures); keys: the files' _path_key, held in
         self._loading until the read ends. With a single job and documents all about one case, they are
-        added to that job; otherwise (or with batch=True) they are sorted into jobs by case and date.
+        added to that job (with same_job, whatever they are about); otherwise (or with batch=True) they are
+        sorted into jobs by case and date.
         """
         # the reading thread gets its own copy of the settings: Settings may change them meanwhile
         gen, target, s = self.gen, self.cur, deepcopy(self.s)
@@ -1138,7 +1279,7 @@ class MainWindow(QMainWindow):
             if docs:
                 self._sync_from_ui()
                 one_job = len(self.jobs) == 1 and target in self.jobs and not batch
-                if one_job and (len(docs) == 1 or len(group(docs, self.s)) == 1):
+                if one_job and (same_job or len(docs) == 1 or len(group(docs, self.s)) == 1):
                     # the usual way: everything dropped is about the job on screen
                     target.docs += docs
                     target.unbill()  # new documents may mean new pages to bill
@@ -1622,8 +1763,8 @@ class MainWindow(QMainWindow):
         self._toast(f"Loaded {len(self.s.sheets()[0])} rate sheet(s).")
 
     def _set_opt(self, name, value):
-        """Saves an option changed in the Outputs box (the outputs ticked and each one's options) as the
-        default."""
+        """Sets a setting and saves it: an option changed in the Outputs box (the outputs ticked and each one's
+        options), the zoom, the list of recent files cleared."""
         setattr(self.s, name, value)
         self.s.save()
 
@@ -1677,20 +1818,26 @@ class MainWindow(QMainWindow):
         self.busy.setRange(0, 0)
         self.busy.setVisible(self.ai_pending > 0 or self.work > 0)
 
-    def _saved_box(self, title: str, text: str, folders: list, details: str = "", warn: bool = False):
-        """The 'files saved' message, with a button that opens the folder(s)."""
+    def _saved_box(self, title: str, text: str, folders: list, details: str = "", warn: bool = False,
+                   files: list | None = None):
+        """The 'files saved' message, with a button that opens the folder(s) and, when `files` are given,
+        one that prints them (see preview.print_files)."""
         box = QMessageBox(self)
         box.setWindowTitle(title)
         box.setIcon(QMessageBox.Warning if warn else QMessageBox.Information)
         box.setText(text)
         if details:
             box.setDetailedText(details)
+        print_btn = box.addButton("Print…", QMessageBox.ActionRole) if files else None
         open_folder = box.addButton("Open folder", QMessageBox.ActionRole) if folders else None
-        box.addButton(QMessageBox.Ok)
+        box.setDefaultButton(box.addButton(QMessageBox.Ok))
         box.exec()
         if open_folder is not None and box.clickedButton() == open_folder:
             for f in folders[:3]:
                 open_path(f)
+        elif print_btn is not None and box.clickedButton() == print_btn:
+            from .preview import print_files
+            print_files(self, files)
 
     def _toast(self, msg: str):
         """A short note at the bottom of the window that goes away after 8 seconds."""
@@ -1797,10 +1944,22 @@ class MainWindow(QMainWindow):
             if not outputs or job not in self.jobs:
                 return
         out_dir = out_dir_for(job, self.s)
+        opts, origin = job.invoice_opts(), job_origin(job)
+        docs = list(job.docs)
+        if self.s.preview_before_saving:
+            # what is saved is what was shown: the case as it is now, whatever comes in while the preview is up
+            case = deepcopy(case)
+            if not self._preview(case, outputs, opts):
+                return
+            if job not in self.jobs:  # (a read that ended meanwhile put its documents with another job)
+                self._toast("The job changed while the preview was open: nothing was saved. Generate again.")
+                return
+            if self._batch_running():
+                return
         keys: list[str] = []  # the attorneys invoiced
         try:
-            paths = generate(case, self.s, out_dir, outputs, job.invoice_opts(), runsheet=sheet,
-                             folders=input_folders(job), invoiced=keys)
+            paths = generate(case, self.s, out_dir, outputs, opts, runsheet=sheet,
+                             folders=input_folders(job), invoiced=keys, origin=origin)
         except Exception as e:
             made = list(getattr(e, "made", []))
             job.saved, job.error = made, f"{type(e).__name__}: {e}"
@@ -1813,7 +1972,9 @@ class MainWindow(QMainWindow):
             return
         log.info("made %d file(s): %s, form type %s", len(paths), "+".join(outputs), self.s.form_choice)
         job.saved, job.error = paths, ""
-        job.invoiced |= "invoice" in outputs  # Generate all won't bill this day again
+        # Generate all won't bill this day again, unless a document was added while the preview was open: its
+        # pages are not on the invoice just made
+        job.invoiced |= "invoice" in outputs and job.docs == docs
         if self.s.open_after:
             for p in paths:
                 open_path(p)
@@ -1824,10 +1985,38 @@ class MainWindow(QMainWindow):
         if sheet and sheet.path:
             text += ("\n\n" if text else "") + run_sheet_summary(sheet)
             folders.append(sheet.path.parent)
-        self._saved_box("Saved", text, list(dict.fromkeys(folders)))
+        # (Print...: the PDFs; the run sheet is a workbook, printed from Excel)
+        self._saved_box("Saved", text, list(dict.fromkeys(folders)),
+                        files=[p for p in paths if p.suffix.lower() == ".pdf"])
         self._update_status()
         self._set_status(f"✓  Saved {len(paths)} file(s)", "ok")
         self._records_changed()
+
+    def _preview(self, case: CaseInfo, outputs: list[str], opts) -> bool:
+        """Shows the files Generate is about to make, as pictures (preview.PreviewDialog); True = save them.
+        They are made in a temporary folder with a records database of its own (Ledger.preview_copy: the
+        invoice shows the number it will get, and none is taken). The run sheet is not shown: it is a
+        spreadsheet, and making it would add to the real one. True too when there is nothing to show. When the
+        preview can't be made, the user is asked whether to save without one (a problem with the files
+        themselves is then said as usual)."""
+        from .preview import PreviewDialog
+        show = [o for o in outputs if o != "runsheet"]
+        if not show:
+            return True
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            s = deepcopy(self.s)
+            s.output_dir, s.output_dirs = tmp, {}
+            try:
+                files = generate(deepcopy(case), s, Path(tmp), show, opts,
+                                 ledger=ledger_for(self.s).preview_copy(Path(tmp) / "records"))
+                dlg = PreviewDialog([f for f in files if f.suffix.lower() == ".pdf"], self.s, self,
+                                    "The run sheet is not shown here; it is saved with the rest."
+                                    if "runsheet" in outputs else "")
+            except Exception as e:
+                logfile.error("could not make the preview", e)
+                return QMessageBox.question(self, "No preview", "The preview could not be made "
+                                            f"({type(e).__name__}).\n\nSave the files without it?") == QMessageBox.Yes
+            return dlg.exec() == PreviewDialog.Accepted
 
     def _without_unchecked_invoice(self, job: Job, outputs: list[str]) -> list[str]:
         """The outputs to make, less the invoice when it is held (Job.invoice_hold): whose pages to bill is asked
@@ -2063,8 +2252,13 @@ class MainWindow(QMainWindow):
                 self, "New job", f"Clear all {len(self.jobs)} jobs of this batch and start over?"
         ) != QMessageBox.Yes:
             return
+        self._clear_jobs()
+
+    def _clear_jobs(self, job: Job | None = None) -> None:
+        """Drops every job and starts with one (a blank one, or `job`); results of work still running are
+        dropped (self.gen goes up)."""
         self.gen += 1
-        self.jobs = [Job()]
+        self.jobs = [job or Job()]
         self.cur = self.jobs[0]
         self.ai_pending = self.work = 0
         self._loading.clear()
@@ -2076,30 +2270,90 @@ class MainWindow(QMainWindow):
         self.busy.setVisible(False)
         self._set_status("Drop a document to begin", "")
 
-    def open_settings(self, first_run: bool = False):
+    def open_past_job(self, origin: str) -> bool:
+        """Opens a job again from its record (Records -> Open this job again), for a corrected invoice or
+        another day of the case. origin: Activity.origin (JSON), or what the Records window put together from
+        an older record's columns. The case comes back as it was filled in (batch.job_from_origin) and the
+        documents it was read from are read again when they are still where they were. An invoice of several
+        days is read from its documents alone, a job per day. Asks first when there is work on screen; False
+        when nothing was opened."""
+        if self._batch_running():
+            return False
+        try:
+            data = json.loads(origin)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            QMessageBox.information(self, "Open this job again", "This record doesn't say what it was made from.")
+            return False
+        if any(not j.is_empty() for j in self.jobs) and QMessageBox.question(
+                self, "Open this job again", "Clear what is in the window now and open this job instead?"
+        ) != QMessageBox.Yes:
+            return False
+        if self._batch_running():
+            return False
+        sources = [p for p in data.get("sources") or [] if isinstance(p, str)]
+        there = [p for p in sources if Path(p).is_file()]
+        several_days = data.get("joint") is True and there
+        if several_days:
+            self._clear_jobs()
+        else:
+            try:
+                job = job_from_origin(data, self.s)
+            except Exception as e:  # (a record damaged in a way job_from_origin doesn't expect)
+                logfile.error("could not open a past job", e)
+                QMessageBox.information(self, "Open this job again", "This record can't be opened again.")
+                return False
+            if len(there) < len(sources) or not sources:
+                # Not every document will be read again: what was read from the missing ones would be lost
+                # when the others are merged, so it is kept as if typed (not the defaults: they are worked out)
+                for f in job.case.fields.values():
+                    if f.value and f.source not in (SRC_DEFAULT, SRC_DERIVED):
+                        f.source = SRC_USER
+            apply_defaults(job.case, self.s)
+            self._clear_jobs(job)
+            self._show_job()
+        if there:
+            self.add_files(there, batch=bool(several_days), same_job=not several_days)
+        gone = len(sources) - len(there)
+        if gone:
+            self._toast(f"{plural(gone, 'document')} of this job {'is' if gone == 1 else 'are'} no longer where "
+                        f"{'it was' if gone == 1 else 'they were'}: drop {'it' if gone == 1 else 'them'} here to "
+                        "make an invoice again.")
+        self.raise_()
+        self.activateWindow()
+        return True
+
+    def open_settings(self, _checked: bool = False):
         """Opens Settings. After Save, the theme, the window's options, the rate sheets and the AI check are
         refreshed and every job is merged and priced again."""
-        dlg = SettingsDialog(self.s, self, first_run=first_run)
+        dlg = SettingsDialog(self.s, self)
         if dlg.exec():
-            if self.s.zoom != zooming.zoom():
-                self.set_zoom(self.s.zoom)  # (the theme too)
-            apply_theme(self.app, self.s.theme)
-            self.per_email.setChecked(self.s.per_email)
-            self.sign_rep.setChecked(self.s.sign_reporter)
-            for combo, value in ((self.form_choice, self.s.form_choice), (self.mofr_division, self.s.mofr_division),
-                                 (self.rs_existing, self.s.runsheet_existing)):
-                with QSignalBlocker(combo):
-                    combo.setCurrentIndex(max(0, combo.findData(value)))
-            set_checks(self.output_boxes, self.s.outputs)
-            self.s.reload_rates()
-            self._fill_sheet_box()
-            self._fill_invoice_speeds()
-            self._check_ai()
-            if self.cur.docs:
-                self._remerge()
-            self._apply_speed()
-            self._remerge_others()
-            self._update_status()
+            self._settings_changed()
+
+    def _settings_changed(self) -> None:
+        """The settings were changed (Settings saved, the welcome questions answered, settings imported): the
+        theme, the window's options, the rate sheets and the AI check are refreshed and every job is merged
+        and priced again."""
+        if self.s.zoom != zooming.zoom():
+            self.set_zoom(self.s.zoom)  # (the theme too)
+        apply_theme(self.app, self.s.theme)
+        self.per_email.setChecked(self.s.per_email)
+        self.sign_rep.setChecked(self.s.sign_reporter)
+        for combo, value in ((self.form_choice, self.s.form_choice), (self.mofr_division, self.s.mofr_division),
+                             (self.rs_existing, self.s.runsheet_existing)):
+            with QSignalBlocker(combo):
+                combo.setCurrentIndex(max(0, combo.findData(value)))
+        set_checks(self.output_boxes, self.s.outputs)
+        self.s.reload_rates()
+        self._fill_sheet_box()
+        self._fill_invoice_speeds()
+        self._check_ai()
+        if self.cur.docs:
+            self._remerge()
+        self._apply_speed()
+        self._remerge_others()
+        self._update_status()
 
     # ------------------------------------------------------- outputs and records
     def _outputs_changed(self, _=None):
@@ -2662,10 +2916,43 @@ class MainWindow(QMainWindow):
         win = getattr(self, "_records_win", None)
         if win is None:
             win = self._records_win = RecordsWindow(self.s, self)
+            win.on_reopen = self.open_past_job
         win.reload()
         win.show()
         win.raise_()
         win.activateWindow()
+        self._recap(win)
+
+    def _recap(self, win, today: date | None = None) -> None:
+        """The first time Records is opened in a month: what last month came to ("Last month (September 2026)
+        you made $870.00 with 243 pages"), and the first time in a year, last year too (records.recap). The box
+        has OK and a tick to show no more recaps (Settings -> Options turns them back on). A month without
+        invoices says nothing."""
+        if not self.s.recaps:
+            return
+        from ..records import recap
+        try:
+            lines, month, year = recap(win.ledger.invoices(), today, self.s.recap_month, self.s.recap_year)
+        except Exception as e:  # the records still open
+            logfile.error("could not sum up last month", e)
+            return
+        if (month, year) != (self.s.recap_month, self.s.recap_year):
+            self.s.recap_month, self.s.recap_year = month, year
+            self._save_settings()
+        if not lines:
+            return
+        box = QMessageBox(win)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Recap")
+        box.setText("\n\n".join(lines))
+        stop = QCheckBox("Don't show me monthly or annual recaps anymore")
+        stop.setToolTip("Settings → Options turns them back on.")
+        box.setCheckBox(stop)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if stop.isChecked():
+            self.s.recaps = False
+            self._save_settings()
 
     def _records_changed(self):
         """Files were made: an open Records window shows them."""

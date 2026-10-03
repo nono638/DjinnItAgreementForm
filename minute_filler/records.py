@@ -19,19 +19,29 @@ never touched. An invoice's number stays taken even then (the used_numbers table
 another invoice.
 
 Databases made by older versions get the newer columns when opened (_migrate); their old rows leave them blank.
+
+Each row of everything made also keeps where it came from (Activity.origin: the documents read and the case as
+it was filled in), so the job can be opened again later (Records -> Open this job again).
+
+The database is copied once a day into a Backups folder (Ledger.backup; the last BACKUPS_KEPT days' copies
+are kept, and the last FORCED_KEPT made by hand or before a restore) and can be put back from a copy
+(Ledger.restore_backup). period_stats and recap sum up a month or a year.
 """
 from __future__ import annotations
 
 import csv
 import html
 import json
+import re
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 from .dates import us_date
 from .invoice_calc import fmt, money
@@ -47,6 +57,9 @@ NUMBER_LOCK = threading.RLock()
 _SCHEMA_LOCK = threading.Lock()
 KINDS = {"agreement": "Minute agreement", "mofr": "MOFR", "invoice": "Invoice", "runsheet": "Run sheet"}
 TRASH_DAYS = 30  # a deleted record can be restored for this long
+BACKUPS_KEPT = 10  # daily copies of the database kept (the oldest are deleted)
+FORCED_KEPT = 5    # copies made with Back up now, or before a copy is put back, kept besides the daily ones
+BACKUP_GLOB = "records *.db"  # the copies' names: "records 2026-10-03.db", "records 2026-10-03 141500.db"
 SCHEMA_VERSION = 2
 # Columns added after the first version: (table, column, type), added to an older database when it is opened
 # (a new one gets them from _SCHEMA)
@@ -55,6 +68,7 @@ _ADDED = [
     ("invoices", "my_pages", "INTEGER"), ("invoices", "reporters", "TEXT"), ("invoices", "excerpt", "TEXT"),
     ("invoices", "email_copy", "TEXT"), ("invoices", "idx", "TEXT"), ("invoices", "deleted", "TEXT"),
     ("activity", "transcript_pages", "INTEGER"), ("activity", "my_pages", "INTEGER"), ("activity", "deleted", "TEXT"),
+    ("activity", "origin", "TEXT"),
 ]
 
 _SCHEMA = """
@@ -64,7 +78,8 @@ CREATE TABLE IF NOT EXISTS activity (
     kind TEXT NOT NULL,           -- agreement / mofr / invoice / runsheet
     case_name TEXT, index_no TEXT, dates TEXT, judge TEXT, part TEXT,
     attorney TEXT, firm TEXT, pages INTEGER, file_path TEXT, invoice_no TEXT,
-    transcript_pages INTEGER, my_pages INTEGER, deleted TEXT
+    transcript_pages INTEGER, my_pages INTEGER, deleted TEXT,
+    origin TEXT                   -- JSON: the documents read and the case as filled in (see batch.job_origin)
 );
 CREATE TABLE IF NOT EXISTS invoices (
     invoice_no TEXT PRIMARY KEY,
@@ -174,6 +189,7 @@ class Activity:
     transcript_pages: int = 0     # every page of the transcript(s), whoever wrote them
     my_pages: int = 0             # the user's own pages of them
     deleted: str = ""             # when it went to the trash (ISO time); "" = not deleted
+    origin: str = ""              # JSON: where the file came from, to open the job again ("" = older records)
 
 
 def gone_for_good(deleted: str) -> str:
@@ -373,6 +389,7 @@ class Ledger:
         values = asdict(a)
         values.pop("id")
         values["deleted"] = values["deleted"] or None
+        values["origin"] = values["origin"] or None
         self._insert("activity", values)
 
     def add_invoice(self, inv: Invoice, year: int = 0, seq: int = 0) -> None:
@@ -414,6 +431,13 @@ class Ledger:
                 raise ValueError(f"the amount for {speed or 'a speed'} is not an amount: {value!r}")
             clean[speed] = str(d)
         self._run("UPDATE invoices SET amounts=? WHERE invoice_no=?", (json.dumps(clean), invoice_no))
+
+    def put_back(self, inv: Invoice) -> None:
+        """Sets an invoice's status, payment, amounts and notes back to what `inv` holds (Undo in the Records
+        window: the invoice as it was before a change)."""
+        self._run("UPDATE invoices SET status=?, paid_speed=?, amount_paid=?, paid_date=?, amounts=?, notes=? "
+                  "WHERE invoice_no=?", (inv.status, inv.paid_speed, inv.amount_paid, inv.paid_date,
+                                         json.dumps(inv.amounts), inv.notes, inv.invoice_no))
 
     # ------------------------------------------------------------------ the trash
     def delete(self, invoices: list[str] = (), activity: list[int] = ()) -> None:
@@ -467,14 +491,15 @@ class Ledger:
 
     # ------------------------------------------------------------------ reading
     def invoices(self, year: int | None = None, month: int | None = None, client: str = "",
-                 status: str = "", text: str = "", trash: bool = False, how: str = "words") -> list[Invoice]:
+                 status: str = "", text: str = "", trash: bool = False, how: str = "words",
+                 fuzzy_numbers: bool = True) -> list[Invoice]:
         """Newest first, filtered by year, month, status ("open", "paid", "void"), client (the exact
         firm/attorney, see Invoice.client) and text: found anywhere in the invoice (number, case, index number,
         firm, attorney, e-mail, court, part, judge, dates, excerpt, reporters, notes, the speed paid, file),
         as `how` says
-        (see matcher: "words", "regex" or "fuzzy"; ValueError for a pattern that isn't one). trash: the
-        invoices in the trash instead of the others."""
-        found = matcher(text, how)
+        (see matcher: "words", "regex" or "fuzzy"; ValueError for a pattern that isn't one; fuzzy_numbers:
+        see matcher). trash: the invoices in the trash instead of the others."""
+        found = matcher(text, how, fuzzy_numbers)
         out = []
         where = "deleted IS NOT NULL" if trash else "deleted IS NULL"
         for r in self._rows(f"SELECT * FROM invoices WHERE {where} "
@@ -482,6 +507,8 @@ class Ledger:
             try:
                 amounts = json.loads(r["amounts"] or "{}")
             except ValueError:
+                amounts = {}
+            if not isinstance(amounts, dict):  # (a damaged row: "[1, 2]" is JSON too)
                 amounts = {}
             inv = _from_row(Invoice, r, amounts=amounts)
             if year and inv.created[:4] != str(year):
@@ -504,12 +531,12 @@ class Ledger:
         return next((i for i in self.invoices() + self.invoices(trash=True) if i.invoice_no == invoice_no), None)
 
     def activity(self, kind: str = "", since: str = "", until: str = "", text: str = "",
-                 trash: bool = False, how: str = "words") -> list[Activity]:
+                 trash: bool = False, how: str = "words", fuzzy_numbers: bool = True) -> list[Activity]:
         """Newest first. kind: a key of KINDS; since/until: ISO dates (inclusive); text: found anywhere in the
         row (case, index number, attorney, firm, judge, part, dates, invoice number, what was made as the
-        Activity tab names it ("Minute agreement"), file), as `how` says (see matcher); trash: the rows in the
-        trash instead of the others."""
-        found = matcher(text, how)
+        Activity tab names it ("Minute agreement"), file), as `how` and fuzzy_numbers say (see matcher); trash:
+        the rows in the trash instead of the others."""
+        found = matcher(text, how, fuzzy_numbers)
         out = []
         where = "deleted IS NOT NULL" if trash else "deleted IS NULL"
         for r in self._rows(f"SELECT * FROM activity WHERE {where} ORDER BY ts DESC, id DESC"):
@@ -525,6 +552,88 @@ class Ledger:
                 continue
             out.append(a)
         return out
+
+    def origin_of(self, invoice_no: str) -> str:
+        """Where an invoice came from (Activity.origin of the row made with it, in the trash or not), or ""."""
+        rows = self._rows("SELECT origin FROM activity WHERE invoice_no=? AND kind='invoice' AND origin IS NOT NULL "
+                          "ORDER BY id DESC LIMIT 1", (invoice_no,))
+        return rows[0][0] if rows else ""
+
+    def is_empty(self) -> bool:
+        """True when nothing was ever recorded (no invoice, nothing made, no number given)."""
+        return not any(self._rows(f"SELECT 1 FROM {t} LIMIT 1") for t in ("invoices", "activity", "used_numbers"))
+
+    # ------------------------------------------------------------------ copies
+    def preview_copy(self, folder: Path) -> "Ledger":
+        """An empty records database in `folder` that gives the same invoice numbers next as this one would
+        (every number given is entered in it). For the preview before saving: its invoices are made for show
+        and must not be recorded or take a number."""
+        other = Ledger(Path(folder) / "records.db")
+        rows = self._rows("SELECT invoice_no, year, seq FROM used_numbers UNION "
+                          "SELECT invoice_no, year, seq FROM invoices")
+        other._run_all([("INSERT OR IGNORE INTO used_numbers VALUES (?, ?, ?)", tuple(r)) for r in rows])
+        return other
+
+    def backup(self, folder: Path, keep: int = BACKUPS_KEPT, now: datetime | None = None,
+               force: bool = False, prune: bool = True) -> Path | None:
+        """Copies the database into `folder` as "records 2026-10-03.db" and deletes the oldest daily copies
+        beyond `keep`. Once a day: None when today's copy is there already, or when there is nothing to copy
+        yet. force: a copy now whatever there is ("records 2026-10-03 141500.db": Back up now, and before a
+        copy is put back); of those the last FORCED_KEPT are kept, apart from the daily ones, so a busy
+        afternoon of them doesn't push out the older days. prune False: no old copy is deleted (before a copy is
+        put back: the oldest may be the very one chosen)."""
+        now = now or datetime.now()
+        folder = Path(folder)
+        if self.is_empty():
+            return None
+        if not force and any(folder.glob(f"records {now:%Y-%m-%d}*.db")):
+            return None
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / (f"records {now:%Y-%m-%d %H%M%S}.db" if force else f"records {now:%Y-%m-%d}.db")
+        n = 1
+        while target.exists():  # a second copy within the same second (Back up now, then Restore at once)
+            n += 1              # must not replace the first: it may be the very copy being put back
+            target = folder / f"records {now:%Y-%m-%d %H%M%S} ({n}).db"
+        tmp = target.with_suffix(".tmp")
+        tmp.unlink(missing_ok=True)  # (left half written when the app was closed mid-copy: not a database)
+        with closing(self._db()) as src, closing(sqlite3.connect(tmp)) as dst:
+            src.backup(dst)  # (SQLite's own copy: whole, even while another thread writes)
+        tmp.replace(target)
+        if prune:
+            copies = backups(folder)
+            daily = [p for p in copies if _backup_key(p)[1] == ""]
+            forced = [p for p in copies if p not in daily]
+            for old in daily[max(1, keep):] + forced[FORCED_KEPT:]:
+                try:
+                    old.unlink()
+                except OSError as e:
+                    log_error("could not delete an old backup of the records", e)
+        return target
+
+    def restore_backup(self, copy: Path, folder: Path | None = None) -> None:
+        """Replaces the records with a backup copy. The records as they are now are first copied into
+        `folder` (when given), so putting a copy back can itself be undone. ValueError when `copy` is not a
+        records database. Numbers given since the copy was made stay taken."""
+        copy = Path(copy)
+        if backup_counts(copy) is None:
+            raise ValueError(f"{copy.name} is not a copy of the records")
+        with NUMBER_LOCK:  # (no invoice is added between the copy of the records as they are and the restore)
+            if folder is not None:
+                self.backup(folder, force=True, prune=False)
+            with _SCHEMA_LOCK:
+                self._restore(copy)
+        self.mirror()
+
+    def _restore(self, copy: Path) -> None:
+        """Copies a backup over the database (see restore_backup, which holds the locks)."""
+        used = [tuple(r) for r in self._rows("SELECT invoice_no, year, seq FROM used_numbers")]
+        # read-only: a copy that is gone must raise, not be made anew (empty) and copied over the records
+        with closing(sqlite3.connect(_read_only(copy), uri=True)) as src, closing(self._db()) as dst:
+            src.backup(dst)
+            dst.executescript(_SCHEMA)
+            self._migrate(dst)
+            with dst:
+                dst.executemany("INSERT OR IGNORE INTO used_numbers VALUES (?, ?, ?)", used)
 
     def years(self) -> list[int]:
         """The years with any invoice or activity, newest first."""
@@ -618,20 +727,176 @@ class Ledger:
         return path
 
 
+_BACKUP_NAME = re.compile(r"records (\d{4}-\d\d-\d\d)(?: (\d{6}))?(?: \((\d+)\))?\.db$")
+
+
+def _backup_key(copy: Path) -> tuple[str, str, int]:
+    """(day, time, count) of a backup copy by its name, to sort by: "records 2026-10-03 141500 (2).db" ->
+    ("2026-10-03", "141500", 2). The daily copy has no time (""), so it sorts before the day's other copies,
+    as it was made first. A file not named like a copy sorts as the oldest."""
+    m = _BACKUP_NAME.match(Path(copy).name)
+    return (m.group(1), m.group(2) or "", int(m.group(3) or 0)) if m else ("", "x", 0)
+
+
+def backups(folder: Path) -> list[Path]:
+    """The backup copies in a folder, newest first."""
+    folder = Path(folder)
+    return sorted(folder.glob(BACKUP_GLOB), key=_backup_key, reverse=True) if folder.is_dir() else []
+
+
+def _read_only(path: Path) -> str:
+    """A database file as a read-only SQLite address ("file:C:/.../records%20%231.db?mode=ro"): a "#" or "%"
+    in a folder's name would otherwise cut the address short."""
+    return "file:" + quote(Path(path).as_posix(), safe="/:") + "?mode=ro"
+
+
+def backup_counts(copy: Path) -> tuple[int, int] | None:
+    """(invoices, files made) in a backup copy, without those in the trash; None when it can't be read as a
+    records database."""
+    def count(db: sqlite3.Connection, table: str) -> int:
+        # (a copy made by a version from before the trash has no "deleted" column)
+        trash = "deleted" in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        return db.execute(f"SELECT COUNT(*) FROM {table}" + (" WHERE deleted IS NULL" if trash else "")).fetchone()[0]
+
+    try:
+        with closing(sqlite3.connect(_read_only(copy), uri=True)) as db:
+            return count(db, "invoices"), count(db, "activity")
+    except sqlite3.Error:
+        return None
+
+
+def backup_day(copy: Path) -> str:
+    """'records 2026-10-03 141500.db' -> 'October 3, 2026, 2:15 PM'; 'records 2026-10-03.db' -> 'October 3,
+    2026'; the file's name when it isn't named like a copy."""
+    stamp = Path(copy).stem[len("records "):].split(" (")[0]
+    for fmt, out in (("%Y-%m-%d %H%M%S", "%B {d}, %Y, {h}:%M %p"), ("%Y-%m-%d", "%B {d}, %Y")):
+        try:
+            t = datetime.strptime(stamp, fmt)
+        except ValueError:
+            continue
+        return t.strftime(out).format(d=t.day, h=t.hour % 12 or 12)
+    return Path(copy).name
+
+
+# ------------------------------------------------------------------ sums of a period
+@dataclass
+class Stats:
+    """A period summed up (see period_stats). Void invoices count for nothing."""
+    invoices: int = 0                       # invoices made in the period
+    pages: int = 0                          # pages they bill
+    billed: Decimal = Decimal("0.00")       # what they count for (see Invoice.billed)
+    paid: Decimal = Decimal("0.00")         # of that, paid so far
+    outstanding: Decimal = Decimal("0.00")  # of that, still owed
+    received: Decimal = Decimal("0.00")     # payments dated in the period, whenever their invoice was made
+    unpaid: int = 0                         # invoices of the period still open
+    oldest_unpaid: str = ""                 # the date of the oldest of them (ISO)
+    firms: list = field(default_factory=list)   # (firm or attorney, Summary), the most billed first
+    months: list = field(default_factory=list)  # ("2026-09", Summary), oldest first
+
+    @property
+    def per_page(self) -> Decimal:
+        """Billed per page (0.00 without pages)."""
+        return money(self.billed / self.pages) if self.pages else Decimal("0.00")
+
+
+def period_stats(invoices: list[Invoice], since: str = "", until: str = "") -> Stats:
+    """Sums up the invoices made from `since` to `until` (ISO dates, inclusive; "" = no limit), and the
+    payments dated within them. invoices: every invoice not in the trash (Ledger.invoices())."""
+    def within(day: str) -> bool:
+        return bool(day) and (not since or day[:10] >= since) and (not until or day[:10] <= until)
+
+    mine = [i for i in invoices if within(i.created)]
+    total, by_client, by_month = summarize(mine)
+    live = [i for i in mine if i.status != "void"]
+    still = sorted(i.created for i in live if i.status == "open")
+    return Stats(invoices=total.count, pages=sum(i.pages or 0 for i in live), billed=total.billed, paid=total.paid,
+                 outstanding=total.outstanding,
+                 received=sum((i.paid for i in invoices if i.status == "paid" and within(i.paid_date)),
+                              Decimal("0.00")),
+                 unpaid=len(still), oldest_unpaid=still[0] if still else "",
+                 firms=list(by_client.items()), months=list(by_month.items()))
+
+
+PERIODS = ("This month", "Last month", "This year", "Last year", "All time")
+
+
+def period(name: str, today: date | None = None) -> tuple[str, str, str]:
+    """(since, until, title) of one of PERIODS: "Last month" on October 3, 2026 ->
+    ("2026-09-01", "2026-09-30", "September 2026"); "All time" -> ("", "", "All time")."""
+    today = today or date.today()
+    if name in ("This month", "Last month"):
+        first = today.replace(day=1)
+        if name == "Last month":
+            first = (first - timedelta(days=1)).replace(day=1)
+        last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        return first.isoformat(), last.isoformat(), first.strftime("%B %Y")
+    if name in ("This year", "Last year"):
+        y = today.year - (name == "Last year")
+        return f"{y}-01-01", f"{y}-12-31", str(y)
+    return "", "", "All time"
+
+
+def stats_rows(st: Stats) -> list[tuple[str, str]]:
+    """A period's sums as (caption, value) lines, for the Summary box and its Copy button."""
+    rows = [("Invoices made", str(st.invoices)), ("Pages billed", f"{st.pages:,}"),
+            ("Billed", fmt(st.billed)), ("Paid so far", fmt(st.paid)), ("Still owed", fmt(st.outstanding)),
+            ("Payments received in this period", fmt(st.received)),
+            ("Billed per page", fmt(st.per_page)),
+            ("Billed per invoice", fmt(money(st.billed / st.invoices) if st.invoices else Decimal("0.00")))]
+    if st.unpaid:
+        rows.append(("Unpaid invoices", f"{st.unpaid} (the oldest from {us_date(st.oldest_unpaid)})"))
+    if len(st.months) > 1:
+        best = max(st.months, key=lambda kv: kv[1].billed)
+        rows.append(("Best month", f"{_month_name(best[0])} ({fmt(best[1].billed)})"))
+    return rows
+
+
+def recap(invoices: list[Invoice], today: date | None = None, month_seen: str = "",
+          year_seen: str = "") -> tuple[list[str], str, str]:
+    """What to say when the records are first opened in a month, and in a year: (lines, month mark, year
+    mark). A line for last month ("Last month (September 2026) you made $870.00 with 243 pages (5 invoices).")
+    unless month_seen is this month already, and one for last year unless year_seen is this year; a month or
+    year without invoices gets no line. The marks ("2026-10", "2026") are what to remember as seen."""
+    today = today or date.today()
+    month, year = f"{today:%Y-%m}", str(today.year)
+    lines = []
+
+    def line(lead: str, name: str) -> None:
+        st = period_stats(invoices, *period(name, today)[:2])
+        if not st.invoices:
+            return
+        text = (f"{lead} you made {fmt(st.billed)} with {st.pages:,} page{'' if st.pages == 1 else 's'} "
+                f"({st.invoices} invoice{'' if st.invoices == 1 else 's'}).")
+        if st.outstanding > 0:
+            text += f" {fmt(st.paid)} of it is paid so far."
+        lines.append(text)
+
+    if month_seen != month:
+        line(f"Last month ({period('Last month', today)[2]})", "Last month")
+    if year_seen != year:
+        line(f"Last year ({today.year - 1})", "Last year")
+    return lines, month, year
+
+
 SEARCH_MODES = ("words", "regex", "fuzzy")
+REGEX_SECONDS = 1.0  # longest a Regex search may take: a pattern like "(a|a)+$" would freeze the window
 FUZZY_SCORE = 80  # how alike a word must be (0-100, rapidfuzz's partial_ratio) to count as found
 
 
-def matcher(text: str, how: str = "words"):
+def matcher(text: str, how: str = "words", fuzzy_numbers: bool = True):
     """A test for one record's values (a list of strings) against the search text:
       "words"  every word of text is somewhere in them, any case ("counsel 2026"); a dash and a slash find
                each other, both ways ("712345-2021" finds "712345/2021", "6/3/2026" finds "6-3-2026")
       "regex"  text is a regular expression found somewhere in them, any case ("^Invoice 2026-00(1|2)");
-               ValueError when it isn't a valid one
+               ValueError when it isn't a valid one, or when searching takes more than REGEX_SECONDS
+               (the whole search: the test raises it from the record it was on)
       "fuzzy"  every word is close to a part of them (rapidfuzz's partial_ratio at least FUZZY_SCORE), so a
                misspelling still finds it ("Counsle" finds "Counsel & Counsel"); words of one or two letters
                must be found as they are, and in practice so must words of three or four (one wrong letter
-               already puts them below the score); ValueError when rapidfuzz is missing
+               already puts them below the score); ValueError when rapidfuzz is missing.
+               fuzzy_numbers False (Settings -> Options): a word with a digit in it (an invoice or index
+               number, a date) must be found as it is, as with "words" ("2026-0001" then doesn't find
+               "2026-0002")
     Blank text finds everything. ValueError for a `how` not in SEARCH_MODES."""
     if how not in SEARCH_MODES:
         raise ValueError(f"unknown search mode {how!r} (one of {', '.join(SEARCH_MODES)})")
@@ -639,12 +904,25 @@ def matcher(text: str, how: str = "words"):
     if not text:
         return lambda values: True
     if how == "regex":
-        import re
+        try:  # (the regex library, not re: re can't stop a search, and "(a|a)+$" can take minutes)
+            import regex
+        except ImportError:  # (a build without it): the box says so
+            raise ValueError("Regex search isn't available: the regex library is missing") from None
         try:
-            pattern = re.compile(text, re.IGNORECASE)
-        except re.error as e:
+            pattern = regex.compile(text, regex.IGNORECASE)
+        except regex.error as e:
             raise ValueError(f"not a valid regular expression: {e}") from None
-        return lambda values: any(pattern.search(str(v)) for v in values if v)
+        deadline = []  # set by the first record: the whole search gets REGEX_SECONDS
+
+        def matches(values) -> bool:
+            if not deadline:
+                deadline.append(time.monotonic() + REGEX_SECONDS)
+            try:
+                return any(pattern.search(str(v), timeout=max(deadline[0] - time.monotonic(), 0.001))
+                           for v in values if v)
+            except TimeoutError:
+                raise ValueError("this regular expression takes too long to search; make it simpler") from None
+        return matches
     words = text.lower().split()
     if how == "fuzzy":
         try:
@@ -652,15 +930,24 @@ def matcher(text: str, how: str = "words"):
         except ImportError:  # (a build without it): the box says so, as for a pattern that can't be read
             raise ValueError("Fuzzy search isn't available: the rapidfuzz library is missing") from None
 
+        def loose(w: str) -> bool:
+            """Whether a word may be matched approximately: not a short one, nor a number when they are kept exact."""
+            return len(w) > 2 and (fuzzy_numbers or not any(c.isdigit() for c in w))
+
         def close(values) -> bool:
             hay = " ".join(str(v) for v in values if v).lower()
-            return all(w in hay or (len(w) > 2 and fuzz.partial_ratio(w, hay) >= FUZZY_SCORE) for w in words)
+            return all(_found(w, hay) or (loose(w) and fuzz.partial_ratio(w, hay) >= FUZZY_SCORE) for w in words)
         return close
 
     def has(values) -> bool:
         hay = " ".join(str(v) for v in values if v).lower()
-        return all(w in hay or w.replace("-", "/") in hay or w.replace("/", "-") in hay for w in words)
+        return all(_found(w, hay) for w in words)
     return has
+
+
+def _found(word: str, hay: str) -> bool:
+    """A search word in a record's text as it is, a dash and a slash finding each other ("712345-2021")."""
+    return word in hay or word.replace("-", "/") in hay or word.replace("/", "-") in hay
 
 
 def _month_name(ym: str) -> str:

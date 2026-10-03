@@ -24,13 +24,16 @@ from PIL import Image, ImageOps
 from .log import describe, log
 from .takes import scan_pdf
 
-try:  # pillow-heif is optional
+try:  # iPhone photos (.heic/.heif): pillow-heif teaches Pillow to open them (in requirements and the installer)
     from pillow_heif import register_heif_opener
     register_heif_opener()
-except Exception:
-    pass
+    HEIF_OK = True
+except Exception as e:  # (a source install without it): such a photo then gets a message saying so
+    HEIF_OK = False
+    log.warning("HEIC photos can't be read: %s", describe(e))
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".heic", ".heif"}
+HEIF_EXT = {".heic", ".heif"}
 PDF_TEXT_PAGES = 3  # a transcript's title and appearances are on its first pages; the rest is dialogue
 
 
@@ -250,6 +253,9 @@ def _ingest_file(path: Path, ext: str) -> Ingested:
     """ingest_file without the error wording: any other extension is read as text."""
     if ext == ".pdf":
         ing = ingest_pdf(path)
+    elif ext in HEIF_EXT and not HEIF_OK:  # else Pillow says the photo isn't valid, which isn't the problem
+        raise ValueError("this computer's copy of the app can't read HEIC photos (the pillow-heif library is "
+                         "missing). Open the photo, save it as JPG and drop that instead.")
     elif ext in IMAGE_EXT:
         ing = ingest_image(path)
     elif ext == ".eml":

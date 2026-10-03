@@ -7,12 +7,13 @@ it ordered (invoice.firm_invoices).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .fill import fill
 from .invoice import InvoiceOpts, firm_invoices, make_invoice
 from .log import error as log_error
-from .models import Attorney, CaseInfo, to_int
+from .models import Attorney, CaseInfo, SRC_USER, to_int
 from .mofr import fill_mofr
 from .records import Ledger
 from .runsheet import NO_RUNSHEET, RunSheetOpts, add_takes
@@ -26,10 +27,35 @@ def ledger_for(s: Settings) -> Ledger:
     return Ledger(mirror_dir=s.records_folder())
 
 
+def backup_folder(s: Settings) -> Path:
+    """Where the daily copies of the records database go: Backups in the records folder."""
+    return s.records_folder() / "Backups"
+
+
+def backup_records(folder: Path) -> Path | None:
+    """Today's copy of the records database into `folder` (see Ledger.backup), made when the app starts; None
+    when there is one already, or no records yet. A problem is logged, never raised: the app must still start."""
+    from .records import default_db
+    try:
+        return Ledger().backup(folder) if default_db().exists() else None
+    except Exception as e:
+        log_error("could not back up the records", e)
+        return None
+
+
+def case_snapshot(case: CaseInfo) -> dict:
+    """A case as the records keep it, to open the job again: each field's value, source and confidence (a
+    field the user emptied too: it must not come back from the documents), the proceeding types and the
+    attorneys (with their ticks)."""
+    return {"fields": {k: [f.value, f.source, f.confidence] for k, f in case.fields.items()
+                       if f.value or f.source == SRC_USER},
+            "proc": sorted(case.proc_types), "attorneys": [a.to_dict() for a in case.attorneys]}
+
+
 def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | set[str],
              invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False,
              runsheet: RunSheetOpts | None = None, folders: list[Path] | None = None,
-             invoiced: list[str] | None = None) -> list[Path]:
+             invoiced: list[str] | None = None, origin: dict | None = None) -> list[Path]:
     """Writes the chosen outputs (keys of settings.OUTPUTS) and logs them in the records. Each output goes to
     its own folder when Settings -> Options -> Folders gives it one (Settings.folder_for), else into out_dir.
     An invoice needs `invoice` with the page count, the run sheet `runsheet` with the takes of the transcripts;
@@ -38,7 +64,9 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
     nothing is made, and trying again doesn't make the invoices twice. A run sheet that already had every
     take is left as it was and is not among the files returned. `invoiced`, when given, gets the
     Attorney.key() ("" for a blank Bill To) of each invoice made, so a run that stops part way can be tried
-    again without billing them twice (see InvoiceOpts.skip).
+    again without billing them twice (see InvoiceOpts.skip). `origin`: where the job came from (the documents
+    read and its invoice choices, see batch.job_origin); it is kept with each file's record, together with the
+    case as it is now, so the job can be opened again from the Records window.
     When a file can't be made, the error raised carries the files made before it as `made`."""
     outputs = [o for o in OUTPUTS if o in outputs]
     billed = invoice.pages if invoice and invoice.pages > 0 else 0  # 0: no transcript among the inputs
@@ -50,6 +78,11 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
     pages = billed or to_int(case.get("est_pages"))
     made: list[Path] = []
 
+    try:
+        where_from = json.dumps({**(origin or {}), "case": case_snapshot(case)})
+    except (TypeError, ValueError) as e:  # (something in it that JSON can't hold: the files are still made)
+        log_error("could not note where a job came from", e)
+        where_from = ""
     mine = invoice.my_pages or billed if invoice else 0
     whole = invoice.total_pages if invoice and invoice.total_pages else mine
 
@@ -63,7 +96,8 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
             ledger.log_activity(kind, case_name=on.get("case_name"), index_no=on.get("index_no"),
                                 dates=on.get("dates"), judge=on.get("judge"), part=on.get("part"),
                                 attorney=atty.name if atty else "", firm=atty.firm if atty else "", pages=count,
-                                file_path=str(path), invoice_no=number, my_pages=my, transcript_pages=total)
+                                file_path=str(path), invoice_no=number, my_pages=my, transcript_pages=total,
+                                origin=where_from)
         except Exception as e:  # the files are made; a records problem must not lose them
             log_error("could not add to the records", e)
 
