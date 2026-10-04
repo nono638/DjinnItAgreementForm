@@ -6,10 +6,12 @@ which pages of a transcript of several reporters are billed (the user's own, by 
 days of one case share one invoice per attorney (batch.joint_invoice).
 File -> Lock finished PDFs saves copies whose fields can no longer be changed.
 Generate shows the files as pictures first (preview.PreviewDialog) unless that is turned off; the box that says
-what was saved can print it. File -> Open recent lists the documents opened lately, and Export / Import settings
+what was saved can print it. After an invoice is made, a window spells out how its amounts were reached
+(preview.MathDialog) unless Settings.show_math is off. File -> Open recent lists the documents opened lately, and Export / Import settings
 carry the settings to another computer. A job once made can be opened again from the Records window
 (open_past_job). When the window opens it makes the day's backup of the records and, once a day, asks whether
-there is a newer version (update.py); a new user is asked a few questions first (preview.WelcomeDialog).
+there is a newer version (update.py); a new user is asked a few questions first (preview.WelcomeDialog). On
+the first day the app is used in a new year, the djinn's "done" picture is the New Year one (note_opened).
 
 Documents are read, the AI is asked and batches are made on a thread pool (workers.Runner). Their results
 are applied on the UI thread; the results of work started before "New job" are dropped (see MainWindow.gen)."""
@@ -245,6 +247,9 @@ class DropZone(QFrame):
         self.mood = None     # (mood, width) of the picture loaded now, so it is not reloaded for nothing
         self.wanted = None   # the mood asked for last, shown again at the new size by set_compact
         self.compact = False
+        # the first day of the year the app was used ("2027-01-07", see note_opened): "done" is the New Year
+        # djinn on that day only (checked each time, as the app may be left open overnight)
+        self.new_year_day = ""
         # (mood, width) -> picture, made once: the window's _size_drop switches between the sizes as it measures
         self._pixmaps: dict = {}
         t = QLabel("Drop documents here")
@@ -265,8 +270,11 @@ class DropZone(QFrame):
         lay.addWidget(b, 0, Qt.AlignCenter)
 
     def set_mood(self, mood: str | None) -> None:
-        """Shows the djinn: 'working', 'done' or 'stumped' (None hides him)."""
+        """Shows the djinn: 'working', 'done' or 'stumped' (None hides him). On the year's first day of use,
+        'done' is the New Year djinn ('newyear')."""
         self.wanted = mood
+        if mood == "done" and self.new_year_day == date.today().isoformat():
+            mood = "newyear"
         width, height = (z(150), z(170)) if self.compact else (z(300), z(330))
         self.sub.setVisible(not self.compact)
         if mood is None:
@@ -284,7 +292,7 @@ class DropZone(QFrame):
             self._pixmaps[(mood, width)] = rounded(ASSETS / f"djinn_{mood}.jpg", width, z(12))
         self.djinn.setPixmap(self._pixmaps[(mood, width)])
         self.djinn.setToolTip({"working": "The djinn is on it…", "done": "Ready to fill!",
-                               "stumped": "Something needs your attention"}.get(mood, ""))
+                               "stumped": "Something needs your attention", "newyear": "Happy New Year!"}.get(mood, ""))
 
     def rezoom(self) -> None:
         """Shows the picture again at the new zoom's size."""
@@ -316,6 +324,28 @@ class DropZone(QFrame):
         self._hover(False)
         handle_mime(e.mimeData(), self.on_files, self.on_text, self.on_image)
         e.acceptProposedAction()
+
+
+def note_opened(s: Settings, today: date | None = None) -> bool:
+    """Notes the app was opened today, and says whether today is its first day in a new year (the New Year
+    djinn shows all that day, however often the app is opened again). The very first opening (no year noted
+    yet: a new user, or one who just updated) is not one, nor is a year that went back (a clock set wrong). Saves
+    the settings when they change (once a year), unless the settings file couldn't be read (Settings.unreadable:
+    the defaults must not be written over it)."""
+    today = today or date.today()
+    year = str(today.year)
+    if s.opened_year != year:
+        # (none yet, or typed oddly in the file: "26", "2026.0" - not a year gone by)
+        newer = len(s.opened_year) == 4 and s.opened_year.isdigit() and int(s.opened_year) < today.year
+        if newer:
+            s.new_year_day = today.isoformat()
+        s.opened_year = year
+        if not s.unreadable:
+            try:
+                s.save()
+            except OSError as e:
+                logfile.error("could not save the settings", e)
+    return s.new_year_day == today.isoformat()
 
 
 def handle_mime(md, on_files, on_text, on_image) -> bool:
@@ -489,6 +519,8 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(0, 0, 8, 0)
         ll.setSpacing(10)
         self.drop = DropZone(self.add_files, self.add_text, self.add_qimage, self.browse)
+        note_opened(self.s)
+        self.drop.new_year_day = self.s.new_year_day
         ll.addWidget(self.drop)
         self.jobs_label = QLabel("Jobs")
         self.jobs_label.setObjectName("fieldLabel")
@@ -1979,9 +2011,11 @@ class MainWindow(QMainWindow):
             if self._batch_running():
                 return
         keys: list[str] = []  # the attorneys invoiced
+        math: list = []  # (FirmInvoice, number) of each invoice made: "The math" shows how its amounts were reached
+        detailed: list[Path] = []  # the invoices' detailed copies: kept for later, not opened or printed now
         try:
             paths = generate(case, self.s, out_dir, outputs, opts, runsheet=sheet,
-                             folders=input_folders(job), invoiced=keys, origin=origin)
+                             folders=input_folders(job), invoiced=keys, origin=origin, math=math, detailed=detailed)
         except Exception as e:
             made = list(getattr(e, "made", []))
             job.saved, job.error = made, f"{type(e).__name__}: {e}"
@@ -1999,7 +2033,10 @@ class MainWindow(QMainWindow):
         job.invoiced |= "invoice" in outputs and job.docs == docs
         if self.s.open_after:
             for p in paths:
-                open_path(p)
+                if p not in detailed:
+                    open_path(p)
+        if math and self.s.show_math:
+            self._show_math(math, self.s.folder_for("invoice", out_dir))
         made = [p for p in paths if not (sheet and p == sheet.path)]
         folders = list(dict.fromkeys(p.parent for p in made))  # an output may have a folder of its own
         where = f"\n\nin {folders[0]}" if len(folders) == 1 else "\n\nin " + ", ".join(map(str, folders))
@@ -2007,12 +2044,23 @@ class MainWindow(QMainWindow):
         if sheet and sheet.path:
             text += ("\n\n" if text else "") + run_sheet_summary(sheet)
             folders.append(sheet.path.parent)
-        # (Print...: the PDFs; the run sheet is a workbook, printed from Excel)
+        # (Print...: the PDFs but the detailed copies, kept for when they're asked for; the run sheet is a
+        # workbook, printed from Excel)
         self._saved_box("Saved", text, list(dict.fromkeys(folders)),
-                        files=[p for p in paths if p.suffix.lower() == ".pdf"])
+                        files=[p for p in paths if p.suffix.lower() == ".pdf" and p not in detailed])
         self._update_status()
         self._set_status(f"✓  Saved {len(paths)} file(s)", "ok")
         self._records_changed()
+
+    def _show_math(self, made: list, folder: Path) -> None:
+        """The math of the invoices just made (preview.MathDialog), to glance at and close."""
+        from .preview import MathDialog
+        try:
+            dlg = MathDialog(made, self.s, self, folder)
+        except Exception as e:  # the invoices are saved; this is only an aside
+            logfile.error("could not spell out the math", e)
+            return
+        dlg.exec()
 
     def _preview(self, case: CaseInfo, outputs: list[str], opts) -> bool:
         """Shows the files Generate is about to make, as pictures (preview.PreviewDialog); True = save them.
@@ -2949,10 +2997,10 @@ class MainWindow(QMainWindow):
         """The first time Records is opened in a month: what last month came to ("Last month (September 2026)
         you made $870.00 with 243 pages"), and the first time in a year, last year too (records.recap). The box
         has OK and a tick to show no more recaps (Settings -> Options turns them back on). A month without
-        invoices says nothing."""
+        invoices says nothing. On April 1 the recap of last month is first a joke (records.april_fools)."""
         if not self.s.recaps:
             return
-        from ..records import recap
+        from ..records import april_fools, recap
         try:
             lines, month, year = recap(win.ledger.invoices(), today, self.s.recap_month, self.s.recap_year)
         except Exception as e:  # the records still open
@@ -2963,6 +3011,15 @@ class MainWindow(QMainWindow):
             self._save_settings()
         if not lines:
             return
+        joke = april_fools(today)
+        if joke and lines[0].startswith("Last month"):
+            fool = QMessageBox(win)
+            fool.setIcon(QMessageBox.Information)
+            fool.setWindowTitle("Recap")
+            fool.setText(joke)
+            fool.addButton("Really?!", QMessageBox.AcceptRole)
+            fool.exec()
+            lines = ["April Fools! Here's what really happened:"] + lines
         box = QMessageBox(win)
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("Recap")

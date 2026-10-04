@@ -1118,11 +1118,16 @@ def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
     """How many files fill_jobs will make for these jobs: the days of one case share a run sheet, and (as
     Settings.invoice_joint says) the invoices, one for each attorney ticked on any of its days who ordered
     pages and was not invoiced yet. Days already invoiced (Job.invoiced), and days whose invoice is held
-    (Excerpts... rows to check, or Whose pages... to choose: Job.invoice_hold), get none."""
+    (Excerpts... rows to check, or Whose pages... to choose: Job.invoice_hold), get none. With
+    Settings.invoice_detailed_copy an invoice without the granular detail counts twice (its detailed copy)."""
+    s = s or Settings()
     count = sum(j.file_count(outputs) for j in jobs)
     if "invoice" in outputs:
-        groups = invoice_groups([j for j in jobs if not j.invoiced and not j.invoice_hold()], s or Settings())
-        count += sum(invoice_count(*joint_invoice(g)) for g in groups if not group_problem(g))
+        groups = invoice_groups([j for j in jobs if not j.invoiced and not j.invoice_hold()], s)
+        for g in groups:
+            if not group_problem(g):
+                case, opts = joint_invoice(g)
+                count += invoice_count(case, opts) * (2 if s.invoice_detailed_copy and not opts.detail else 1)
     cases: list[Ident] = []
     for j in jobs:
         if "runsheet" in j.makeable(outputs):

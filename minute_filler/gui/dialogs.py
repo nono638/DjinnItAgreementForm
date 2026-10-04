@@ -229,6 +229,12 @@ class SettingsDialog(QDialog):
                                  "the year before.")
         self.o_recaps.setChecked(settings.recaps)
         f.addRow("Recaps", self.o_recaps)
+        self.o_math = QCheckBox("Show the math after making an invoice")
+        self.o_math.setToolTip("After Generate makes an invoice, a window spells out how each amount was reached\n"
+                               "(pages × rate, the copies, the split between parties): glance at it and click OK,\n"
+                               "or copy it or save it as a PDF. Generate all with several jobs doesn't show it.")
+        self.o_math.setChecked(settings.show_math)
+        f.addRow("Invoice math", self.o_math)
         self.o_updates = QCheckBox("Look for a newer version once a day")
         self.o_updates.setToolTip("The only time the app goes online: it asks GitHub for the number of the latest "
                                   "version\nand shows a link when there is a newer one. Nothing about you, your "
@@ -269,6 +275,12 @@ class SettingsDialog(QDialog):
             self.i_items[key] = cb
             shows.addWidget(cb, i // 2, i % 2)
         f.addRow("Granular detail shows", shows)
+        self.i_detailed_copy = QCheckBox("Also save a detailed copy of each invoice")
+        self.i_detailed_copy.setToolTip("Next to each invoice, a copy with the granular detail above (the same number, "
+                                        "\"... (detailed).pdf\"),\nready for when someone asks how the amount was "
+                                        "reached. A job whose invoice already shows the detail gets none.")
+        self.i_detailed_copy.setChecked(settings.invoice_detailed_copy)
+        f.addRow("", self.i_detailed_copy)
         self.i_email = QCheckBox("Each party also gets an e-mailed copy (Email column of the rate sheet)")
         self.i_email.setChecked(settings.invoice_include_email)
         f.addRow("", self.i_email)
@@ -376,7 +388,14 @@ class SettingsDialog(QDialog):
         self.a_text.setChecked(settings.ai_for_text)
         self.a_model = QComboBox()
         self.a_model.setEditable(True)
-        self.a_model.addItem(settings.ollama_model)
+        self.a_model.setToolTip("Choose one of the two, or any other model Ollama has (you can type its name).")
+        self._fill_models([])
+        self.a_model.setCurrentText(settings.ollama_model)
+        from ..extract_llm import MODELS
+        a_note = QLabel("<br>".join(f"<b>{name}</b>: {what}." for name, what in MODELS.items())
+                        + "<br>Not installed yet? The button below downloads the one chosen.")
+        a_note.setObjectName("muted")
+        a_note.setWordWrap(True)
         self.a_host = QLineEdit(settings.ollama_host)
         self.a_timeout = QSpinBox()
         self.a_timeout.setRange(10, 900)
@@ -390,6 +409,7 @@ class SettingsDialog(QDialog):
         f.addRow("", self.a_use)
         f.addRow("", self.a_text)
         f.addRow("Model", self.a_model)
+        f.addRow("", a_note)
         f.addRow("Ollama URL", self.a_host)
         f.addRow("Timeout", self.a_timeout)
         f.addRow(test, self.a_status)
@@ -503,9 +523,18 @@ class SettingsDialog(QDialog):
         except Exception:
             return
         current = self.a_model.currentText()
-        self.a_model.clear()
-        self.a_model.addItems(sorted(set(names) | {current}))
+        self._fill_models(names)
         self.a_model.setCurrentText(current)
+
+    def _fill_models(self, installed: list[str]) -> None:
+        """The model box's list: the models the app offers (extract_llm.MODELS, each with what to know about it
+        as its tooltip), then the others Ollama has installed and the one the settings name."""
+        from ..extract_llm import MODELS
+        self.a_model.clear()
+        for name, what in MODELS.items():
+            self.a_model.addItem(name)
+            self.a_model.setItemData(self.a_model.count() - 1, what[0].upper() + what[1:], Qt.ToolTipRole)
+        self.a_model.addItems(sorted({*installed, self.s.ollama_model} - set(MODELS) - {""}))
 
     def _test_ai(self):
         """Checks the typed model and URL with a throwaway Settings object, so nothing is saved, and shows the result."""
@@ -659,6 +688,7 @@ class SettingsDialog(QDialog):
         s.fuzzy_numbers = self.o_fuzzy_numbers.isChecked()
         s.preview_before_saving = self.o_preview.isChecked()
         s.recaps, s.check_updates = self.o_recaps.isChecked(), self.o_updates.isChecked()
+        s.show_math, s.invoice_detailed_copy = self.o_math.isChecked(), self.i_detailed_copy.isChecked()
         s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
         s.mofr_division = self.o_division.currentData()
         s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
@@ -1455,7 +1485,12 @@ It starts automatically with Windows from then on.</li>
 <h4>2. Download the model</h4>
 <p>Click <b>Download {model}</b> below, <i>or</i> open PowerShell and run:</p>
 <pre>   ollama pull {model}</pre>
-<p>The download is about 7 GB, so allow time on a slow connection. <code>ollama list</code> shows the installed models.</p>
+<p>The download is several gigabytes (4.6 to 7.5 GB for gemma4:e2b and 6.6 to 9.5 GB for gemma4:e4b, depending
+on the version Ollama picks for your computer), so allow time on a
+slow connection. <code>ollama list</code> shows the installed models.</p>
+<p><b>Which model?</b> Settings → AI → Model offers two. <b>gemma4:e2b</b> is smaller and faster, and the usual
+choice. <b>gemma4:e4b</b> is larger and more accurate, but much slower on a laptop without a graphics card
+(GPU). Choose the model there first: this window downloads the one chosen.</p>
 
 <h4>3. Check it</h4>
 <p>Close this window and click <b>Test connection</b>. The main window shows "● AI ready" at the bottom left.</p>
@@ -1758,6 +1793,9 @@ move it to a job of its own.</li>
 <b>Excerpts…</b> in the Invoice panel of the Outputs box, and check the <b>Who ordered what</b> card before generating.</li>
 <li>Your own invoice text (shown always, or only when it applies) is in Settings → Invoice → <i>Invoice
 text</i>; <b>Preview…</b> shows a made-up invoice with it.</li>
+<li>After an invoice is made, <b>The math</b> shows how each amount was reached: click OK, or copy it or save
+it as a PDF for an attorney who asks (Settings → Options turns it on or off). Settings → Invoice can also save a
+<i>detailed copy</i> of each invoice, with the same number, ready for when someone asks.</li>
 <li>In <b>Records</b>, type a firm, case or index number to find its invoices, tick <b>Paid</b> when they
 pay, and choose the columns with <b>Columns…</b>. Deleted records stay in the trash for 30 days; the PDFs
 are never deleted.</li>

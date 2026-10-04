@@ -13,7 +13,7 @@ from pathlib import Path
 def selftest(out_dir: str, files: list[str]) -> int:
     """Headless check of a build: reads each file and fills its agreement on both forms (clean and original),
     checks the libraries a build can lose without anything else failing (fuzzy_search, regex_search,
-    heic_photos, update_check, printing: True each, else the error), then writes selftest.json into out_dir.
+    heic_photos, update_check, printing, math_pdf: True each, else the error), then writes selftest.json into out_dir.
     The default settings are used; the saved ones are not touched."""
     import json
     from minute_filler.extract_regex import RegexExtractor
@@ -57,6 +57,11 @@ def selftest(out_dir: str, files: list[str]) -> int:
         report["printing"] = True
     except Exception as e:
         report["printing"] = f"{type(e).__name__}: {e}"
+    try:  # The math's Save as PDF... lays out HTML with pymupdf.Story
+        from minute_filler.invoice_math import to_pdf
+        report["math_pdf"] = to_pdf("<p>Copy: 2 × 1 page × $1.00 = $2.00</p>", out / "math.pdf").exists()
+    except Exception as e:
+        report["math_pdf"] = f"{type(e).__name__}: {e}"
     for f in files:
         try:
             case = merge([RegexExtractor(s.profile).extract(ingest_file(f))], s)

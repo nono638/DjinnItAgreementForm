@@ -184,8 +184,10 @@ Rates Last Updated:,5/2/2024
 The app doesn't need AI. The built-in rules handle transcripts, invoices, photos and ordinary e-mails. The optional local model helps most with very informal e-mails.
 
 1. Install **Ollama for Windows** from <https://ollama.com/download>.
-2. In the app: **Help → Set up the AI helper → Download gemma4:e2b**. The download is about 7 GB. Or run `ollama pull gemma4:e2b` in PowerShell.
+2. In the app: **Help → Set up the AI helper → Download gemma4:e2b**. The download is 4.6 to 7.5 GB (6.6 to 9.5 GB for the larger gemma4:e4b), depending on the version Ollama picks for your computer. Or run `ollama pull gemma4:e2b` in PowerShell.
 3. **Settings → AI → Test connection.**
+
+**Which model?** Settings → AI → *Model* offers two: **gemma4:e2b** (smaller and faster, the default) and **gemma4:e4b** (larger and more accurate, but much slower on a laptop without a graphics card). Choose one there, then *How to install Ollama + gemma…* downloads the one chosen. The box also lists any other model Ollama has installed, and you can type a name.
 
 On a typical business laptop with no dedicated graphics card, the model runs on the processor and takes about 30–60 seconds per document. Results appear as soon as the rules finish, and the AI suggestions (purple **AI** badge) are added when they arrive. Everything the model says is checked against the original text, so invented values are dropped.
 

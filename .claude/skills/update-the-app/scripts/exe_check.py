@@ -11,7 +11,7 @@ errors in the log; for each day a minute agreement, a MOFR and the run sheet, an
 days (listed under each day) that bills Pat's own 10 of the 20 transcript pages, for one party, and has its
 amounts as fields (and no "Lock fields" button, removed in 1.3.1); one run sheet with the 4 takes of each day;
 and --selftest says the libraries only the window uses are in the build (the Records' Fuzzy and Regex
-searches, HEIC photos, the look for a newer version, printing). Exit code 1 if something is
+searches, HEIC photos, the look for a newer version, printing, The math as a PDF). Exit code 1 if something is
 off.
 """
 import csv
@@ -115,7 +115,8 @@ for key, what, lib in (("fuzzy_search", "the Records' Fuzzy search", "rapidfuzz"
                        ("regex_search", "the Records' Regex search", "regex"),
                        ("heic_photos", "reading iPhone HEIC photos", "pillow-heif"),
                        ("update_check", "the look for a newer version", "ssl"),
-                       ("printing", "Print…", "PySide6.QtPrintSupport")):
+                       ("printing", "Print…", "PySide6.QtPrintSupport"),
+                       ("math_pdf", "Save as PDF in The math", "pymupdf (Story)")):
     got = st.get(key, "no selftest.json" if not st else "missing from selftest.json")
     print(f"  {key.replace('_', ' ')}:", got)
     if got is not True:

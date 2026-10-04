@@ -1,4 +1,4 @@
-"""The preview before saving, printing, and the first-run welcome.
+"""The preview before saving, the math of the invoices made, printing, and the first-run welcome.
 
 PreviewDialog shows the files Generate is about to make as pictures of their pages; nothing is saved until the
 user says so (MainWindow.fill makes them in a temporary folder first, with a records database of its own, so
@@ -9,6 +9,10 @@ print_files sends PDFs to a printer through Qt's own print box: each page is dra
 so it prints the same whatever PDF program the computer has (Edge, the default one, can't be asked to print a
 file). A page is printed at its actual size when the paper is big enough for it (a court form is not shrunk),
 else made to fit. Other files (the Excel run sheet) are handed to their own program's Print.
+
+MathDialog spells out the math of the invoices Generate just made (invoice_math.explain): a glance and OK. It can
+also copy the text or save it as a PDF, and its "Don't show this anymore" turns it off (Settings -> Options
+turns it back on).
 
 WelcomeDialog asks a new user the few things the forms can't do without.
 """
@@ -21,7 +25,7 @@ from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from ..log import error as log_error
@@ -31,6 +35,7 @@ from .zoom import z
 PREVIEW_DPI = 110  # the pages' pictures at 100 % zoom: a letter page is about 935 px wide
 PRINT_DPI = 300    # the pages as sent to the printer: the usual resolution for printed text
 OFF_NOTE = "Previews are off from now on. Settings → Options turns them back on."
+MATH_OFF_NOTE = "Off from now on. Settings → Options turns it back on."
 
 
 def page_image(page, dpi: int) -> QImage:
@@ -156,6 +161,99 @@ class PreviewDialog(QDialog):
             log_error("could not save the settings", e)
         self.off.setVisible(False)
         self.off_note.setText(OFF_NOTE)
+
+
+class MathDialog(QDialog):
+    """How the amounts of the invoices just made were reached, line by line. OK closes it; Copy all puts it on
+    the clipboard as text; Save as PDF... saves it (starting in `folder`, the invoices' folder); "Don't show
+    this anymore" sets Settings.show_math off at once (and saves the settings)."""
+
+    def __init__(self, made: list, s: Settings, parent=None, folder: Path | None = None):
+        """made: (FirmInvoice, invoice number) for each invoice made (deliver.generate's `math`)."""
+        from ..invoice_math import explain
+        super().__init__(parent)
+        self.s, self.made, self.folder = s, made, folder
+        self.html, self.plain = explain(made)
+        self.setWindowTitle("The math")
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        lay = QVBoxLayout(self)
+        shown = all(f.opts.detail for f, _ in made)  # (granular detail ticked: the invoice shows it too)
+        head = QLabel("How the amounts on " + ("this invoice" if len(made) == 1 else "these invoices")
+                      + " were reached." + ("" if shown else " The invoice itself shows only the amounts."))
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        self.text = QTextBrowser()
+        self.text.document().setDefaultStyleSheet("p {margin: 0 0 3px 0;} h2 {margin: 14px 0 2px 0;} "
+                                                  "h3 {margin: 8px 0 3px 0;}")  # (a line each, close together)
+        self.text.setHtml(self.html)
+        lay.addWidget(self.text, 1)
+
+        row = QHBoxLayout()
+        self.off = QPushButton("Don't show this anymore")
+        self.off.setFlat(True)
+        self.off.setToolTip("Settings → Options turns it back on.")
+        self.off.clicked.connect(self._turn_off)
+        row.addWidget(self.off)
+        self.note = QLabel("")
+        self.note.setObjectName("muted")
+        row.addWidget(self.note)
+        row.addStretch(1)
+        copy = QPushButton("Copy all")
+        copy.setToolTip("Put all of it on the clipboard as text, to paste into an e-mail")
+        copy.clicked.connect(self._copy)
+        save = QPushButton("Save as PDF…")
+        save.clicked.connect(self._save)
+        ok = QPushButton("OK")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        for b in (self.off, copy, save):
+            b.setAutoDefault(False)
+        for b in (copy, save, ok):
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.resize(z(620), z(520))
+
+    def _copy(self) -> None:
+        """Copy all: the math as plain text on the clipboard."""
+        QApplication.clipboard().setText(self.plain)
+        self.note.setText("Copied.")
+
+    def default_name(self) -> str:
+        """'Invoice 2026-0012 - the math.pdf' ('Invoices 2026-0012 to 2026-0013 - ...' for several)."""
+        numbers = [n for _, n in self.made]
+        if len(numbers) == 1:
+            name = f"Invoice {numbers[0]}"
+        else:
+            name = f"Invoices {numbers[0]} to {numbers[-1]}" if numbers else "Invoice"
+        return f"{name} - the math.pdf"
+
+    def _save(self) -> None:
+        """Save as PDF...: asks where, then saves it there."""
+        from ..invoice_math import to_pdf
+        from ..fill import safe_filename
+        folder = self.folder or self.s.records_folder()
+        p, _ = QFileDialog.getSaveFileName(self, "Save the math", str(Path(folder) / safe_filename(self.default_name())),
+                                           "PDF (*.pdf)")
+        if not p:
+            return
+        try:
+            out = to_pdf(self.html, Path(p))
+        except Exception as e:
+            log_error("could not save the math", e)
+            QMessageBox.warning(self, "Not saved", f"The PDF could not be saved ({type(e).__name__}: {e}).")
+            return
+        self.note.setText(f"Saved as {out.name}.")
+
+    def _turn_off(self) -> None:
+        """No more of these: saved in the settings now."""
+        self.s.show_math = False
+        try:
+            self.s.save()
+        except OSError as e:
+            log_error("could not save the settings", e)
+        self.off.setVisible(False)
+        self.note.setText(MATH_OFF_NOTE)
 
 
 def print_files(parent, files: list, printer=None) -> int:

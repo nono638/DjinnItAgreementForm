@@ -32,6 +32,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import random
 import re
 import sqlite3
 import threading
@@ -851,12 +852,17 @@ def stats_rows(st: Stats) -> list[tuple[str, str]]:
     return rows
 
 
+COUNTING = 12  # one monthly recap in this many (once a year, on average) ends "But who's counting?"
+FOOLED = "$65,000.00"  # what last month came to on April 1
+
+
 def recap(invoices: list[Invoice], today: date | None = None, month_seen: str = "",
-          year_seen: str = "") -> tuple[list[str], str, str]:
+          year_seen: str = "", rng=random.random) -> tuple[list[str], str, str]:
     """What to say when the records are first opened in a month, and in a year: (lines, month mark, year
     mark). A line for last month ("Last month (September 2026) you made $870.00 with 243 pages (5 invoices).")
     unless month_seen is this month already, and one for last year unless year_seen is this year; a month or
-    year without invoices gets no line. The marks ("2026-10", "2026") are what to remember as seen."""
+    year without invoices gets no line. The marks ("2026-10", "2026") are what to remember as seen. One time in
+    COUNTING (rng() below 1/COUNTING) the line for last month ends "But who's counting?"."""
     today = today or date.today()
     month, year = f"{today:%Y-%m}", str(today.year)
     lines = []
@@ -873,9 +879,20 @@ def recap(invoices: list[Invoice], today: date | None = None, month_seen: str = 
 
     if month_seen != month:
         line(f"Last month ({period('Last month', today)[2]})", "Last month")
+        if lines and rng() < 1 / COUNTING:
+            lines[-1] += " But who's counting?"
     if year_seen != year:
         line(f"Last year ({today.year - 1})", "Last year")
     return lines, month, year
+
+
+def april_fools(today: date | None = None) -> str | None:
+    """On April 1, what the recap says before the real one: "Last month (March 2027) you made $65,000.00!".
+    None on any other day."""
+    today = today or date.today()
+    if (today.month, today.day) != (4, 1):
+        return None
+    return f"Last month ({period('Last month', today)[2]}) you made {FOOLED}!"
 
 
 SEARCH_MODES = ("words", "regex", "fuzzy")

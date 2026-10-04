@@ -73,6 +73,13 @@ INPUT:
 \"\"\"
 """
 
+# The models Settings -> AI offers whether or not they are installed yet: name -> what to know about it.
+# Any other model Ollama has can be chosen too (the box lists the installed ones, and takes a typed name).
+MODELS = {
+    "gemma4:e2b": "smaller and faster: the usual choice",
+    "gemma4:e4b": "larger and more accurate, but much slower on a laptop without a graphics card (GPU)",
+}
+
 # The reply's shape, shown to the model in the prompt (for the fast call: gemma4 ignores SCHEMA when not thinking)
 TEMPLATE = json.dumps({
     "court": "", "county": "", "part": "", "judge": "", "case_name": "", "index_number": "",

@@ -3,15 +3,17 @@
 Both the window's Generate button and the batch use generate(), so the records see every file made. The
 batch also calls it for a joint invoice: the case of several days, with "invoice" as the only output (see
 batch.fill_jobs). Each ticked attorney (once, however many times it is entered) gets an invoice for the pages
-it ordered (invoice.firm_invoices).
+it ordered (invoice.firm_invoices), and with Settings.invoice_detailed_copy a copy of it showing the granular
+detail.
 """
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from .fill import fill
-from .invoice import InvoiceOpts, firm_invoices, make_invoice
+from .invoice import InvoiceOpts, firm_invoices, make_invoice, render
 from .log import error as log_error
 from .models import Attorney, CaseInfo, SRC_USER, to_int
 from .mofr import fill_mofr
@@ -55,7 +57,8 @@ def case_snapshot(case: CaseInfo) -> dict:
 def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | set[str],
              invoice: InvoiceOpts | None = None, ledger: Ledger | None = None, dated: bool = False,
              runsheet: RunSheetOpts | None = None, folders: list[Path] | None = None,
-             invoiced: list[str] | None = None, origin: dict | None = None) -> list[Path]:
+             invoiced: list[str] | None = None, origin: dict | None = None, math: list | None = None,
+             detailed: list | None = None) -> list[Path]:
     """Writes the chosen outputs (keys of settings.OUTPUTS) and logs them in the records. Each output goes to
     its own folder when Settings -> Options -> Folders gives it one (Settings.folder_for), else into out_dir.
     An invoice needs `invoice` with the page count, the run sheet `runsheet` with the takes of the transcripts;
@@ -66,7 +69,11 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
     Attorney.key() ("" for a blank Bill To) of each invoice made, so a run that stops part way can be tried
     again without billing them twice (see InvoiceOpts.skip). `origin`: where the job came from (the documents
     read and its invoice choices, see batch.job_origin); it is kept with each file's record, together with the
-    case as it is now, so the job can be opened again from the Records window.
+    case as it is now, so the job can be opened again from the Records window. `math`, when given, gets a
+    (FirmInvoice, number) pair for each invoice made, to spell out its math (invoice_math.explain). With
+    Settings.invoice_detailed_copy each invoice that doesn't show the granular detail gets a copy that does
+    ("... (detailed).pdf", the same number; it is among the files returned, and in `detailed` when given, but
+    not recorded again). A copy that can't be made is logged and left out: it doesn't stop the run.
     When a file can't be made, the error raised carries the files made before it as `made`."""
     outputs = [o for o in OUTPUTS if o in outputs]
     billed = invoice.pages if invoice and invoice.pages > 0 else 0  # 0: no transcript among the inputs
@@ -118,8 +125,20 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
                                             dated, f.quotes)
                 if invoiced is not None:
                     invoiced.append(f.atty.key() if f.atty else "")
+                if math is not None:
+                    math.append((f, number))
                 record("invoice", path, f.atty, number, f.opts.pages, f.case, f.opts.my_pages or f.opts.pages,
                        f.opts.total_pages or f.opts.my_pages or f.opts.pages)
+                if s.invoice_detailed_copy and not f.opts.detail:
+                    try:  # only an aside: the invoice is made and recorded, and the others must still be made
+                        copy = render(f.case, f.atty, s, f.quotes, number,
+                                      path.with_name(f"{path.stem} (detailed).pdf"), replace(f.opts, detail=True))
+                    except Exception as e:
+                        log_error("could not make the detailed copy of an invoice", e)
+                    else:
+                        made.append(copy)
+                        if detailed is not None:
+                            detailed.append(copy)
     except Exception as e:
         e.made = made  # what was saved before the problem, so the caller can say so
         raise

@@ -43,15 +43,17 @@ def no_internet(monkeypatch):
 def qt(monkeypatch):
     """PySide6's QtWidgets with a QApplication, drawn off screen (the test is skipped without PySide6). The
     preview before saving is answered "Save" at once (a box waiting for a click would stop the test); a test of
-    the preview itself sets PreviewDialog.exec as it needs."""
+    the preview itself sets PreviewDialog.exec as it needs. "The math" after an invoice is made is closed at once
+    too (a test of it sets MathDialog.exec)."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     fonts = os.path.join(os.environ.get("WINDIR", ""), "Fonts")
     if os.path.isdir(fonts):  # the real fonts, so text is measured as on screen (see the layout tests)
         os.environ.setdefault("QT_QPA_FONTDIR", fonts)
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from minute_filler.gui.preview import PreviewDialog
+    from minute_filler.gui.preview import MathDialog, PreviewDialog
     monkeypatch.setattr(PreviewDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
+    monkeypatch.setattr(MathDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
     return QtWidgets
 
 

@@ -25,7 +25,7 @@ RECENT_MAX = 10  # how many documents and folders File -> Open recent keeps
 # What belongs to this computer and this copy of the app: left out of an exported settings file, and kept as
 # it is when one is imported
 LOCAL = ("window_geometry", "recent_files", "update_checked", "recap_month", "recap_year", "welcomed",
-         "signature_image")
+         "signature_image", "opened_year", "new_year_day")
 # What says who the user is: left out of a settings file exported "without my details" (for a colleague), and
 # kept as it is when such a file is imported. The invoice's payment text (who to pay, and how) is left out
 # with them. The folders are among them: their paths name the user's Windows account.
@@ -222,6 +222,9 @@ class Settings:
     invoice_index_shared: str = "split"
     invoice_joint: bool = True        # Generate all bills the days of one case on one invoice (False: one per day)
     invoice_detail_items: list = field(default_factory=lambda: list(DETAIL_ITEMS))  # what granular detail adds
+    # also save a copy of each invoice with granular detail ("... (detailed).pdf": the same number, not recorded
+    # again), for when the math is asked for later; a job whose invoice already shows the detail gets none
+    invoice_detailed_copy: bool = False
     invoice_turnaround: dict = field(default_factory=lambda: dict(INVOICE_TURNAROUND))
     # the invoice's own text, each row placed and shown as it says (see TEXT_PLACES, TEXT_WHEN); the payment
     # details and the footer note are rows too
@@ -256,6 +259,9 @@ class Settings:
     recent_files: list = field(default_factory=list)  # documents and folders opened, newest first (Open recent)
     preview_before_saving: bool = True  # Generate shows the files as pictures first; saved only on Save
     welcomed: bool = False            # the first-run "Welcome" questions were shown (once, while there is no name)
+    show_math: bool = True            # after Generate makes invoices, a window spells out how each amount was reached
+    opened_year: str = ""             # the year the app was last opened in ("2026")
+    new_year_day: str = ""            # the day it was first opened in a new year: the New Year djinn shows all day
 
     # The only time the app goes online: once a day it asks GitHub for the number of the latest version
     check_updates: bool = True
@@ -265,6 +271,10 @@ class Settings:
     recaps: bool = True
     recap_month: str = ""             # the month a recap was last shown in ("2026-10")
     recap_year: str = ""              # the year the yearly one was last shown in ("2026")
+
+    # (not a field, so not saved) load() found a settings file it couldn't read (locked by a sync, damaged): what
+    # saves on its own, without the user changing anything, must not write the defaults over it
+    unreadable = False
 
     @property
     def path(self) -> Path:
@@ -457,9 +467,13 @@ class Settings:
         s = cls()
         try:
             data = json.loads(s.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return s
         except (OSError, ValueError):
+            s.unreadable = True
             return s
         if not isinstance(data, dict):  # a damaged file must not keep the app from starting
+            s.unreadable = True
             return s
         return cls.from_dict(data)
 

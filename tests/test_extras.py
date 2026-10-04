@@ -575,6 +575,27 @@ def test_preview_settings_checkbox(qt):
     assert (again.preview_before_saving, again.recaps, again.check_updates) == (False, False, False)
 
 
+def test_the_model_box_offers_both_gemma_models(qt, monkeypatch):
+    """Settings -> AI: gemma4:e2b and gemma4:e4b are offered though neither is installed, with the warning that
+    the larger one is much slower without a graphics card; other installed models are listed after them."""
+    from minute_filler.extract_llm import OllamaExtractor
+    from minute_filler.gui.dialogs import SettingsDialog
+    from PySide6.QtCore import Qt
+    dlg = SettingsDialog(pat_settings())  # (Ollama is "not running" in the tests)
+    names = [dlg.a_model.itemText(i) for i in range(dlg.a_model.count())]
+    assert names == ["gemma4:e2b", "gemma4:e4b"] and dlg.a_model.currentText() == "gemma4:e2b"
+    assert "much slower on a laptop without a graphics card" in dlg.a_model.itemData(1, Qt.ToolTipRole)
+    assert any("much slower on a laptop without a graphics card" in w.text() for w in dlg.findChildren(qt.QLabel))
+    dlg.a_model.setCurrentIndex(1)
+    dlg.accept()
+    assert Settings.load().ollama_model == "gemma4:e4b"
+    # with Ollama running: its other models follow, and the one chosen stays chosen
+    monkeypatch.setattr(OllamaExtractor, "installed_models", lambda self, timeout=3: ["llava:7b", "gemma4:e4b"])
+    again = SettingsDialog(Settings.load())
+    names = [again.a_model.itemText(i) for i in range(again.a_model.count())]
+    assert names == ["gemma4:e2b", "gemma4:e4b", "llava:7b"] and again.a_model.currentText() == "gemma4:e4b"
+
+
 # ------------------------------------------------------------------ printing
 def test_pdfs_are_printed_page_by_page(qt, tmp_path):
     import pymupdf
@@ -677,19 +698,22 @@ def test_the_recap_once_a_month_and_once_a_year():
                     amount_paid="440.00", paid_date="2026-10-02"),
                 inv("2025-0001", "2025-03-01", pages=1, amount="4.30", status="paid", paid_speed="Regular",
                     amount_paid="4.30", paid_date="2025-03-09")]
-    lines, month, year = recap(invoices, date(2026, 10, 3))
+    never = lambda: 1.0  # (never "But who's counting?", see test_show_the_math)
+    lines, month, year = recap(invoices, date(2026, 10, 3), rng=never)
     assert lines == ["Last month (September 2026) you made $870.00 with 243 pages (2 invoices). "
                      "$440.00 of it is paid so far.",
                      "Last year (2025) you made $4.30 with 1 page (1 invoice)."]
     assert (month, year) == ("2026-10", "2026")
     assert recap(invoices, date(2026, 10, 20), month, year)[0] == []  # the same month: said once
     assert recap(invoices, date(2026, 11, 2), month, year)[0] == []  # a month without invoices says nothing
-    lines, month, year = recap(invoices, date(2027, 1, 4), "2026-12", "2026")
+    lines, month, year = recap(invoices, date(2027, 1, 4), "2026-12", "2026", rng=never)
     assert lines == ["Last year (2026) you made $870.00 with 243 pages (2 invoices). $440.00 of it is paid so far."]
 
 
 def test_the_recap_pops_up_when_records_opens_and_can_be_turned_off(window, monkeypatch, qt):
+    from minute_filler import records
     from minute_filler.deliver import ledger_for
+    monkeypatch.setattr(records, "april_fools", lambda today=None: None)  # (one box, even on April 1)
     last = (date.today().replace(day=1) - timedelta(days=1)).replace(day=10)
     ledger_for(window.s).add_invoice(inv("X-0001", last.isoformat(), pages=243, amount="870.00"))
     shown = []

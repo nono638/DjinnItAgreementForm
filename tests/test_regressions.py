@@ -367,12 +367,12 @@ def test_generate_asks_about_the_case_as_whose_pages_left_it(make_window, monkey
 
 def test_selftest_checks_the_fuzzy_search(tmp_path):
     """--selftest says whether the Records' Fuzzy and Regex searches, HEIC photos, the look for a newer version
-    and printing work (the release check runs it on the build)."""
+    printing and The math's Save as PDF work (the release check runs it on the build)."""
     from minute_filler.main import selftest
     assert selftest(str(tmp_path / "st"), []) == 0
     report = json.loads((tmp_path / "st" / "selftest.json").read_text(encoding="utf-8"))
     assert report["fuzzy_search"] is True and report["regex_search"] is True and report["heic_photos"] is True
-    assert report["update_check"] is True and report["printing"] is True
+    assert report["update_check"] is True and report["printing"] is True and report["math_pdf"] is True
 
 
 def test_an_iphone_heic_photo_is_read(tmp_path, monkeypatch):
