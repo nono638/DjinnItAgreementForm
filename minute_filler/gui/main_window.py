@@ -1056,21 +1056,42 @@ class MainWindow(QMainWindow):
         m.addAction("Clear this list", lambda: self._set_opt("recent_files", [])).setEnabled(bool(self.s.recent_files))
 
     def export_settings(self) -> None:
-        """File -> Export settings: saves the settings and the rate sheets as one file (Settings.export_to)."""
-        dest, _ = QFileDialog.getSaveFileName(self, "Export settings",
-                                              str(Path.home() / "Documents" / "DjinnIt settings.json"),
+        """File -> Export settings: saves the settings and the rate sheets as one file (Settings.export_to),
+        after asking whether the user's own details go into it (yes for another computer of theirs, no for a
+        colleague)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Export settings")
+        box.setText("Include your personal details in the file?\n\n"
+                    "They are: your name, title, address, phone, fax, e-mail, website and initials (My info), the "
+                    "payment text of your invoices, the names of other reporters (Run sheet) and your folders.\n\n"
+                    "•  Include them to move to another computer of your own.\n"
+                    "•  Leave them out to give the file to a colleague: they keep their own details, and get "
+                    "your options, invoice wording and rate sheets.\n\n"
+                    "Your signature picture and your records are never in the file.")
+        with_mine = box.addButton("Include my details", QMessageBox.YesRole)
+        without = box.addButton("Leave them out", QMessageBox.NoRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(without)  # (the careful choice, should Enter be pressed without reading)
+        box.exec()
+        if box.clickedButton() not in (with_mine, without):
+            return
+        personal = box.clickedButton() is with_mine
+        name = "DjinnIt settings.json" if personal else "DjinnIt settings (no personal details).json"
+        dest, _ = QFileDialog.getSaveFileName(self, "Export settings", str(Path.home() / "Documents" / name),
                                               "Settings file (*.json)")
         if not dest:
             return
         try:
-            self.s.export_to(dest)
+            self.s.export_to(dest, personal=personal)
         except OSError as e:
             show_save_error(self, e, "Could not export the settings")
             return
+        holds = ("your details (name, address, contact, payment text), your options and your rate sheets"
+                 if personal else "your options, invoice wording and rate sheets, and none of your personal details")
         QMessageBox.information(self, "Settings exported", f"Saved as\n{dest}\n\nOn the other computer: File → "
-                                "Import settings.\n\nThe file holds your details (name, address, invoice text), "
-                                "your options and your rate sheets. Your signature picture and your records are "
-                                "not in it.")
+                                f"Import settings.\n\nThe file holds {holds}. Your signature picture and your "
+                                "records are not in it.")
 
     def import_settings(self) -> None:
         """File -> Import settings: replaces the settings with those of a file made by Export settings, after
@@ -1086,9 +1107,10 @@ class MainWindow(QMainWindow):
         except (ValueError, OSError) as e:
             QMessageBox.warning(self, "Could not import", str(e))
             return
-        who = new.profile.name or "(no name)"
+        who = (f"reporter: {new.profile.name or '(no name)'}" if new.imported_personal else
+               "it has no personal details: your name, contact details, payment text and folders stay as they are")
         if QMessageBox.question(self, "Import settings", f"Replace your settings with those of this file "
-                                f"(reporter: {who})?\n\nYour settings as they are now are kept as "
+                                f"({who})?\n\nYour settings as they are now are kept as "
                                 "\"settings before import.json\" in the app's settings folder. "
                                 "Your records are not changed.") != QMessageBox.Yes:
             return

@@ -1765,7 +1765,8 @@ are never deleted.</li>
 another day of the case) or to print it; <b>Undo</b> (Ctrl+Z) takes back the last change; <b>Summary…</b> sums
 up a month or a year; <b>Backups…</b> lists the copies of your records made each day, to go back to one.</li>
 <li><b>File → Open recent</b> lists the documents and folders you opened lately.</li>
-<li>A new computer? <b>File → Export settings</b> saves your details, options and rate sheets as one file,
+<li>A new computer? <b>File → Export settings</b> saves your details, options and rate sheets as one file
+(it asks whether to leave your personal details out, for a file you give to a colleague),
 and <b>File → Import settings</b> reads it there.</li>
 <li>When an invoice is final, <b>File → Lock finished PDFs</b> saves a copy nobody can change.</li>
 <li>Text too small or too big? <b>Ctrl +</b> and <b>Ctrl −</b> (or Ctrl and the mouse wheel) zoom,

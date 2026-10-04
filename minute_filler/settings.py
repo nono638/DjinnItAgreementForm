@@ -26,6 +26,10 @@ RECENT_MAX = 10  # how many documents and folders File -> Open recent keeps
 # it is when one is imported
 LOCAL = ("window_geometry", "recent_files", "update_checked", "recap_month", "recap_year", "welcomed",
          "signature_image")
+# What says who the user is: left out of a settings file exported "without my details" (for a colleague), and
+# kept as it is when such a file is imported. The invoice's payment text (who to pay, and how) is left out
+# with them. The folders are among them: their paths name the user's Windows account.
+PERSONAL = ("profile", "reporters", "output_dir", "output_dirs", "records_dir", "rate_sheets_dir")
 
 
 def settings_dir() -> Path:
@@ -353,12 +357,20 @@ class Settings:
         tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         tmp.replace(self.path)
 
-    def export_to(self, path: Path | str) -> Path:
+    def export_to(self, path: Path | str, personal: bool = True) -> Path:
         """Saves the settings as one file to carry to another computer or give to a colleague: everything but
         what belongs to this computer (LOCAL: the window's place, the recent files, the signature picture...),
-        and the rate sheets (the CSV files of the rate sheet folder, as text). The records are not in it."""
+        and the rate sheets (the CSV files of the rate sheet folder, as text). The records are not in it.
+        personal False (for a colleague): the user's own details are left out too (PERSONAL: name, address and
+        contact, the reporters' names, the folders) and the payment text of the invoices; whoever imports the
+        file keeps their own."""
         from .rates import sheets_dir
         data = {k: v for k, v in asdict(self).items() if k not in LOCAL}
+        if not personal:
+            for k in PERSONAL:
+                data.pop(k, None)
+            data["invoice_texts"] = [r for r in data["invoice_texts"] if r.get("where") != "payment"]
+        data["personal"] = bool(personal)
         data["app"] = APP_NAME
         sheets = {}
         for p in sorted(sheets_dir(self.rate_sheets_dir).glob("*.csv")):
@@ -375,9 +387,10 @@ class Settings:
     def import_from(cls, path: Path | str, current: "Settings") -> "Settings":
         """The settings in a file made by export_to, as new Settings. Nothing is written: the caller saves
         them, after write_imported_sheets() has put the file's rate sheets in the rate sheet folder. What
-        belongs to this computer (LOCAL) is taken from `current`. A folder that isn't on this computer (a
-        colleague's Documents) is left blank, so the usual one is used. ValueError when the file is not a
-        settings file."""
+        belongs to this computer (LOCAL) is taken from `current`, and so is who the user is (PERSONAL, and
+        the invoices' payment text) when the file was exported without those (its "personal" is false: see
+        `imported_personal` on the result). A folder that isn't on this computer (a colleague's Documents) is
+        left blank, so the usual one is used. ValueError when the file is not a settings file."""
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
@@ -390,6 +403,13 @@ class Settings:
             raise ValueError(f"this settings file is damaged: {e}") from None
         for k in LOCAL:
             setattr(s, k, getattr(current, k))
+        s.imported_personal = data.get("personal") is not False  # (files from 1.7.0 have no mark: they hold them)
+        if not s.imported_personal:
+            from copy import deepcopy
+            for k in PERSONAL:
+                setattr(s, k, deepcopy(getattr(current, k)))
+            s.invoice_texts = [r for r in s.invoice_texts if r["where"] != "payment"] + \
+                              [dict(r) for r in current.invoice_texts if r.get("where") == "payment"]
 
         def here(folder: str) -> str:
             """The folder when it, or the folder it is in, is on this computer; else ""."""

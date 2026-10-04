@@ -5,9 +5,10 @@ user says so (MainWindow.fill makes them in a temporary folder first, with a rec
 no invoice number is taken). Its "Don't show previews anymore" turns the preview off (Settings -> Options turns
 it back on).
 
-print_files sends PDFs to a printer through Qt's own print box: each page is drawn as a picture, so it prints
-the same whatever PDF program the computer has (Edge, the default one, can't be asked to print a file). Other
-files (the Excel run sheet) are handed to their own program's Print.
+print_files sends PDFs to a printer through Qt's own print box: each page is drawn as a picture (300 dpi),
+so it prints the same whatever PDF program the computer has (Edge, the default one, can't be asked to print a
+file). A page is printed at its actual size when the paper is big enough for it (a court form is not shrunk),
+else made to fit. Other files (the Excel run sheet) are handed to their own program's Print.
 
 WelcomeDialog asks a new user the few things the forms can't do without.
 """
@@ -28,20 +29,40 @@ from ..settings import Settings
 from .zoom import z
 
 PREVIEW_DPI = 110  # the pages' pictures at 100 % zoom: a letter page is about 935 px wide
-PRINT_DPI = 200    # the pages as sent to the printer
+PRINT_DPI = 300    # the pages as sent to the printer: the usual resolution for printed text
 OFF_NOTE = "Previews are off from now on. Settings → Options turns them back on."
 
 
+def page_image(page, dpi: int) -> QImage:
+    """A page of an open PDF (a pymupdf Page) as a picture at `dpi`, the filled-in fields included."""
+    pix = page.get_pixmap(dpi=dpi, alpha=False)
+    return QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()  # (its own memory)
+
+
 def page_images(pdf: Path | str, dpi: int) -> list[QImage]:
-    """Each page of a PDF as a picture at `dpi`, the filled-in fields included."""
+    """Each page of a PDF as a picture at `dpi`."""
     import pymupdf
-    out = []
     with pymupdf.open(pdf) as doc:
-        for page in doc:
-            pix = page.get_pixmap(dpi=dpi, alpha=False)
-            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
-            out.append(img.copy())  # (its own memory: pix is gone after this loop)
-    return out
+        return [page_image(page, dpi) for page in doc]
+
+
+def print_rect(printer, width: float, height: float) -> QRect:
+    """Where on the paper a page of width x height points (1/72 inch) is drawn, in the printer's dots (with
+    QPrinter.setFullPage(True): counted from the paper's corner). At its actual size, centred, when the paper
+    is big enough (a letter page on letter paper: a form stays the size the court made it); a page bigger than
+    the paper is made to fit the part of it the printer can print on."""
+    layout = printer.pageLayout()
+    paper = layout.fullRectPixels(printer.resolution())
+    dots = printer.resolution() / 72
+    w, h = width * dots, height * dots
+    if w > paper.width() * 1.01 or h > paper.height() * 1.01:  # (1 %: letter and "letter" differ by a dot)
+        # the paper less the printer's margins (worked out here: with setFullPage the layout's own "paint
+        # rectangle" is the whole paper)
+        area = paper.marginsRemoved(layout.marginsPixels(printer.resolution()))
+        scale = min(area.width() / w, area.height() / h)
+        w, h = w * scale, h * scale
+        return QRect(round(area.x() + (area.width() - w) / 2), round(area.y()), round(w), round(h))
+    return QRect(round((paper.width() - w) / 2), round((paper.height() - h) / 2), round(w), round(h))
 
 
 class PreviewDialog(QDialog):
@@ -140,48 +161,66 @@ class PreviewDialog(QDialog):
 def print_files(parent, files: list, printer=None) -> int:
     """Prints files and returns how many were sent. PDFs go to one printer, chosen once in the print box
     (printer: a QPrinter to use without asking, for the tests), every page of them: the box offers no page
-    range. Other files (the Excel run sheet) are handed to their own program's Print. Says so when a file
-    could not be printed."""
+    range. Each page is drawn at 300 dpi at its actual size (see print_rect), upright or sideways as the page
+    is; the copies asked for are made here when the printer can't make them itself. Other files (the Excel run
+    sheet) are handed to their own program's Print. Says so when a file could not be printed, or the printer
+    stopped."""
+    import pymupdf
+    from PySide6.QtGui import QPageLayout
     from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter
     files = [Path(f) for f in files if f and Path(f).exists()]
     pdfs = [f for f in files if f.suffix.lower() == ".pdf"]
     others = [f for f in files if f not in pdfs]
-    sent, failed = 0, []
+    sent, failed, stopped = 0, [], False
     if pdfs:
         if printer is None:
-            printer = QPrinter(QPrinter.HighResolution)
+            printer = QPrinter(QPrinter.HighResolution)  # (the printer's own resolution, not the screen's)
             dlg = QPrintDialog(printer, parent)
             dlg.setWindowTitle(f"Print {len(pdfs)} file{'' if len(pdfs) == 1 else 's'}")
             dlg.setOption(QAbstractPrintDialog.PrintDialogOption.PrintPageRange, False)
             if dlg.exec() != QDialog.Accepted:
                 return 0
+        printer.setFullPage(True)  # positions are counted from the paper's corner (print_rect)
+        # the job's name in the printer's queue
+        printer.setDocName(pdfs[0].stem + (f" and {len(pdfs) - 1} more" if len(pdfs) > 1 else ""))
+        # most printers make the copies themselves; for one that can't, the pages are sent that many times
+        copies = 1 if printer.supportsMultipleCopies() else max(1, printer.copyCount())
         painter = QPainter()
-        if not painter.begin(printer):
-            QMessageBox.warning(parent, "Print", "The printer could not be started.")
-            return 0
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            first = True
-            for f in pdfs:
-                try:
-                    images = page_images(f, PRINT_DPI)
-                except Exception as e:
-                    log_error("could not print a file", e)
-                    failed.append(f.name)
-                    continue
-                for img in images:
-                    if not first:
-                        printer.newPage()
-                    first = False
-                    area = painter.viewport()
-                    size = img.size().scaled(area.size(), Qt.KeepAspectRatio)
-                    # the printer scales the picture: scaled here to a 1200 dpi page it is 350 MB, and seconds
-                    painter.drawImage(QRect(area.x() + (area.width() - size.width()) // 2, area.y(),
-                                            size.width(), size.height()), img)
-                sent += 1
+            for copy in range(copies):
+                for f in pdfs:
+                    if stopped or f.name in failed:
+                        continue
+                    try:
+                        with pymupdf.open(f) as doc:
+                            for page in doc:  # a page at a time: a long transcript is not held whole in memory
+                                printer.setPageOrientation(QPageLayout.Landscape if page.rect.width > page.rect.height
+                                                           else QPageLayout.Portrait)
+                                if not painter.isActive():
+                                    stopped = not painter.begin(printer)
+                                else:
+                                    stopped = not printer.newPage()
+                                if stopped or printer.printerState() in (QPrinter.Aborted, QPrinter.Error):
+                                    stopped = True
+                                    break
+                                # the printer scales the picture to its own resolution: scaled here to a 1200 dpi
+                                # page it would be 350 MB, and take seconds
+                                painter.drawImage(print_rect(printer, page.rect.width, page.rect.height),
+                                                  page_image(page, PRINT_DPI))
+                    except Exception as e:
+                        log_error("could not print a file", e)
+                        failed.append(f.name)
+                        continue
+                    if copy == 0 and not stopped:
+                        sent += 1
         finally:
-            painter.end()
+            if painter.isActive():
+                painter.end()
             QApplication.restoreOverrideCursor()
+        if stopped:
+            QMessageBox.warning(parent, "Print", "The printer stopped before everything was printed (is it on, "
+                                "and does it have paper?).")
     for f in others:
         try:
             os.startfile(str(f), "print")  # (Windows: the file's own program prints it)

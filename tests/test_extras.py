@@ -111,6 +111,64 @@ def test_settings_exported_and_imported_on_another_computer(tmp_path, monkeypatc
     assert new.sheet().name == "City Rates" and new.rate_for("Regular") == "5.00"
 
 
+def test_settings_exported_without_personal_details_for_a_colleague(tmp_path, monkeypatch):
+    s = pat_settings(phone="(555) 010-0000", address1="123 Example Street")
+    s.reporters, s.records_dir, s.invoice_index_threshold = {"ds": "Dana"}, str(tmp_path), 75
+    s.invoice_texts = [{"where": "payment", "when": "always", "text": "Zelle: (555) 010-0000, Pat Reporter"},
+                       {"where": "footer", "when": "always", "text": "E-mail is the best way to reach me."}]
+    out = s.export_to(tmp_path / "for a colleague.json", personal=False)
+    text = out.read_text(encoding="utf-8")
+    for mine in ("Pat Reporter", "010-0000", "Example Street", "Dana", "Zelle", tmp_path.name):
+        assert mine not in text
+    assert json.loads(text)["personal"] is False and "E-mail is the best way" in text
+
+    monkeypatch.setenv("APPDATA", str(tmp_path / "other appdata"))  # the colleague's computer
+    theirs = Settings()
+    theirs.profile.name, theirs.reporters, theirs.output_dir = "Dana Smith", {"pr": "Pat"}, str(tmp_path)
+    theirs.invoice_texts = [{"where": "payment", "when": "always", "text": "Check payable to Dana Smith"}]
+    new = Settings.import_from(out, theirs)
+    assert new.imported_personal is False and new.invoice_index_threshold == 75  # the options are taken
+    assert (new.profile.name, new.reporters, new.output_dir) == ("Dana Smith", {"pr": "Pat"}, str(tmp_path))
+    assert [r["text"] for r in new.invoice_texts] == ["E-mail is the best way to reach me.",
+                                                      "Check payable to Dana Smith"]
+    # a file with them (and one from 1.7.0, which had no mark) brings the reporter along
+    with_mine = Settings.import_from(s.export_to(tmp_path / "mine.json"), theirs)
+    assert with_mine.imported_personal is True and with_mine.profile.name == "Pat Reporter"
+    old = json.loads((tmp_path / "mine.json").read_text(encoding="utf-8"))
+    del old["personal"]
+    (tmp_path / "old.json").write_text(json.dumps(old), encoding="utf-8")
+    assert Settings.import_from(tmp_path / "old.json", theirs).profile.name == "Pat Reporter"
+
+
+def test_export_settings_asks_about_personal_details(window, tmp_path, monkeypatch, qt):
+    asked, saved_as = [], []
+
+    def click(label):
+        def run(box):
+            asked.append(box.text())
+            btn = next(b for b in box.buttons() if b.text() == label)
+            monkeypatch.setattr(qt.QMessageBox, "clickedButton", lambda self: btn)
+            return 0
+        return run
+
+    def save_name(parent, title, start, filt):
+        saved_as.append(os.path.basename(start))
+        return str(tmp_path / os.path.basename(start)), ""
+    monkeypatch.setattr(qt.QFileDialog, "getSaveFileName", save_name)
+    monkeypatch.setattr(qt.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(qt.QMessageBox, "exec", click("Cancel"))
+    window.export_settings()
+    assert "Include your personal details" in asked[0] and saved_as == []  # cancelled: nothing saved
+    monkeypatch.setattr(qt.QMessageBox, "exec", click("Leave them out"))
+    window.export_settings()
+    assert saved_as == ["DjinnIt settings (no personal details).json"]
+    assert "Pat Reporter" not in (tmp_path / saved_as[0]).read_text(encoding="utf-8")
+    monkeypatch.setattr(qt.QMessageBox, "exec", click("Include my details"))
+    window.export_settings()
+    assert saved_as[-1] == "DjinnIt settings.json"
+    assert "Pat Reporter" in (tmp_path / "DjinnIt settings.json").read_text(encoding="utf-8")
+
+
 def test_an_imported_rate_sheet_never_replaces_one_with_other_prices(tmp_path):
     from minute_filler.rates import sheets_dir
     sheet = sheets_dir() / "City Rates.csv"
@@ -534,9 +592,42 @@ def test_pdfs_are_printed_page_by_page(qt, tmp_path):
     fine.setOutputFormat(QPrinter.PdfFormat)
     fine.setOutputFileName(str(tmp_path / "fine.pdf"))
     start = time.time()
-    assert print_files(None, [b], fine) == 1 and time.time() - start < 6
-    assert (tmp_path / "fine.pdf").stat().st_size < 3_000_000
+    assert print_files(None, [b], fine) == 1 and time.time() - start < 8
+    assert (tmp_path / "fine.pdf").stat().st_size < 5_000_000
     assert qt.QApplication.overrideCursor() is None
+
+
+def test_a_page_is_printed_at_its_actual_size_when_the_paper_is_big_enough(qt, tmp_path):
+    """A letter form on letter paper is not shrunk to the printable area (it was, by 3 % or so); a page bigger
+    than the paper is made to fit; a page on its side turns the paper."""
+    import pymupdf
+    from PySide6.QtCore import QMarginsF
+    from PySide6.QtGui import QPageLayout, QPageSize
+    from PySide6.QtPrintSupport import QPrinter
+    from minute_filler.gui.preview import print_files, print_rect
+    printer = QPrinter(QPrinter.HighResolution)
+    printer.setOutputFormat(QPrinter.PdfFormat)
+    printer.setOutputFileName(str(tmp_path / "out.pdf"))
+    printer.setPageLayout(QPageLayout(QPageSize(QPageSize.Letter), QPageLayout.Portrait, QMarginsF(18, 18, 18, 18)))
+    printer.setFullPage(True)
+    dots = printer.resolution() / 72
+    r = print_rect(printer, 612, 792)  # a letter page: every dot of the paper, the margins not taken off
+    assert (r.x(), r.y()) == (0, 0) and abs(r.width() - 612 * dots) <= 1 and abs(r.height() - 792 * dots) <= 1
+    small = print_rect(printer, 306, 396)  # half the size: as it is, in the middle
+    assert abs(small.width() - 306 * dots) <= 1 and abs(small.x() - 153 * dots) <= 1
+    big = print_rect(printer, 842, 1191)  # A3: made to fit inside the margins
+    assert big.height() <= (792 - 36) * dots + 1 and big.y() >= 18 * dots - 1
+    assert abs(big.width() / big.height() - 842 / 1191) < 0.01
+
+    doc = pymupdf.open()
+    doc.new_page(width=612, height=792).insert_text((72, 72), "upright")
+    doc.new_page(width=792, height=612).insert_text((72, 72), "on its side")
+    doc.save(tmp_path / "two.pdf")
+    doc.close()
+    assert print_files(None, [tmp_path / "two.pdf"], printer) == 1
+    with pymupdf.open(tmp_path / "out.pdf") as out:
+        sizes = [(round(p.rect.width), round(p.rect.height)) for p in out]
+    assert sizes == [(612, 792), (792, 612)]
 
 
 def test_the_saved_box_offers_print(window, monkeypatch, tmp_path, qt):
