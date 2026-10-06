@@ -1,6 +1,6 @@
-"""Zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl + wheel) and a window that fits the screen: the
-style sheet's sizes are scaled, fixed widget sizes follow, the zoom is saved, and the window is never bigger
-than the screen has room for (at 150 % Windows scaling a 1920 x 1080 screen is about 1280 x 690)."""
+"""Zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl + wheel) and a window that fits the screen: the style sheet's sizes are
+scaled, fixed widget sizes follow, the zoom is saved, and the window is never bigger than the screen has room for
+(at 150 % Windows scaling a 1920 x 1080 screen is about 1280 x 690)."""
 import os
 
 import pytest
@@ -26,6 +26,7 @@ def test_the_style_sheet_scales_fonts_and_spacing_but_not_colors_or_hairlines():
 
 
 def test_clamp():
+    """The zoom is kept between 70 % and 160 %, to two decimals; a value that isn't a number (or NaN) is 100 %."""
     assert zoom.clamp(5) == 1.6 and zoom.clamp(0.1) == 0.7 and zoom.clamp(1.2999) == 1.3
     assert zoom.clamp("x") == 1.0 and zoom.clamp(float("nan")) == 1.0
 

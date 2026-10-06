@@ -2,8 +2,9 @@
 the user's own pages only: Pat Reporter ("pr") bills the pages with "pr", not Dana Smith's ("ds"). A transcript
 whose pages are all someone else's, or that begins with pages nobody's initials are on, gets no invoice until
 Whose pages... says whose pages to bill; a typed Pages field and a transcript without initials are billed as
-they are. Excerpts (who ordered which pages) count the billed pages of the stretch each firm ordered. Also the
-Excerpts window's quick excerpt row, the Whose pages window and the Invoice panel. All names are made up."""
+they are. Excerpts (who ordered which pages) count the billed pages of the stretch each firm ordered. Also an
+excerpt cut out of a day (excerpts.carve), Enter in the Excerpts table, the Whose pages window and the Invoice
+panel. All names are made up."""
 import os
 
 import pytest
@@ -35,7 +36,7 @@ def s(tmp_path):
 
 
 def job_with(tmp_path, s, initials, name="Roe 6-3-2026.pdf", attorneys=None):
-    """The one job made from a 10-page (as many as `initials`) transcript with these initials on its pages."""
+    """The one job made from a transcript with these initials on its pages (as many pages as `initials`)."""
     path = transcript_pdf(tmp_path / name, len(initials), initials=initials)
     docs, errors = read_docs([str(path)], s)
     assert not errors
@@ -176,11 +177,20 @@ def test_an_excerpt_span_without_printed_numbers_in_order(tmp_path, s):
     assert [p.span for p in job.invoice_orders()[0].portions] == ["pp. 101–105", "pages 6–10"]
 
 
-def test_excerpt_rows():
-    from minute_filler.gui.dialogs import excerpt_rows
-    assert excerpt_rows(100, ["a", "b"], "b", 20, 40) == [(19, ["a"]), (40, ["a", "b"]), (100, ["a"])]
-    assert excerpt_rows(100, ["a", "b"], "b", 1, 100) == [(100, ["a", "b"])]
-    assert excerpt_rows(100, ["a", "b"], "a", 90, 120) == [(89, ["b"]), (100, ["a", "b"])]
+def test_an_excerpt_is_cut_out_of_the_day():
+    """Excerpts… (excerpts.carve): a run typed in a day's one run is cut out of it ("377-397", printed
+    numbers, is pages 20-40 of the day) and the pages around it keep their firms; typed past the day's last
+    page, it is refused (ValueError)."""
+    from minute_filler.excerpts import Day, Run, carve
+    day = Day(None, "6/3/2026", 100, list(range(358, 458)))
+    runs = carve([Run(day, 1, 100, ["a", "b"])], 0, *day.parse("377-397"))
+    assert [(r.start, r.end, r.keys) for r in runs] == [(1, 19, ["a", "b"]), (20, 40, ["a", "b"]),
+                                                       (41, 100, ["a", "b"])]
+    assert day.span(20, 40) == "377–397"
+    with pytest.raises(ValueError):
+        carve(runs, 1, 90, 120)
+    plain = Day(None, "6/4/2026", 30, [None] * 30)  # printed numbers not known: places in the day
+    assert not plain.numbered and plain.parse("5-9") == (5, 9) and plain.span(5, 9) == "5–9"
 
 
 # ------------------------------------------------------------------ the window
@@ -252,6 +262,9 @@ def test_a_held_transcript_with_a_long_name_does_not_widen_the_invoice_panel(win
 
 
 def test_whose_pages_dialog(qt):
+    """Whose pages...: the first pages without initials must be given an owner; the user's and another
+    reporter's pages can be ticked together, the last box ticked stays ticked, and the whole transcript goes
+    alone."""
     from minute_filler.gui.dialogs import PagesOwnerDialog
     owners = ["", "", PR, PR, DS, DS]
     dlg = PagesOwnerDialog([("k", "Roe.pdf", owners)], {PR}, {}, {})
@@ -260,9 +273,15 @@ def test_whose_pages_dialog(qt):
     assert dlg.problem()  # whose the first 2 pages are must be chosen
     item["front"].setCurrentIndex(item["front"].findData(PR))
     assert not dlg.problem() and item["radios"]["me"].text() == "My pages (4)"
-    item["radios"][DS].setChecked(True)
+    item["radios"][DS].setChecked(True)  # DS's pages too, on invoices in DS's name
     dlg.accept()
-    assert dlg.values() == ({"k": DS}, {"k": PR})
+    assert dlg.values() == ({"k": ["me", DS]}, {"k": PR})
+    item["radios"]["me"].setChecked(False)
+    assert dlg.values()[0] == {"k": DS}
+    item["radios"][DS].setChecked(False)  # the last box ticked stays ticked
+    assert item["radios"][DS].isChecked()
+    item["radios"]["*"].setChecked(True)  # the whole transcript goes alone
+    assert dlg.values()[0] == {"k": "*"} and not item["radios"][DS].isChecked()
     # without the user's initials, "My pages" can't be chosen
     unknown = PagesOwnerDialog([("k", "Roe.pdf", [PR, DS])], set(), {}, {})
     assert not unknown.items[0]["radios"]["me"].isEnabled() and unknown.items[0]["radios"]["*"].isChecked()
@@ -279,22 +298,23 @@ def test_whose_pages_still_counts_pages_without_initials_set_to_count_for_nobody
     assert "no initials" not in item["count"].text()
 
 
-def test_enter_in_the_excerpt_row_sets_the_excerpt(qt):
+
+
+def test_enter_in_the_excerpts_table_keeps_the_window_open(qt, tmp_path, s):
+    """Enter after typing a run in the table keeps it ("105-110" -> pages 5-10) and the window stays open (in
+    the old per-day Excerpts dialog it pressed OK and closed it without the excerpt)."""
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
-    from minute_filler.gui.dialogs import PortionsDialog
-    A, B = alex().key(), dana().key()
-    dlg = PortionsDialog([alex(), dana()], 30, None, [A, B], printed=list(range(358, 388)))
-    assert dlg.ex_printed.text() == "(pp. 358–387)"
-    dlg.ex_who.setCurrentIndex(1)  # Dana Smith ordered pages 5 to 9
-    dlg.ex_from.setValue(5)
-    dlg.ex_to.setValue(9)
-    assert dlg.ex_printed.text() == "(pp. 362–366)"
-    dlg.show()
-    dlg.ex_to.setFocus()
-    QTest.keyClick(dlg.ex_to, Qt.Key_Return)  # used to press OK: the window closed without the excerpt
-    assert dlg.isVisible() and dlg.result() != qt.QDialog.Accepted
-    assert dlg.rows() == [(4, [A]), (9, [A, B]), (30, [A])]
-    unknown = PortionsDialog([alex(), dana()], 30, None, [A, B])  # printed numbers not known: none shown
-    assert unknown.ex_printed.text() == ""
-    dlg.close()
+    from minute_filler.gui.excerpts import PAGES, ExcerptsWindow
+    job = job_with(tmp_path, s, [PR] * 30, attorneys=[alex(), dana()])
+    changed = []
+    w = ExcerptsWindow(s, lambda: changed.append(1))
+    w.load([job])
+    w.show()
+    QTest.keyClick(w, Qt.Key_Return)  # no button of the window takes Enter
+    assert w.isVisible()
+    w.table.item(0, PAGES).setText("105-110")  # (as typed in the cell)
+    QTest.keyClick(w.table, Qt.Key_Return)
+    assert w.isVisible() and changed
+    assert [(r.start, r.end) for r in w.runs] == [(1, 4), (5, 10), (11, 30)]
+    w.close()

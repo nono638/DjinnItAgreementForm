@@ -1,5 +1,6 @@
 """The run sheet: takes read from the reporters' initials on each transcript page, written to Excel, and added
-to the case's run sheet when there is one (fictional names and cases)."""
+to the case's run sheet when there is one, ours or one made elsewhere (whose original is kept as a "(before
+YinIt)" copy, or the old "(before DjinnIt)" one). Fictional names and cases."""
 from copy import copy
 from datetime import date
 
@@ -9,7 +10,6 @@ from openpyxl import Workbook, load_workbook
 
 from minute_filler.batch import fill_jobs, group, read_docs
 from minute_filler.deliver import generate
-from minute_filler.ingest import ingest_pdf
 from minute_filler.runsheet import (FIRST, Row, RunSheetOpts, add_takes, choose, find_sheets, read_info,
                                     run_sheet_summary, same_name)
 from minute_filler.takes import (PageMark, find_takes, initials_of, is_index_page, reporter_label, scan_page, scan_pdf,
@@ -161,7 +161,7 @@ def test_a_new_run_sheet(tmp_path, s):
     assert rows[0][6] == 310 and rows[1][6] == "=H5+1"  # the pages carry on from the row above
     assert rows[1][3].startswith('=IF(A6="","",IF(K6="title page only",0.5,COUNTIFS(')
     wb = load_workbook(opts.path)
-    assert wb["DjinnIt"].sheet_state == "hidden" and [r.value for r in wb["By Reporter"]["A"]][:3] == \
+    assert wb["YinIt"].sheet_state == "hidden" and [r.value for r in wb["By Reporter"]["A"]][:3] == \
         ["Reporter", "Pat", "Dana"]
     info = read_info(opts.path)
     assert info.ours and info.index_nos == ["712345/2021"] and info.case_name == "Jane Roe v. Sam Poe"
@@ -231,7 +231,28 @@ def test_adding_to_a_run_sheet_made_elsewhere(tmp_path, s):
     assert ws["A4"].value.date() == date(2026, 6, 3) and ws["F4"].value == 2
     assert ws["G4"].value == "=H3+1" and ws["G5"].value == "=H4+1"  # their formula, copied down
     assert ws["B5"].value == '=IF(A5="","-",TEXT(A5,"dddd"))' and ws["K3"].value == "opening"
-    assert (path.parent / "June 2026 712345-2021 ROE v Poe - Page Sheet (before DjinnIt).xlsx").exists()
+    assert (path.parent / "June 2026 712345-2021 ROE v Poe - Page Sheet (before YinIt).xlsx").exists()
+
+
+def test_a_run_sheet_djinnit_kept_a_copy_of_isnt_copied_again(tmp_path, s):
+    """The original of a run sheet the old app added to is its "(before DjinnIt)" copy: a "(before YinIt)" copy
+    of the sheet as DjinnIt left it would be a second, misleading one."""
+    path = tmp_path / "sheets" / "June 2026 712345-2021 ROE v Poe - Page Sheet.xlsx"
+    path.parent.mkdir()
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Date", "Weekday", "Reporter", "Day's Take", "Running Take", "Pages written", "Starting Page No.",
+               "Ending Page no.", "Witness Start", "Witness End", "Note"])
+    ws.append([date(2026, 6, 2), None, "Pat", 1, 1, 10, 300, 309, None, None, ""])
+    wb.save(path)
+    kept = path.with_name(f"{path.stem} (before DjinnIt).xlsx")
+    wb.save(kept)
+    job = job_of(transcript(tmp_path / "Transcript 6-3-2026 Roe v Poe.pdf"), s)
+    opts = job.runsheet_opts(s)
+    opts.target = str(path)
+    add_takes(job.case, opts, s, [])
+    assert opts.path == path and opts.added
+    assert kept.exists() and not path.with_name(f"{path.stem} (before YinIt).xlsx").exists()
 
 
 def test_a_batch_puts_every_day_on_one_run_sheet(tmp_path, s):

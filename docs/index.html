@@ -3,8 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DjinnItAgreementForm - fills the UCS Minute Agreement Form for you</title>
+<title>YinItAgreementForm - fills the UCS Minute Agreement Form for you</title>
 <meta name="description" content="A free Windows app for New York court reporters. Drop in a transcript, invoice, photo or e-mail and get the UCS Court Reporter Minute Agreement Form and MOFR filled in, invoices made and a shared trial's run sheet kept.">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta property="og:title" content="YinItAgreementForm">
+<meta property="og:description" content="Fills in the UCS Court Reporter Minute Agreement Form and the MOFR for you, makes invoices from your transcripts and keeps a shared trial's run sheet. Free for Windows.">
+<meta property="og:image" content="https://nono638.github.io/YinItAgreementForm/banner.jpg">
+<meta property="og:url" content="https://nono638.github.io/YinItAgreementForm/">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   :root { --bg:#f6f7fb; --card:#fff; --text:#1d2433; --muted:#5b6478; --accent:#2563eb; --accent-d:#1d4ed8; --line:#dfe3ee; }
   @media (prefers-color-scheme: dark) {
@@ -16,6 +23,7 @@
   .wrap { max-width:960px; margin:0 auto; padding:0 20px; }
   header.hero { padding:56px 0 32px; text-align:center; }
   header.hero h1 { font-size:2.4rem; margin:0 0 8px; letter-spacing:-.5px; }
+  header.hero video { display:block; width:100%; max-width:720px; height:auto; margin:0 auto 26px; border-radius:16px; background:#0b1020; box-shadow:0 10px 30px rgba(0,0,0,.25); }
   header.hero p.lead { font-size:1.2rem; color:var(--muted); max-width:640px; margin:0 auto 26px; }
   .btn { display:inline-block; background:var(--accent); color:#fff; text-decoration:none; padding:13px 26px; border-radius:10px; font-weight:600; }
   .btn:hover { background:var(--accent-d); }
@@ -43,10 +51,11 @@
 
 <header class="hero">
   <div class="wrap">
-    <h1>DjinnItAgreementForm</h1>
+    <video src="yin.mp4" poster="yin.jpg" autoplay muted loop playsinline aria-label="A yin-yang made of transcript pages and computer parts, slowly turning among drifting pages"></video>
+    <h1>YinItAgreementForm</h1>
     <p class="lead">Fills in the UCS <b>Court Reporter Minute Agreement Form</b> and the <b>MOFR</b> for you, makes invoices from your transcripts, keeps a shared trial's run sheet, and keeps track of what you billed and what was paid. Drop in what the attorney sent, check the details, and get finished PDFs.</p>
-    <a class="btn" href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Download for Windows</a>
-    <a class="btn ghost" href="https://github.com/nono638/DjinnItAgreementForm">View on GitHub</a>
+    <a class="btn" href="https://github.com/nono638/YinItAgreementForm/releases/latest">Download for Windows</a>
+    <a class="btn ghost" href="https://github.com/nono638/YinItAgreementForm">View on GitHub</a>
     <p class="note">Free and open source (AGPL). Windows 10 or 11. No administrator rights needed.</p>
   </div>
 </header>
@@ -193,21 +202,21 @@
   <div class="wrap">
     <h2>Download and install</h2>
     <ol class="install">
-      <li>Go to the <a href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Releases page</a> and download <code>DjinnItAgreementForm-Setup-x.y.z.exe</code>.</li>
+      <li>Go to the <a href="https://github.com/nono638/YinItAgreementForm/releases/latest">Releases page</a> and download <code>YinItAgreementForm-Setup-x.y.z.exe</code>.</li>
       <li>Double-click it and follow the usual installer steps. It installs just for you, with a Start menu entry and an optional desktop icon.</li>
       <li>Windows may say "Windows protected your PC" because the installer isn't code-signed yet. Click <b>More info</b>, then <b>Run anyway</b>.</li>
       <li>On first launch, enter your name, address, phone and e-mail. Then drop in a document.</li>
     </ol>
-    <p><a class="btn" href="https://github.com/nono638/DjinnItAgreementForm/releases/latest">Download the installer</a></p>
+    <p><a class="btn" href="https://github.com/nono638/YinItAgreementForm/releases/latest">Download the installer</a></p>
   </div>
 </section>
 
 <footer>
   <div class="wrap">
-    DjinnItAgreementForm is not affiliated with or endorsed by the New York State Unified Court System.<br>
+    YinItAgreementForm is not affiliated with or endorsed by the New York State Unified Court System.<br>
     Always review the filled form before you send it.
-    · <a href="https://github.com/nono638/DjinnItAgreementForm">Source</a>
-    · <a href="https://github.com/nono638/DjinnItAgreementForm/issues">Report a problem</a>
+    · <a href="https://github.com/nono638/YinItAgreementForm">Source</a>
+    · <a href="https://github.com/nono638/YinItAgreementForm/issues">Report a problem</a>
   </div>
 </footer>
 

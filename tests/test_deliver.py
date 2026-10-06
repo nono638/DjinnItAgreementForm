@@ -95,7 +95,8 @@ def test_settings_v3_upgrade(tmp_path):
 
 def test_settings_v4_offer_every_speed_off(tmp_path):
     """Version 4 had an "offer every speed" box; off, invoices billed the speed chosen under Order. That is now
-    no speed ticked (not the default speed, which would bill an Expedited job at the Regular price)."""
+    no speed ticked, which bills the job's own speed (not the old default_delivery, which would bill an Expedited
+    job at the Regular price)."""
     import json
     s = Settings()
     s.path.write_text(json.dumps({"settings_version": 4, "invoice_choice": False, "default_delivery": "Regular",
@@ -124,7 +125,7 @@ def test_folder_for_falls_back_and_takes_new_outputs(tmp_path, monkeypatch):
     import minute_filler.settings as settings
     s = Settings()
     assert s.folder_for("agreement", tmp_path) == tmp_path               # the job's Save to folder
-    assert s.folder_for("runsheet", tmp_path).name == "DjinnIt Run Sheets"  # its own built-in folder
+    assert s.folder_for("runsheet", tmp_path).name == "YinIt Run Sheets"  # its own built-in folder
     s.output_dirs["agreement"] = str(tmp_path / "A")
     assert s.folder_for("agreement", tmp_path / "x") == tmp_path / "A"
     # an output added later needs nothing more than its key: blank, it goes with the others
@@ -136,6 +137,8 @@ def test_folder_for_falls_back_and_takes_new_outputs(tmp_path, monkeypatch):
 
 
 def test_the_old_run_sheets_folder_is_kept(tmp_path):
+    """A version 7 runsheet_dir becomes the run sheets' entry in output_dirs (unknown or odd entries are dropped);
+    emptying runsheet_dir removes that entry again."""
     import json
     s = Settings()
     s.path.write_text(json.dumps({"settings_version": 7, "runsheet_dir": str(tmp_path / "Sheets"),

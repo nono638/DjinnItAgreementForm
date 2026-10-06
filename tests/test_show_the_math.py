@@ -1,8 +1,8 @@
 """Show the math: the window that spells out how the amounts of the invoices just made were reached (copied,
 saved as a PDF, turned off), and the detailed copy of each invoice. Also the recap's jokes (April Fools, "But
-who's counting?") and the New Year djinn on the first day of the year the app is used. All names and numbers
-are made up; prices are from the bundled "Sample Rates" sheet (Regular: original $4.30, copy, e-mailed copy and
-index $1.00 a page)."""
+who's counting?"), the New Year yin-yang on the first day of the year the app is used, and "The math" as a tab
+of the preview before saving. All names and numbers are made up; prices are from the bundled "Sample Rates"
+sheet (Regular: original $4.30, copy, e-mailed copy and index $1.00 a page)."""
 import os
 from datetime import date, timedelta
 from pathlib import Path
@@ -45,7 +45,8 @@ def s(tmp_path):
 
 
 def two_firms():
-    case = make_case({**ROE, "case_name": "Jane Roe v. X.Y. Holding Corporation", "index_no": "712345/2021",
+    """Jane Roe v. X.Y. Holding Corporation with two firms, and the options of a 60-page day shared by 2."""
+    case =make_case({**ROE, "case_name": "Jane Roe v. X.Y. Holding Corporation", "index_no": "712345/2021",
                       "dates": "6/3/2026"},
                      [Attorney(name="Alex B. Counsel", firm="Counsel & Counsel"),
                       Attorney(name="Dana Smith", firm="Smith Law")])
@@ -86,11 +87,11 @@ def test_the_math_of_a_firms_own_share(s):
     f = FirmInvoice(Attorney(name="Dana Smith"), make_case({}), InvoiceOpts(10, 3), [q])
     _, plain = explain([(f, "2026-0010")])
     assert plain.splitlines()[0] == "Invoice 2026-0010 · Bill to Dana Smith · 10 pages"
-    # a third of 10 pages, and of its price, as worked out: the lines add up to the total under them
-    assert ("Original: 3.33… pages × $4.30 (pages ordered together are split between the firms) = $14.3333…"
-            in plain)
-    assert "Copy: 10 pages × $1.00 = $10.00" in plain
-    assert "Together: $34.3333…\n" in plain and "Your share: $34.34 (rounded up to the cent)" in plain
+    # a third of 10 pages' price, as worked out: the lines add up to the total under them
+    assert "Original: 10 pages × $4.30 = $43.00 ÷ 3 firms = $14.3333…" in plain
+    assert "Copy: 10 pages × $1.00 = $10.00 (each firm pays for its own)" in plain
+    assert "This firm's charges together: $34.3333…\n" in plain
+    assert "This firm pays: $34.34 (rounded up to the cent)" in plain
 
 
 def test_the_lines_of_a_share_add_up_to_the_total_shown():
@@ -101,15 +102,75 @@ def test_the_lines_of_a_share_add_up_to_the_total_shown():
     q = quote_shares([Share(3, 2, True)], sp)  # 1.5 x 5.45 + 3 x 0.55 x 2 + 1.5 x 0.35 x 2 = 12.525
     f = FirmInvoice(Attorney(name="Dana Smith"), make_case({}), InvoiceOpts(3, 2), [q])
     _, plain = explain([(f, "2026-0011")])
-    for line in ("Original: 1.5 pages × $5.45 (pages ordered together are split between the firms) = $8.175",
-                 "Copy: 3 pages × $0.55 = $1.65", "E-mailed copy: 3 pages × $0.55 = $1.65",
-                 "Index: 1.5 pages × $0.35 (pages ordered together are split between the firms) = $0.525",
-                 "Together: $12.525", "Your share: $12.53 (rounded up to the cent)"):
+    for line in ("Original: 3 pages × $5.45 = $16.35 ÷ 2 firms = $8.175",
+                 "Copy: 3 pages × $0.55 = $1.65 (each firm pays for its own)",
+                 "E-mailed copy: 3 pages × $0.55 = $1.65 (each firm pays for its own)",
+                 "Index: 3 pages × $0.35 = $1.05 ÷ 2 firms = $0.525",
+                 "This firm's charges together: $12.525", "This firm pays: $12.53 (rounded up to the cent)"):
         assert f"    {line}\n" in plain
-    # whole cents: no "Together" line, nothing said about rounding
+    # whole cents: no "together" line, nothing said about rounding
     q = quote_shares([Share(10, 2)], sp)  # 5 x 5.45 + 10 x 0.55 x 2 = 38.25
     _, plain = explain([(FirmInvoice(None, make_case({}), InvoiceOpts(10, 2), [q]), "2026-0012")])
-    assert "Together" not in plain and "    Your share: $38.25\n" in plain
+    assert "together" not in plain and "    This firm pays: $38.25\n" in plain
+
+
+def test_the_math_spells_out_an_excerpt_stretch_by_stretch(s):
+    """One firm ordered pages 1-90, another only 41-90 (Excerpts...): the first pays the 40 pages it ordered
+    alone in full and half of the 50 ordered by both; the check at the end shows the two cover the whole
+    price."""
+    from minute_filler.invoice import DayOrder, Portion
+    a, b = Attorney(name="Alex B. Counsel"), Attorney(name="Dana Smith")
+    case = make_case(ROE, [a, b])
+    opts = InvoiceOpts(90, 2, days=[("6/3/2026", 90)], orders=[DayOrder("6/3/2026", 90, [
+        Portion(40, [a.key()], 1, "pp. 1-40"), Portion(50, [a.key(), b.key()], 2, "pp. 41-90")])])
+    made = [(f, f"2026-00{i + 20}") for i, f in enumerate(firm_invoices(case, s, opts))]
+    html, plain = explain(made)
+    for line in ("Original ($4.30 a page, divided between the firms that ordered each page): $279.50",
+                 "      40 pages ordered by this firm alone: 40 × $4.30 = $172.00",
+                 "      50 pages ordered by 2 firms: 50 × $4.30 = $215.00 ÷ 2 = $107.50",
+                 "Copy: 90 pages × $1.00 = $90.00 (each firm pays for its own)",
+                 "This firm pays: $589.50"):
+        assert f"    {line}\n" in plain
+    assert "Bill to Dana Smith · 50 pages (6/3/2026 pp. 41-90)" in plain  # the excerpt it ordered
+    assert "Original: 50 pages × $4.30 = $215.00 ÷ 2 firms = $107.50" in plain
+    assert plain.rstrip().endswith("Regular: the 2 firms together pay $847.00 for work that costs $847.00")
+    assert "margin-left" in html and "All the firms together" in html
+
+
+def test_all_the_firms_together_counts_each_set_of_invoices(s):
+    """A firm that ordered one of two days (its case copied, to name its own day) fell out of the last line,
+    and the invoices of another reporter of the case were added in with the user's."""
+    from minute_filler.invoice import DayOrder, Portion
+    from minute_filler.invoice_math import together
+    s.invoice_include_index = s.invoice_include_email = False
+    a, b = Attorney(name="Pat Lawyer", checked=True), Attorney(name="Dana Smith", checked=True)
+    case = make_case({**ROE, "dates": "6/3/2026, 6/4/2026"}, [a, b])
+    both = [a.key(), b.key()]
+    opts = InvoiceOpts(30, 2, days=[("6/3/2026", 10), ("6/4/2026", 20)], orders=[
+        DayOrder("6/3/2026", 10, [Portion(10, both)]), DayOrder("6/4/2026", 20, [Portion(20, [a.key()])])])
+    made = [(f, str(i)) for i, f in enumerate(firm_invoices(case, s, opts))]
+    assert together(made) == ["Regular: the 2 firms together pay $169.00 for work that costs $169.00"]
+    one_day = InvoiceOpts(10, 2, days=[("6/3/2026", 10)], orders=[DayOrder("6/3/2026", 10, [Portion(10, both)])])
+    theirs = InvoiceOpts(5, 2, days=[("6/3/2026", 5)], orders=[DayOrder("6/3/2026", 5, [Portion(5, both)])],
+                         reporter="ds")
+    made = [(f, "x") for o in (one_day, theirs) for f in firm_invoices(case, s, o)]
+    assert together(made) == ["Regular: the 2 firms together pay $63.00 for work that costs $63.00",
+                              "Regular (DS invoices): the 2 firms together pay $31.50 for work that costs $31.50"]
+
+
+def test_three_firms_together_cost_whole_cents(s):
+    """Bug: three shares of $24.333… added up to $72.999…. The last line now says the work "costs $73.00" and
+    that rounding each share up "adds $0.02"."""
+    from minute_filler.invoice import DayOrder, Portion
+    from minute_filler.invoice_math import together
+    s.invoice_include_index = s.invoice_include_email = False
+    firms = [Attorney(name=n, checked=True) for n in ("Pat Lawyer", "Dana Smith", "Sam Poe")]
+    case = make_case(ROE, firms)
+    opts = InvoiceOpts(10, 3, days=[("6/3/2026", 10)],
+                       orders=[DayOrder("6/3/2026", 10, [Portion(10, [a.key() for a in firms])])])
+    made = [(f, "x") for f in firm_invoices(case, s, opts)]
+    assert together(made) == ["Regular: the 3 firms together pay $73.02 for work that costs $73.00 (rounding "
+                              "each one up to the cent adds $0.02)"]
 
 
 def test_the_math_saved_as_a_pdf(s, tmp_path):
@@ -119,7 +180,7 @@ def test_the_math_saved_as_a_pdf(s, tmp_path):
     out = to_pdf(html, tmp_path / "math.pdf")
     with pymupdf.open(out) as doc:
         assert doc.page_count > 1 and "Original: 60 pages" in doc[0].get_text()
-        assert doc.metadata["creator"] == "DjinnIt math"
+        assert doc.metadata["creator"] == "YinIt math"
     assert to_pdf(html, out) == out  # saved over (the Save box asked)
 
 
@@ -262,6 +323,7 @@ def test_the_settings_save_the_math_choices(qt):
 
 # ------------------------------------------------------------------ the recap's jokes
 def inv(no, created, pages=243, amount="870.00"):
+    """A made-up Regular invoice to Alex B. Counsel, for the recaps."""
     return Invoice(invoice_no=no, created=created, case_name="Jane Roe v. X.Y. Holding Corporation",
                    bill_to="Alex B. Counsel", firm="Counsel & Counsel", pages=pages, amounts={"Regular": amount},
                    billed_speed="Regular")
@@ -303,7 +365,7 @@ def test_the_april_fools_recap_pops_up_first(tmp_path, monkeypatch, make_window,
     assert len(shown) == 3 and shown[2].startswith("Last month (March 2027) you made $870.00")
 
 
-# ------------------------------------------------------------------ the New Year djinn
+# ------------------------------------------------------------------ the New Year yin-yang
 def test_the_first_day_of_a_new_year():
     from minute_filler.gui.main_window import note_opened
     s = Settings()
@@ -335,7 +397,7 @@ def test_the_new_year_doesnt_write_over_settings_that_couldnt_be_read():
         "minute_filler.settings", fromlist=["LOCAL"]).LOCAL
 
 
-def test_the_new_year_djinn_is_shown_when_ready(make_window, qt, monkeypatch):
+def test_the_new_year_yin_is_shown_when_ready(make_window, qt, monkeypatch):
     from minute_filler.gui import main_window
     s = pat_settings()
     s.use_ai = False  # (no look for Ollama finishing after the test)
@@ -349,9 +411,89 @@ def test_the_new_year_djinn_is_shown_when_ready(make_window, qt, monkeypatch):
     win.drop._pixmaps.clear()
     win.drop.set_mood("done")
     win.drop.set_mood("working")
-    assert loaded == ["djinn_newyear.jpg", "djinn_working.jpg"]
-    assert (main_window.ASSETS / "djinn_newyear.jpg").exists()
-    # left open overnight: the next day it is the usual djinn again
+    assert loaded == ["yin_newyear.jpg", "yin_working.jpg"]
+    assert (main_window.ASSETS / "yin_newyear.jpg").exists()
+    # left open overnight: the next day it is the usual yin-yang again
     win.drop.new_year_day = (date.today() - timedelta(days=1)).isoformat()
     win.drop.set_mood("done")
-    assert loaded[-1] == "djinn_done.jpg"
+    assert loaded[-1] == "yin_done.jpg"
+
+
+# ------------------------------------------------------------------ the math with the preview (2.0.0)
+def math_window(tmp_path, monkeypatch, make_window, qt, preview=True, days=1):
+    """A window with the preview on and a 12-page transcript read (and an 8-page one of the next day, with
+    days=2), one attorney ticked on each day."""
+    monkeypatch.setattr(qt.QMessageBox, "exec", lambda self: 0)
+    s = pat_settings(initials="pr")
+    s.use_ai = s.open_after = False
+    s.welcomed = True
+    s.output_dir, s.records_dir = str(tmp_path / "out"), str(tmp_path / "records")
+    s.outputs = ["agreement", "invoice"]
+    win = make_window(s, preview=preview)
+    from test_extras import wait
+    files = [str(transcript_pdf(tmp_path / "Transcript.pdf", 12))]
+    if days == 2:
+        files.append(str(transcript_pdf(tmp_path / "Day 2.pdf", 8, date="June 4, 2026")))
+    win.add_files(files)
+    wait(win, lambda: len(win.jobs) == days and all(j.docs for j in win.jobs))
+    for j in win.jobs:
+        for a in j.case.attorneys:
+            a.checked = a is j.case.attorneys[0]
+        j.att_touched = True
+    win._show_case()
+    return win
+
+
+def test_the_preview_shows_the_math_with_the_files(tmp_path, monkeypatch, make_window, qt):
+    from minute_filler.gui.preview import MathDialog, PreviewDialog
+    win = math_window(tmp_path, monkeypatch, make_window, qt)
+    seen, after = [], []
+
+    def look(dlg):
+        seen.append((dlg.tabs.tabText(0), dlg.math.plain if dlg.math else ""))
+        return PreviewDialog.Accepted
+    monkeypatch.setattr(PreviewDialog, "exec", look)
+    monkeypatch.setattr(MathDialog, "exec", lambda dlg: after.append(dlg.plain) or 0)
+    win.fill()
+    (tab, plain), = seen
+    year = date.today().year
+    assert tab == "The math" and plain.startswith(f"Invoice {year}-0001") and "12 pages × $4.30" in plain
+    assert after == []  # shown with the files: not again once saved
+    win.s.show_math = False
+    seen.clear()
+    win.fill()
+    assert seen[0][1] == "" and after == []
+
+
+def test_generate_all_previews_the_files_and_the_math(tmp_path, monkeypatch, make_window, qt):
+    from minute_filler.gui.preview import MathDialog, PreviewDialog
+    from test_extras import wait
+    win = math_window(tmp_path, monkeypatch, make_window, qt, days=2)
+    seen, after = [], []
+    monkeypatch.setattr(PreviewDialog, "exec",
+                        lambda dlg: seen.append([dlg.tabs.tabText(i) for i in range(dlg.tabs.count())])
+                        or PreviewDialog.Rejected)
+    monkeypatch.setattr(MathDialog, "exec", lambda dlg: after.append(dlg.plain) or 0)
+    win.fill_all_jobs()
+    wait(win, lambda: seen and not win.filling)
+    tabs, = seen
+    assert tabs[0] == "The math" and any(t.startswith("Invoice") for t in tabs)
+    assert not (tmp_path / "out").exists() and ledger_for(win.s).invoices() == []  # Go back: nothing saved
+    monkeypatch.setattr(PreviewDialog, "exec", lambda dlg: PreviewDialog.Accepted)
+    win.fill_all_jobs()
+    wait(win, lambda: not win.filling and ledger_for(win.s).invoices())
+    year = date.today().year
+    assert [i.invoice_no for i in ledger_for(win.s).invoices()] == [f"{year}-0001"]  # the number previewed
+    assert after == []
+
+
+def test_generate_all_without_the_preview_shows_the_math_after(tmp_path, monkeypatch, make_window, qt):
+    from minute_filler.gui.preview import MathDialog
+    from test_extras import wait
+    win = math_window(tmp_path, monkeypatch, make_window, qt, preview=False, days=2)
+    after = []
+    monkeypatch.setattr(MathDialog, "exec", lambda dlg: after.append(dlg.plain) or 0)
+    monkeypatch.setattr(type(win), "_saved_box", lambda self, *a, **k: None)
+    win.fill_all_jobs()
+    wait(win, lambda: not win.filling and ledger_for(win.s).invoices())
+    assert len(after) == 1 and "Original:" in after[0]

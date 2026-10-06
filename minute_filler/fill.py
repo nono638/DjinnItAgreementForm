@@ -119,7 +119,7 @@ def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str
     }
     for p in PROC_TYPES:
         v[f"proc_{p.lower()}"] = p in case.proc_types
-    delivery = g("delivery").strip()
+    delivery = g("delivery").strip()  # the speed chosen under "Agreement form"
     key = speed_key(delivery)
     for d in FORM_SPEEDS:
         v[f"delivery_{d}"] = key == d
@@ -194,7 +194,7 @@ def add_text_field(page: pymupdf.Page, name: str, rect, text: str = "", fs: floa
 
 # PDFs made by 1.3.0 had a "Lock fields" button of this name. Most viewers (Firefox, Edge, Chrome) ignore the
 # script behind it, and the attorneys saw it too, so it is no longer added; lock_pdf still takes it out.
-LOCK_BUTTON = "DjinnIt lock"
+LOCK_BUTTON = "DjinnIt lock"  # (the app was DjinnIt then)
 
 
 def has_fields(path: Path) -> bool:
@@ -332,11 +332,13 @@ def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool 
     return (safe_filename(name) if name.strip(" .-") else fallback) + ".pdf"
 
 
-MARK = "DjinnIt"  # PDF "creator" of every file this app makes: such files are skipped as inputs
+MARK = "YinIt"  # PDF "creator" of every file this app makes: such files are skipped as inputs
+OLD_MARKS = ("DjinnIt",)  # the mark before the app was renamed (2.0)
 
 
 def mark(doc: pymupdf.Document, kind: str) -> None:
-    """Labels a PDF as made by this app ("DjinnIt agreement", "DjinnIt MOFR", "DjinnIt invoice")."""
+    """Labels a PDF as made by this app: its creator becomes MARK and the kind ("YinIt agreement",
+    "YinIt invoice", "YinIt math")."""
     meta = dict(doc.metadata or {})
     meta["creator"] = f"{MARK} {kind}"
     doc.set_metadata(meta)
@@ -356,12 +358,12 @@ def save_output(doc: pymupdf.Document, kind: str, path: Path, flatten: bool = Fa
 
 
 def is_generated(path: Path) -> bool:
-    """True for a PDF that this app made (see mark)."""
+    """True for a PDF that this app made (see mark), also under its old name (OLD_MARKS)."""
     if path.suffix.lower() != ".pdf":
         return False
     try:
         with pymupdf.open(path) as doc:
-            return (doc.metadata or {}).get("creator", "").startswith(MARK)
+            return (doc.metadata or {}).get("creator", "").startswith((MARK, *OLD_MARKS))
     except Exception:
         return False
 

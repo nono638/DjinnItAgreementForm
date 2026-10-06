@@ -19,9 +19,15 @@ def repolish(w: QWidget) -> None:
 
 
 def rounded(path: Path, width: int, radius: int):
-    """Scaled pixmap with rounded corners (HiDPI aware)."""
+    """The picture file at `path` as a pixmap scaled to `width`, with rounded corners (HiDPI aware)."""
+    from PySide6.QtGui import QPixmap
+    return round_corners(QPixmap(str(path)), width, radius)
+
+
+def round_corners(src, width: int, radius: int):
+    """A pixmap scaled to `width` with rounded corners (HiDPI aware), e.g. a frame of the DropZone's moving
+    picture. A null pixmap comes back as it is."""
     from PySide6.QtGui import QPainter, QPainterPath, QPixmap
-    src = QPixmap(str(path))
     if src.isNull():
         return src
     dpr = QApplication.instance().devicePixelRatio() if QApplication.instance() else 1.0
@@ -63,7 +69,8 @@ def refill_combo(combo: QComboBox, items, keep=None, tips=None) -> None:
 
 
 def check_row(items: dict[str, str], checked, on_toggle=None, spacing: int = 6) -> tuple[QHBoxLayout, dict]:
-    """A row of checkboxes, one per key -> label, ticked for the keys in `checked`."""
+    """A row of checkboxes, one per key -> label, ticked for the keys in `checked`. on_toggle: connected to each
+    box's toggled signal. Returns (the row, {key: checkbox})."""
     row, boxes = QHBoxLayout(), {}
     for key, label in items.items():
         cb = QCheckBox(label)

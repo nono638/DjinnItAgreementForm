@@ -11,16 +11,18 @@ LIGHT = {
     "input": "#ffffff", "input_border": "#9aa3b2", "accent": "#2563eb", "accent_hover": "#1d4ed8",
     "accent_text": "#ffffff", "hover": "#e8ecf3", "review": "#d97706", "review_bg": "#fff6e5",
     "ok": "#15803d", "ok_bg": "#dcf2e3", "warn_bg": "#fdeccc", "warn": "#8a4f00", "drop_bg": "#f3f6fc",
-    "regex": "#15803d", "ai": "#6d28d9", "default": "#4d5566", "derived": "#0369a1", "you": "#141a26",
+    "regex": "#15803d", "pdf": "#0f766e", "ai": "#6d28d9", "default": "#4d5566", "derived": "#0369a1", "you": "#141a26",
     "sel": "#d3e1fd", "header_bg": "#d5dbe5", "card_title": "#1e3a8a",
+    "records": "#0f5f56", "records_bg": "#e3f3ef", "records_border": "#5fae9f", "records_hover": "#cdeae3",
 }
 DARK = {
     "bg": "#0c0e12", "card": "#1f232c", "border": "#4a5262", "text": "#eceef3", "muted": "#b2b9c6",
     "input": "#12151b", "input_border": "#5b6477", "accent": "#4b8df8", "accent_hover": "#2f74e8",
     "accent_text": "#ffffff", "hover": "#2c3240", "review": "#f5a524", "review_bg": "#33280f",
     "ok": "#4ade80", "ok_bg": "#133021", "warn_bg": "#382c10", "warn": "#f7cb74", "drop_bg": "#171b23",
-    "regex": "#4ade80", "ai": "#c9adff", "default": "#b2b9c6", "derived": "#7dd3fc", "you": "#eceef3",
+    "regex": "#4ade80", "pdf": "#5eead4", "ai": "#c9adff", "default": "#b2b9c6", "derived": "#7dd3fc", "you": "#eceef3",
     "sel": "#29406a", "header_bg": "#171a21", "card_title": "#9cc0ff",
+    "records": "#a7f0e1", "records_bg": "#12312d", "records_border": "#2f7d70", "records_hover": "#184139",
 }
 
 QSS = """
@@ -63,6 +65,8 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: {accent_hover}; }
 QPushButton#primary:disabled { background: {border}; color: {muted}; }
+QPushButton#records { background: {records_bg}; color: {records}; border: 1px solid {records_border}; font-weight: 600; }
+QPushButton#records:hover { background: {records_hover}; }
 QToolButton { border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; background: transparent; }
 QToolButton:hover { background: {hover}; border: 1px solid {border}; }
 QToolButton::menu-indicator { image: none; }
@@ -88,6 +92,7 @@ QLabel#status[state="busy"] { background: {sel}; color: {accent}; }
 
 QLabel#badge { border-radius: 8px; padding: 1px 7px; font-size: 8pt; font-weight: 600; border: 1px solid {border}; }
 QLabel#badge[src="regex"] { color: {regex}; }
+QLabel#badge[src="PDF"] { color: {pdf}; }
 QLabel#badge[src="AI"] { color: {ai}; }
 QLabel#badge[src="default"] { color: {default}; }
 QLabel#badge[src="derived"] { color: {derived}; }

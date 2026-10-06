@@ -2,7 +2,7 @@
 invoice records the user's pages, the transcript's, the reporters, the excerpt and what was charged; deleted
 records leave every list and copy and can be restored for 30 days, then are gone for good, while their
 invoice numbers stay taken. Also the Records window: the columns chosen, kept for next time, and Delete,
-Trash and Restore. All names and numbers are made up."""
+Trash and Restore; and the search box (words, Regex, Fuzzy). All names and numbers are made up."""
 import csv
 import os
 import sqlite3

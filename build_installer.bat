@@ -1,6 +1,6 @@
 @echo off
 rem Tests, builds the exe, then wraps it in an installer:
-rem   dist\installer\DjinnItAgreementForm-Setup-<version>.exe
+rem   dist\installer\YinItAgreementForm-Setup-<version>.exe
 rem Bump the version in minute_filler\__init__.py before each release.
 cd /d "%~dp0"
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
@@ -23,8 +23,8 @@ for %%D in (build dist) do (
   if not exist %%D mkdir %%D
   powershell -NoProfile -Command "Set-Content -Path %%D -Stream com.dropbox.ignored -Value 1"
 )
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean DjinnItAgreementForm.spec || (echo PyInstaller failed & pause & exit /b 1)
-"%ISCC%" /Qp /DMyAppVersion=%VER% installer\DjinnItAgreementForm.iss || (echo Inno Setup failed & pause & exit /b 1)
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean YinItAgreementForm.spec || (echo PyInstaller failed & pause & exit /b 1)
+"%ISCC%" /Qp /DMyAppVersion=%VER% installer\YinItAgreementForm.iss || (echo Inno Setup failed & pause & exit /b 1)
 echo.
-echo Installer: dist\installer\DjinnItAgreementForm-Setup-%VER%.exe
+echo Installer: dist\installer\YinItAgreementForm-Setup-%VER%.exe
 pause

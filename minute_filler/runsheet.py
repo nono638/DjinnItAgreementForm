@@ -17,6 +17,9 @@ app, the rows already there stay in their order (with what was typed in them) an
 the first later one. A run sheet this app did not make (downloaded from Google Sheets, say) gets its rows
 added at the end, or on a row typed in ahead for that day, with its own formulas copied down; it is backed up
 first.
+
+A run sheet made before the app was renamed (2.0) is still found and added to: its hidden "DjinnIt" sheet
+(OLD_META) is read, and replaced by a "YinIt" one when the run sheet is written again (meta_sheet, _meta).
 """
 from __future__ import annotations
 
@@ -38,8 +41,11 @@ from .models import CaseInfo
 from .settings import Settings
 from .takes import TITLE_ONLY, body_pages, find_takes, reporter_label, title_reporters
 
-SHEET, BY_REPORTER, META = "Run Sheet", "By Reporter", "DjinnIt"
-FORMAT = "DjinnIt run sheet 1"
+SHEET, BY_REPORTER, META = "Run Sheet", "By Reporter", "YinIt"
+FORMAT = "YinIt run sheet 1"
+BACKUP = "(before YinIt)"  # a run sheet this app didn't make is first copied to "<name> (before YinIt).xlsx"
+# Run sheets made before the app was renamed (2.0): their hidden sheet, its format and the backup's name
+OLD_META, OLD_FORMAT, OLD_BACKUP = "DjinnIt", "DjinnIt run sheet", "(before DjinnIt)"
 HEAD_ROW, FIRST = 4, 5  # the column headings, the first take
 LAST = 5000             # how far down the totals look
 # key, heading, typed by hand ("Write here"), width
@@ -90,7 +96,7 @@ class Row:
 
 @dataclass
 class RunSheetOpts:
-    """The takes to add, where to add them, and (after generate) what happened."""
+    """The takes to add, where to add them, and (after add_takes) what happened."""
     rows: list[Row] = field(default_factory=list)
     target: str | None = None  # None: as Settings.runsheet_existing says; "": a new run sheet; else that file
     path: Path | None = None   # the run sheet written
@@ -144,7 +150,7 @@ def rows_from(ing, day: date | None, s: Settings) -> list[Row]:
     p = s.profile
     rows = []
     for t in takes:
-        who = reporter_label(t.initials, names, s.reporters, p.name, p.initials, s.title_case_names)
+        who = reporter_label(t.initials, names, s.reporter_names(), p.name, p.initials, s.title_case_names)
         note = TITLE_ONLY if t.title_only and len(takes) > 1 else "" if t.initials else NOT_FOUND
         rows.append(Row(day, who, t.pages, t.start, "; ".join(tidy_name(w, s.title_case_names) for w in t.witness_start),
                         "; ".join(tidy_name(w, s.title_case_names) for w in t.witness_end), note, t.initials))
@@ -241,8 +247,14 @@ def same_name(a: str, b: str) -> bool:
 
 def runsheets_folder(s: Settings) -> Path:
     """Where run sheets are kept: the run sheet's folder under Settings -> Options -> Folders, else
-    Documents/DjinnIt Run Sheets (see Settings.folder_for)."""
+    Documents/YinIt Run Sheets (see Settings.folder_for)."""
     return s.folder_for("runsheet")
+
+
+def meta_sheet(wb) -> str | None:
+    """The name of a workbook's hidden sheet about its case (META, or OLD_META in one made before the rename),
+    or None."""
+    return next((n for n in (META, OLD_META) if n in wb.sheetnames), None)
 
 
 def read_info(path: Path) -> Found | None:
@@ -253,12 +265,13 @@ def read_info(path: Path) -> Found | None:
     except Exception:
         return None
     try:
-        if META in wb.sheetnames:
+        if meta_sheet(wb):
             info = {}
-            for key, value, *_ in wb[META].iter_rows(values_only=True):
+            for key, value, *_ in wb[meta_sheet(wb)].iter_rows(values_only=True):
                 if key:
                     info.setdefault(str(key), []).append("" if value is None else str(value))
-            if info.get("format", [""])[0].startswith("DjinnIt run sheet"):
+            # "YinIt run sheet 1", any version, or one made under the old name
+            if info.get("format", [""])[0].startswith((FORMAT.rsplit(" ", 1)[0], OLD_FORMAT)):
                 return Found(path, (info.get("case") or [""])[0], [i for i in info.get("index", []) if i])
         if {"Setup", "Rates", "Job", "Invoice"} <= set(wb.sheetnames):
             return None  # the invoice spreadsheet: its Page Log looks like a run sheet but isn't one
@@ -302,8 +315,8 @@ def find_sheets(case: CaseInfo, folders: list[Path]) -> list[Found]:
             continue
         for f in files:
             key = str(f.resolve()).lower()
-            if f.name.startswith("~$") or f.name.endswith(".saving.xlsx") or "(before DjinnIt)" in f.name \
-                    or key in seen:
+            if f.name.startswith("~$") or f.name.endswith(".saving.xlsx") or BACKUP in f.name \
+                    or OLD_BACKUP in f.name or key in seen:
                 continue
             seen.add(key)
             info = read_info(f)
@@ -478,8 +491,8 @@ def _write_ours(path: Path, case: CaseInfo, opts: RunSheetOpts, exists: bool) ->
         ws = wb[SHEET] if SHEET in wb.sheetnames else wb.worksheets[0]
         old = _read_ours(ws)
         meta = {}
-        if META in wb.sheetnames:
-            for key, value, *_ in wb[META].iter_rows(values_only=True):
+        if meta_sheet(wb):
+            for key, value, *_ in wb[meta_sheet(wb)].iter_rows(values_only=True):
                 if key:
                     meta.setdefault(str(key), []).append("" if value is None else str(value))
         case_name = (meta.get("case") or [case.get("case_name")])[0] or case.get("case_name")
@@ -638,8 +651,8 @@ def _by_reporter(wb, rows: list[Row], sheet: str = SHEET) -> None:
 
 def _meta(wb, case_name: str, indexes: list[str], reporters: dict[str, str]) -> None:
     """The hidden sheet that says what the run sheet is about (so it can be found again)."""
-    if META in wb.sheetnames:
-        del wb[META]
+    while meta_sheet(wb):  # (one made before the rename gets the new name)
+        del wb[meta_sheet(wb)]
     ws = wb.create_sheet(META)
     ws.append(["format", FORMAT])
     ws.append(["case", case_name])
@@ -680,14 +693,15 @@ def _their_columns(ws) -> tuple[int, dict[str, int]]:
 
 
 def _is_formula(v) -> bool:
+    """A cell value Excel reads as a formula ("=A5+1")."""
     return isinstance(v, str) and v.startswith("=")
 
 
 def _append_theirs(path: Path, opts: RunSheetOpts) -> None:
     """Adds the new takes to a run sheet this app did not make, keeping its layout: each on a row typed in
     ahead for its day, else on the first empty row after the takes, with the look and formulas of the row
-    above. The file is first copied to "<name> (before DjinnIt).xlsx". Sets opts.added, skipped and
-    added_pages."""
+    above. The file is first copied to "<name> (before YinIt).xlsx" (BACKUP), unless the old app kept a copy
+    of it already ("(before DjinnIt)"): the original is kept once. Sets opts.added, skipped and added_pages."""
     from openpyxl import load_workbook
     from openpyxl.formula.translate import Translator
     wb = load_workbook(path)
@@ -731,8 +745,8 @@ def _append_theirs(path: Path, opts: RunSheetOpts) -> None:
     opts.added_pages = sum(r.pages or 0 for r in new)
     if not new:
         return
-    backup = path.with_name(f"{path.stem} (before DjinnIt){path.suffix}")
-    if not backup.exists():
+    backup = path.with_name(f"{path.stem} {BACKUP}{path.suffix}")
+    if not backup.exists() and not path.with_name(f"{path.stem} {OLD_BACKUP}{path.suffix}").exists():
         shutil.copy2(path, backup)
     typed = [cols.get(k) for k in ("date", "reporter", "pages", "witness_start", "witness_end", "note")]
     used: set[int] = set()

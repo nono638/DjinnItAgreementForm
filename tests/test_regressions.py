@@ -226,7 +226,7 @@ def test_reporter_initials_in_the_settings_file_are_tidied():
     s = Settings()
     s.reporters = {"D. S.": "Dana", "KL": "Kim", " . ": "nobody"}
     s.save()
-    assert Settings.load().reporters == {"ds": "Dana", "kl": "Kim"}
+    assert Settings.load().reporter_names() == {"ds": "Dana", "kl": "Kim"}
 
 
 def test_window_icon_comes_from_the_package():
@@ -302,13 +302,13 @@ def test_auto_version_bump_asks_github(tmp_path, monkeypatch):
     monkeypatch.setattr(bv.subprocess, "run", no_gh)  # without gh: was its installer built here?
     assert not bv.released("1.2.1")
     (tmp_path / "dist" / "installer").mkdir(parents=True)
-    (tmp_path / "dist" / "installer" / "DjinnItAgreementForm-Setup-1.2.1.exe").write_text("")
+    (tmp_path / "dist" / "installer" / "YinItAgreementForm-Setup-1.2.1.exe").write_text("")
     assert bv.released("1.2.1")
 
 
 def test_settings_ok_keeps_speeds_named_otherwise_on_a_rate_sheet(qt):
-    """A speed of the user's own rate sheet, ticked in the Outputs box, has no box in Settings → Invoice:
-    saving the Settings must not untick it."""
+    """A speed of the user's own rate sheet, ticked under Speeds offered in the Order card, has no box in
+    Settings → Invoice: saving the Settings must not untick it."""
     from minute_filler.gui.dialogs import SettingsDialog
     s = pat_settings()
     s.invoice_speeds = ["Regular", "2-Day Rush Plus"]
@@ -366,7 +366,7 @@ def test_generate_asks_about_the_case_as_whose_pages_left_it(make_window, monkey
 
 
 def test_selftest_checks_the_fuzzy_search(tmp_path):
-    """--selftest says whether the Records' Fuzzy and Regex searches, HEIC photos, the look for a newer version
+    """--selftest says whether the Records' Fuzzy and Regex searches, HEIC photos, the look for a newer version,
     printing and The math's Save as PDF work (the release check runs it on the build)."""
     from minute_filler.main import selftest
     assert selftest(str(tmp_path / "st"), []) == 0
@@ -405,3 +405,53 @@ def test_browse_offers_every_kind_of_file_a_folder_takes(qt):
     documents, everything = FILE_FILTER.split(";;")
     assert all(f"*{e}" in documents.split("(")[1] for e in BATCH_EXT) and everything == "All files (*.*)"
     assert {"*.htm", "*.html", "*.gif", "*.heif"} <= set(documents.strip(")").split("(")[1].split())
+
+
+# ------------------------------------------------------------------ 2.0.0 sweep
+def test_the_rate_follows_a_speed_the_invoice_no_longer_offers():
+    """A document says Regular and its rate; the invoice offers Expedited and Daily, so the agreement names
+    Expedite: the rate stayed Regular's $4.30. It follows the speed named ($5.40)."""
+    from minute_filler.merge import merge
+    from minute_filler.models import Extraction, SRC_REGEX
+    s = pat_settings()
+    s.invoice_speeds = ["Expedited", "Daily"]
+    ex = Extraction()
+    ex.add("delivery", "Regular", SRC_REGEX, 0.7)
+    ex.add("rate", s.rate_for("Regular"), SRC_REGEX, 0.8)
+    case = merge([ex], s)
+    assert case.get("delivery") == "Expedite" and case.get("rate") == s.rate_for("Expedite") == "5.40"
+
+
+def test_copies_read_from_a_document_stay_with_nobody_ticked():
+    """"3 copies" read from a document was replaced by the default (1) while no attorney was ticked. Now it
+    stays until someone is ticked; then the firms ticked decide."""
+    from minute_filler.merge import merge, refresh_copies
+    from minute_filler.models import Extraction, SRC_REGEX
+    s = pat_settings()
+    ex = Extraction()
+    ex.add("copies", "3", SRC_REGEX, 0.8)
+    case = merge([ex], s)
+    assert case.get("copies") == "3"
+    case.attorneys = [Attorney(name="Alex B. Counsel", firm="Counsel & Counsel", checked=True)]
+    refresh_copies(case, s)
+    assert case.get("copies") == "1"  # the firms ticked decide once there are some
+    case.attorneys[0].checked = False
+    refresh_copies(case, s)
+    assert case.get("copies") == (s.default_copies or "")  # (a number of the firms ticked isn't kept)
+
+
+def test_a_run_sheet_one_reporters_case_doesnt_need_isnt_reported_missing(tmp_path):
+    """Generate all with the run sheet ticked for another case: a day one reporter wrote said "no run sheet:
+    the Pages field says 0"."""
+    s = pat_settings()
+    s.output_dir = str(tmp_path / "out")
+    s.records_dir = str(tmp_path / "records")
+    path = transcript_pdf(tmp_path / "one.pdf", pages=6, initials=["pr"] * 6)
+    docs, _ = read_docs([str(path)], s)
+    job, = group(docs, s)
+    for a in job.case.attorneys:
+        a.checked = True
+    job.runsheet_unneeded = True  # (as MainWindow._auto_runsheet sets it)
+    assert job.makeable(["agreement", "runsheet"]) == ["agreement"] and job.unneeded("runsheet")
+    fill_jobs([job], s, batch=[job], outputs=["agreement", "runsheet"])
+    assert job.saved and job.error == ""

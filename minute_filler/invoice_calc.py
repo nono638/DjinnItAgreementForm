@@ -12,8 +12,8 @@ For one speed, with N ordering parties (quote):
     total = the sum;  each party pays total / N, rounded up to the cent
 
 An invoice can cover several days (a transcript each). Original and copies are charged on all their pages; the
-index and the judge's index on the pages of the days that get one (see index_days: by default, all of them once any day reaches
-the threshold).
+index and the judge's index on the pages of the days that get one (see index_days: by default, all of them once
+any day reaches the threshold).
 
 When the parties did not all order the same pages (a day ordered by one firm, another by two; see
 invoice.DayOrder), each firm gets its own invoice priced by quote_shares: for each stretch of pages it ordered
@@ -60,7 +60,7 @@ def extra_rate(sp: Speed, *names: str) -> Decimal:
 @dataclass
 class QuoteLine:
     """One line of a Quote: 'Copy', its rate per page, how many, the pages charged and the amount
-    (rate x pages x qty)."""
+    (rate x pages x qty, to the cent; on a firm's share, exact and possibly part of a cent, with qty 1)."""
     label: str
     rate: Decimal
     qty: int        # how many (copies, parties)
@@ -69,6 +69,9 @@ class QuoteLine:
     #                           share, pages split between n firms count 1/n each, so this may be 32.5 (to the
     #                           cent, without trailing zeros)
     shared: bool = False  # a firm's share: some of these pages are split with other firms
+    # a firm's share: the pages it ordered, by how many firms ordered them ((pages, n), n = 1 for those it
+    # ordered alone), for the math spelled out; the amount is split n ways when `shared`
+    parts: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -171,8 +174,9 @@ def quote_shares(shares: list[Share], sp: Speed, include_email: bool = True, ind
                  days: list[int] | None = None) -> Quote:
     """One firm's price for one speed, from the stretches of pages it ordered (see the module docstring):
     the original / n, its own copy and e-mailed copy, the index / n (index_split) or whole, the judge's index
-    / n. The lines show the pages charged, those shared counting 1/n each (65 for 40 pages alone and 50 shared
-    by two). The amount is worked out exactly and rounded up to the cent (Quote.per_party). days: the pages
+    / n. The lines show the pages charged, those shared counting 1/n each (the original of 40 pages alone and
+    50 shared by two: 65 pages), and their parts, the pages by how many firms ordered them ([(40, 1), (50, 2)]).
+    The amount is worked out exactly (Quote.due) and rounded up to the cent (Quote.per_party). days: the pages
     the firm ordered on each day, for the invoice."""
     shares = [x for x in shares if x.pages > 0]
     pages = sum(x.pages for x in shares)
@@ -187,8 +191,12 @@ def quote_shares(shares: list[Share], sp: Speed, include_email: bool = True, ind
             shown = _decimal(count)
             shown = shown.quantize(Decimal(1)) if count.denominator == 1 else shown.quantize(CENT, ROUND_HALF_UP)
             shown = Decimal(format(shown.normalize(), "f"))  # 32.5 pages, not 32.50 (and 40, not 4E+1)
+            by_n: dict[int, int] = {}
+            for x in part:
+                by_n[max(1, x.n)] = by_n.get(max(1, x.n), 0) + x.pages
             q.lines.append(QuoteLine(label, rate, 1, _decimal(amount), shown,
-                                     split and any(x.n > 1 for x in part)))
+                                     split and any(x.n > 1 for x in part),
+                                     [(p, n) for n, p in sorted(by_n.items())]))
 
     line("Original", money(sp.original), shares, True)
     line("Copy", money(sp.copy), shares, False)

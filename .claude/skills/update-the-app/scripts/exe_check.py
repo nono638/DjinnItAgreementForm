@@ -11,8 +11,8 @@ errors in the log; for each day a minute agreement, a MOFR and the run sheet, an
 days (listed under each day) that bills Pat's own 10 of the 20 transcript pages, for one party, and has its
 amounts as fields (and no "Lock fields" button, removed in 1.3.1); one run sheet with the 4 takes of each day;
 and --selftest says the libraries only the window uses are in the build (the Records' Fuzzy and Regex
-searches, HEIC photos, the look for a newer version, printing, The math as a PDF). Exit code 1 if something is
-off.
+searches, HEIC photos, the look for a newer version, printing, The math as a PDF, the moving yin-yang). Exit
+code 1 if something is off.
 """
 import csv
 import json
@@ -39,10 +39,10 @@ def kind(name: str) -> str:
     return "Run sheet" if name.endswith(".xlsx") else name.split(" - ")[0].split(" 20")[0]
 
 
-exe = ROOT / "dist" / "DjinnItAgreementForm" / "DjinnItAgreementForm.exe"
+exe = ROOT / "dist" / "YinItAgreementForm" / "YinItAgreementForm.exe"
 if not exe.exists():
     sys.exit(f"PROBLEM: {exe} is not there - build it first (PyInstaller)")
-run = Path(tempfile.mkdtemp(prefix="djinnit-exe-check-"))
+run = Path(tempfile.mkdtemp(prefix="yinit-exe-check-"))
 src = run / "in"
 src.mkdir()
 transcript(src / "Transcript 6-3-2026 Roe v Poe.pdf")  # two reporters, a witness, a word index at the end
@@ -51,7 +51,7 @@ transcript(src / "Transcript 6-4-2026 Roe v Poe.pdf", day="June 4, 2026")  # the
                                "Smith v Jones, Index No. 712222/2024, 5/22/2026, Judge Lopez. About 40 pages.")
 # who the user is: the transcripts were written by two reporters, and only the user's pages are billed (without
 # the initials, the invoice would be held until Whose pages... says)
-settings = run / "appdata" / "DjinnItAgreementForm" / "settings.json"
+settings = run / "appdata" / "YinItAgreementForm" / "settings.json"
 settings.parent.mkdir(parents=True)
 settings.write_text(json.dumps({"profile": {"name": "Pat Reporter", "initials": "P.R."}}), encoding="utf-8")
 env = dict(os.environ, APPDATA=str(run / "appdata"), USERPROFILE=str(run / "home"), HOME=str(run / "home"))
@@ -79,9 +79,9 @@ if len(invoices) != 1:
 else:
     with pymupdf.open(run / "out" / invoices[0]) as doc:
         widgets = {w.field_name for w in doc[0].widgets()}
-    if not {"amount Regular", "amount Expedite"} <= widgets or "DjinnIt lock" in widgets:
+    if not {"amount Regular", "amount Expedite"} <= widgets or "DjinnIt lock" in widgets:  # (fill.LOCK_BUTTON)
         problems.append("the invoice should have its amounts as fields, and no Lock fields button")
-invoices_csv = run / "home" / "Documents" / "DjinnIt Records" / "invoices.csv"
+invoices_csv = run / "home" / "Documents" / "YinIt Records" / "invoices.csv"
 rows = []
 if invoices_csv.exists():
     with open(invoices_csv, encoding="utf-8-sig", newline="") as f:
@@ -95,7 +95,7 @@ else:
             or row.get("Date(s) of proceeding") != "6/3/2026, 6/4/2026":
         problems.append("the invoice should bill Pat's 10 of both days' 20 transcript pages (not the word index), "
                         "for one party")
-sheets = list((run / "home" / "Documents" / "DjinnIt Run Sheets").glob("*.xlsx"))
+sheets = list((run / "home" / "Documents" / "YinIt Run Sheets").glob("*.xlsx"))
 if sheets:
     ws = load_workbook(sheets[0])["Run Sheet"]
     takes = [(ws.cell(r, 3).value, ws.cell(r, 6).value) for r in range(5, ws.max_row + 1)]
@@ -116,12 +116,13 @@ for key, what, lib in (("fuzzy_search", "the Records' Fuzzy search", "rapidfuzz"
                        ("heic_photos", "reading iPhone HEIC photos", "pillow-heif"),
                        ("update_check", "the look for a newer version", "ssl"),
                        ("printing", "Print…", "PySide6.QtPrintSupport"),
-                       ("math_pdf", "Save as PDF in The math", "pymupdf (Story)")):
+                       ("math_pdf", "Save as PDF in The math", "pymupdf (Story)"),
+                       ("moving_picture", "the swirling yin-yang", "Qt's imageformats plugin (qwebp)")):
     got = st.get(key, "no selftest.json" if not st else "missing from selftest.json")
     print(f"  {key.replace('_', ' ')}:", got)
     if got is not True:
         problems.append(f"{what} does not work in the build ({got}): is {lib} bundled?")
-log_file = run / "appdata" / "DjinnItAgreementForm" / "logs" / "app.log"
+log_file = run / "appdata" / "YinItAgreementForm" / "logs" / "app.log"
 log = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
 started = [l for l in log.splitlines() if "started: version" in l]
 print("  log:", started[-1][20:80] if started else "(no start line)", "| errors:", log.count("ERROR"))

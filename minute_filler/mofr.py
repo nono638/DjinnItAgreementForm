@@ -53,7 +53,7 @@ def build_values(case: CaseInfo, s: Settings, pages: str = "") -> dict[str, str 
 
 def fill_mofr(case: CaseInfo, s: Settings, out_dir: Path, dated: bool = False, pages: str = "") -> Path:
     """Writes one filled MOFR into out_dir and returns its path. pages: the transcript's page count,
-    when known (else the estimated pages)."""
+    when known (else the estimated pages). dated: add the date of the minutes to the file name."""
     v = build_values(case, s, pages)
     doc = pymupdf.open(mofr_path())
     page = doc[0]

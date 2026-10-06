@@ -12,11 +12,11 @@ version_info = VSVersionInfo(
     kids=[
         StringFileInfo([StringTable("040904B0", [
             StringStruct("CompanyName", "Noah Collin"),
-            StringStruct("FileDescription", "DjinnItAgreementForm"),
+            StringStruct("FileDescription", "YinItAgreementForm"),
             StringStruct("FileVersion", VERSION),
-            StringStruct("InternalName", "DjinnItAgreementForm"),
-            StringStruct("OriginalFilename", "DjinnItAgreementForm.exe"),
-            StringStruct("ProductName", "DjinnItAgreementForm"),
+            StringStruct("InternalName", "YinItAgreementForm"),
+            StringStruct("OriginalFilename", "YinItAgreementForm.exe"),
+            StringStruct("ProductName", "YinItAgreementForm"),
             StringStruct("ProductVersion", VERSION),
             StringStruct("LegalCopyright", "Noah Collin"),
         ])]),
@@ -32,7 +32,8 @@ a = Analysis(
     datas=[
         ("minute_filler/forms/*.pdf", "minute_filler/forms"),
         ("minute_filler/assets/app.ico", "minute_filler/assets"),
-        ("minute_filler/assets/djinn_*.jpg", "minute_filler/assets"),
+        ("minute_filler/assets/yin_*.jpg", "minute_filler/assets"),
+        ("minute_filler/assets/yin_*.webp", "minute_filler/assets"),
         ("minute_filler/rate_sheets/*.csv", "minute_filler/rate_sheets"),
         ("minute_filler/templates/*.xlsx", "minute_filler/templates"),
     ],
@@ -45,10 +46,10 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
-    name="DjinnItAgreementForm",
+    name="YinItAgreementForm",
     icon="minute_filler/assets/app.ico",
     version=version_info,
     console=False,
     upx=False,
 )
-coll = COLLECT(exe, a.binaries, a.datas, name="DjinnItAgreementForm", upx=False)
+coll = COLLECT(exe, a.binaries, a.datas, name="YinItAgreementForm", upx=False)

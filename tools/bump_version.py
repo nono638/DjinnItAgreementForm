@@ -59,7 +59,8 @@ def released(version: str) -> bool:
             return False
     except (OSError, subprocess.TimeoutExpired):
         pass
-    return (ROOT / "dist" / "installer" / f"DjinnItAgreementForm-Setup-{version}.exe").exists()
+    return any((ROOT / "dist" / "installer" / f"{name}-Setup-{version}.exe").exists()
+               for name in ("YinItAgreementForm", "DjinnItAgreementForm"))  # (the app's name before 2.0)
 
 
 def main(argv: list[str]) -> None:

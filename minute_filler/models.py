@@ -30,11 +30,13 @@ FIELD_LABELS = {
 # Fields the user is asked about when they are blank at fill time.
 REQUIRED_KEYS = ["case_name", "index_no", "dates", "judge"]
 
+# The form's proceeding checkboxes ("Other" is the proc_other field).
 PROC_TYPES = ["Arraignment", "Application", "Hearing", "Plea", "Trial", "Sentence"]
 DELIVERY_TYPES = ["Regular", "Expedited", "Daily", "Other"]
 
 # Where a value came from, most to least trustworthy for display purposes.
 SRC_USER, SRC_REGEX, SRC_AI, SRC_DERIVED, SRC_DEFAULT = "you", "regex", "AI", "derived", "default"
+SRC_PDF = "PDF"  # counted from the transcript PDF itself (its pages), not read from its words
 
 
 @dataclass
@@ -50,7 +52,7 @@ class Candidate:
 @dataclass
 class Attorney:
     """An attorney or firm found in the inputs. Every ticked (checked) one orders the minutes and gets
-    their own agreement and invoice."""
+    their own agreement and invoice (one invoice per key(); placeholders get none, see is_placeholder)."""
     name: str = ""
     firm: str = ""
     address: str = ""  # multi-line
@@ -74,6 +76,7 @@ class Attorney:
         )
 
     def to_dict(self) -> dict:
+        """Every field by name, ready for JSON."""
         return asdict(self)
 
 
@@ -128,7 +131,8 @@ class FieldState:
 
 @dataclass
 class CaseInfo:
-    """Merged, user-editable state for one job."""
+    """Merged, user-editable state for one job: a FieldState per FIELD_KEYS field, the proceeding types ticked,
+    the attorneys (ticked or not) and the extractors' notes."""
     fields: dict[str, FieldState] = field(default_factory=lambda: {k: FieldState() for k in FIELD_KEYS})
     proc_types: set[str] = field(default_factory=set)
     attorneys: list[Attorney] = field(default_factory=list)
@@ -158,6 +162,11 @@ class CaseInfo:
                 seen.add(a.key())
                 out.append(a)
         return out or [None]
+
+    def ordering_firms(self) -> int:
+        """How many firms ordered: the ticked attorneys who get an invoice (invoice_orderers), two attorneys of
+        one firm counted once; 0 when none is ticked."""
+        return len({(a.firm.strip().lower() or a.key()) for a in self.invoice_orderers() if a is not None})
 
     def missing_required(self) -> list[str]:
         """The REQUIRED_KEYS that are still blank."""

@@ -55,6 +55,7 @@ def test_bad_sheet_reported(tmp_path):
 
 
 def test_settings_carry_over_from_old_app_name(tmp_path, monkeypatch):
+    """Settings and rate sheets under the app's first name (MinuteAgreementFiller) move to YinItAgreementForm."""
     import json
     from minute_filler.settings import settings_dir
     monkeypatch.setenv("APPDATA", str(tmp_path))
@@ -64,4 +65,4 @@ def test_settings_carry_over_from_old_app_name(tmp_path, monkeypatch):
     (old / "Rate Sheets" / "Mine.csv").write_text("Rate,Original\nRegular,$9.99\n")
     assert Settings.load().profile.name == "Pat Reporter"
     assert (settings_dir() / "Rate Sheets" / "Mine.csv").exists()
-    assert settings_dir().name == "DjinnItAgreementForm"
+    assert settings_dir().name == "YinItAgreementForm"

@@ -35,6 +35,8 @@ def s(tmp_path):
 
 
 def job_of(tmp_path, s, pages=100, initials=None, attorneys=None):
+    """The one job of a transcript of Roe v. X.Y. (6/3/2026), with Alex and Dana ticked unless `attorneys` says
+    otherwise."""
     path = transcript_pdf(tmp_path / "Roe 6-3-2026.pdf", pages, initials=initials)
     docs, _ = read_docs([str(path)], s)
     job, = group(docs, s)
@@ -85,6 +87,7 @@ def window(tmp_path, monkeypatch, make_window):
 
 
 def wait(win, until, seconds=20):
+    """Runs the event loop until `until()` holds and the window has no work left, or `seconds` pass."""
     from PySide6 import QtWidgets
     end = time.time() + seconds
     while time.time() < end and not (until() and not win.work):
@@ -179,11 +182,13 @@ def test_a_typed_page_count_is_marked(tmp_path, s):
 
 
 def rows_of(window):
+    """The text of every cell of the "Who ordered what" card, row by row."""
     t = window.orders
     return [[t.item(r, c).text() for c in range(t.columnCount())] for r in range(t.rowCount())]
 
 
 def one_day(window, tmp_path, pages=30, initials=None, attorneys=None, name="a.pdf"):
+    """Drops one transcript on the window, ticks Alex and Dana (or `attorneys`) and returns its job."""
     window.add_files([str(transcript_pdf(tmp_path / name, pages=pages, initials=initials))])
     wait(window, lambda: window.cur.docs)
     window.cur.case.attorneys = [alex(), dana()] if attorneys is None else attorneys
@@ -227,6 +232,7 @@ def test_an_excerpt_of_none_of_my_pages_says_it_gets_no_invoice(window, tmp_path
 
 
 def test_a_day_waiting_for_whose_pages_opens_whose_pages(window, tmp_path, monkeypatch):
+    """The card's button and a click on its row both open Whose pages..., not the Excerpts window."""
     import minute_filler.gui.main_window as mw
     one_day(window, tmp_path, pages=8, initials=["ds"] * 8, attorneys=[])  # nobody ticked, none of it Pat's
     rows = rows_of(window)
@@ -291,6 +297,45 @@ def test_generate_all_warns_about_a_case_with_a_day_nobody_ticked(window, tmp_pa
     window.fill_all_jobs()
     assert shown and "nobody is ticked on 6/4/2026" in shown[0] and "no invoice for this case" in shown[0]
     assert not started and window.cur is second  # went back, to the day to tick
+
+
+def test_go_back_when_the_day_was_ticked_meanwhile(window, tmp_path, monkeypatch):
+    """The day nobody was ticked on got its attorney while the box was open (a document read again): Go back
+    raised StopIteration looking for it."""
+    from PySide6 import QtWidgets
+    import minute_filler.gui.main_window as mw
+    first, second = two_days(window, tmp_path)
+    second.case.attorneys = [Attorney(name="Alex B. Counsel", firm="Counsel & Counsel", checked=False)]
+
+    def meanwhile(box):
+        second.case.attorneys[0].checked = True
+        return 0
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", meanwhile)  # (then Go back)
+    monkeypatch.setattr(mw.MainWindow, "_batch_running", lambda self: False)
+    started = []
+    monkeypatch.setattr(mw.Runner, "start", lambda self, *a, **k: started.append(a))
+    window.fill_all_jobs()
+    assert not started and window.cur is first  # stayed where it was
+
+
+def test_a_batch_preview_that_cant_be_shown_asks_to_save_without_it(window, tmp_path, monkeypatch):
+    """A preview of Generate all that couldn't be drawn raised out of the slot: nothing said, nothing saved."""
+    from PySide6 import QtWidgets
+    import minute_filler.gui.main_window as mw
+    from minute_filler.gui import preview
+    first, second = two_days(window, tmp_path)
+    window.s.preview_before_saving = True
+
+    def broken(*a, **k):
+        raise RuntimeError("a page that can't be drawn")
+    monkeypatch.setattr(preview, "PreviewDialog", broken)
+    asked = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        lambda *a, **k: asked.append(a[2]) or QtWidgets.QMessageBox.No)
+    monkeypatch.setattr(mw.Runner, "start", run_now)
+    window._preview_batch([first, second], {id(first): first, id(second): second}, ["invoice"],
+                          lambda shown: asked.append("saved"))
+    assert asked and "Save the files without it?" in asked[0] and "saved" not in asked
 
 
 def test_after_go_on_anyway_a_held_day_is_not_a_failure(window, tmp_path, monkeypatch):

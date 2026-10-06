@@ -2,7 +2,8 @@
 changed) and the history of everything made. Each table has many columns (INVOICE_COLS, ACTIVITY_COLS); the
 user picks which are shown (Columns..., or a right-click on the headings), and the choice is kept in
 Settings.records_columns. Records can be deleted to the trash (restored for 30 days; the files are not
-touched); the Trash button shows what is in it.
+touched); the Trash button shows what is in it. An invoice made in another reporter's name (Whose pages...,
+numbered apart: "DS-2026-1") is listed, but left out of the totals and the summary: that money is theirs.
 
 Along the bottom: the exports, Summary... (a month or a year summed up, SummaryDialog), Backups... (the daily
 copies of the records, BackupsDialog) and Undo (Ctrl+Z: the last change made here - paid, void, amounts, notes,
@@ -92,6 +93,8 @@ INVOICE_COLS = [
     Col("my_pages", "My pages", lambda i: i.my_pages or "", True, "num"),
     Col("transcript_pages", "Transcript pages", lambda i: i.transcript_pages or "", True, "num"),
     Col("reporters", "Reporters", lambda i: i.reporters),
+    # made in another reporter's name (Whose pages...): theirs, so left out of the totals and By firm / By month
+    Col("for_reporter", "For reporter", lambda i: i.reporter.upper(), True),
     Col("excerpt", "Excerpt", lambda i: i.excerpt or ("Whole" if i.transcript_pages else ""), True),
     Col("parties", "Parties", lambda i: i.parties, False, "num"),
     Col("speeds", "Speeds offered", lambda i: ", ".join(i.amounts), True),
@@ -196,7 +199,8 @@ def _table(cols: list[str]) -> QTableWidget:
 
 
 class PaidDialog(QDialog):
-    """Asks which speed was paid for, how much and when. The amount starts at the price of the chosen speed."""
+    """Asks which speed was paid for, how much and when. The amount starts at the price of the chosen speed. OK
+    is refused while the amount is blank or not a number (as in AmountsDialog)."""
 
     def __init__(self, inv: Invoice, parent=None):
         super().__init__(parent)
@@ -217,11 +221,25 @@ class PaidDialog(QDialog):
         f.addRow("Paid for:", self.speed)
         f.addRow("Amount received:", self.amount)
         f.addRow("Date paid:", self.when)
+        self.error = QLabel("")
+        self.error.setObjectName("problem")
+        self.error.setWordWrap(True)
+        self.error.setVisible(False)
+        f.addRow(self.error)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         f.addRow(bb)
         self._speed_changed()
+
+    def accept(self):
+        """Closes with OK only when the amount received is an amount (see rates.parse_amount): else "sixty
+        three" or "-5" would be recorded as paid ($0.00, or a payment taken back)."""
+        why = "" if parse_amount(self.amount.text()) is not None else "Type the amount received, such as 63.00."
+        self.error.setText(why)
+        self.error.setVisible(bool(why))
+        if not why:
+            super().accept()
 
     def _speed_changed(self, _=None):
         """Puts the chosen speed's price in the amount box."""
@@ -230,7 +248,8 @@ class PaidDialog(QDialog):
     def values(self) -> tuple[str, str, str]:
         """(speed, amount, date paid), e.g. ("Expedite", "125.00", "2026-09-30"), as Ledger.mark_paid takes them."""
         d = self.when.date()
-        return self.speed.currentData() or "", str(money(self.amount.text())), \
+        amount = parse_amount(self.amount.text())
+        return self.speed.currentData() or "", str(amount if amount is not None else money(self.amount.text())), \
             date(d.year(), d.month(), d.day()).isoformat()
 
 
@@ -284,7 +303,8 @@ class AmountsDialog(QDialog):
 
 class SummaryDialog(QDialog):
     """Summary...: a period summed up (invoices, pages, billed, paid, owed, payments received, the firms billed
-    most), for this or last month, this or last year, or all time. Copy puts it on the clipboard as text."""
+    most), for this or last month, this or last year, or all time. Copy puts it on the clipboard as text.
+    Invoices made in another reporter's name are left out (records.period_stats)."""
 
     def __init__(self, invoices: list[Invoice], parent=None, today: date | None = None):
         """invoices: every invoice not in the trash; today: the day the periods are counted from."""
@@ -403,7 +423,8 @@ class BackupsDialog(QDialog):
         self.refill()
 
     def restore(self, ask: bool = True) -> None:
-        """Puts the records back as they were in the copy chosen, after asking."""
+        """Puts the records back as they were in the copy chosen, after asking (unless ask is False). Refused
+        while files are being made (see busy)."""
         item = self.list.currentItem()
         if item is None:
             return
@@ -1056,7 +1077,8 @@ class RecordsWindow(QDialog):
 
     # ------------------------------------------------------------ summary, backups, print, open again
     def show_summary(self) -> None:
-        """Summary...: a month or a year summed up (SummaryDialog), whatever the filters show."""
+        """Summary...: a month or a year summed up (SummaryDialog), from every invoice not in the trash, whatever
+        the filters are."""
         try:
             invoices = self.ledger.invoices()
         except Exception as e:
@@ -1130,16 +1152,23 @@ class RecordsWindow(QDialog):
         """Voids the invoice after asking: it stays listed but leaves the totals."""
         if QMessageBox.question(self, "Void invoice", f"Void invoice {inv.invoice_no}? It stays in the list but is "
                                 "no longer counted in the totals.") == QMessageBox.Yes:
-            before = self.ledger.invoice(inv.invoice_no) or inv
-            self.ledger.void(inv.invoice_no)
-            self._undoable(f"invoice {inv.invoice_no} voided", before)
-            self.show_invoices()
+            self._change_invoice(inv, f"invoice {inv.invoice_no} voided", lambda: self.ledger.void(inv.invoice_no))
 
     def _unvoid(self, inv: Invoice) -> None:
         """Restore (not void): the invoice counts again, as unpaid."""
-        before = self.ledger.invoice(inv.invoice_no) or inv
-        self.ledger.mark_unpaid(inv.invoice_no)
-        self._undoable(f"invoice {inv.invoice_no} restored from void", before)
+        self._change_invoice(inv, f"invoice {inv.invoice_no} restored from void",
+                             lambda: self.ledger.mark_unpaid(inv.invoice_no))
+
+    def _change_invoice(self, inv: Invoice, what: str, fn) -> None:
+        """Makes a change to one invoice that Undo can take back (what: as the Undo button says it); says so
+        when the records can't be changed (locked, or the disk is full) rather than failing in silence."""
+        try:
+            before = self.ledger.invoice(inv.invoice_no) or inv
+            fn()
+            self._undoable(what, before)
+        except Exception as e:
+            log_error("could not change an invoice", e)
+            QMessageBox.warning(self, "Could not save", f"{type(e).__name__}: {e}")
         self.show_invoices()
 
     def _notes(self, inv: Invoice) -> None:
@@ -1147,10 +1176,8 @@ class RecordsWindow(QDialog):
         from PySide6.QtWidgets import QInputDialog
         text, ok = QInputDialog.getText(self, f"Invoice {inv.invoice_no}", "Notes:", text=inv.notes)
         if ok:
-            before = self.ledger.invoice(inv.invoice_no) or inv
-            self.ledger.set_notes(inv.invoice_no, text)
-            self._undoable(f"the notes of invoice {inv.invoice_no} changed", before)
-            self.show_invoices()
+            self._change_invoice(inv, f"the notes of invoice {inv.invoice_no} changed",
+                                 lambda: self.ledger.set_notes(inv.invoice_no, text))
 
     # ------------------------------------------------------------ exports
     def _filter_title(self) -> str:

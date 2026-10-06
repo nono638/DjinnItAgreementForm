@@ -68,6 +68,7 @@ def test_fill_text():
 
 
 def test_conditions(s):
+    """60 pages, one party, one day, written by two reporters: only the rows whose condition holds are shown."""
     case = make_case(ROE)
     s.invoice_texts = [{"where": "amounts", "when": w, "text": w} for w in
                        ("email", "no_email", "index", "no_index", "shared", "one_day", "whole")]

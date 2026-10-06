@@ -1,12 +1,14 @@
-# DjinnItAgreementForm
+# YinItAgreementForm
 
 A Windows app for New York court reporters. It fills in the UCS **Court Reporter Minute Agreement Form** (Private Party Transactions) and the **Minute Order Form/Receipt (MOFR)** for you, makes **invoices** from transcripts, keeps a trial's **run sheet** (which reporter wrote which pages), and keeps a record of everything it made, with a dashboard of what you billed and what was paid.
 
 Drop in a transcript, invoice, or photo of a court document, or paste an e-mail. The app finds the court, part, judge, case name, index number, dates, proceeding type and attorneys, shows everything for review, and saves a filled PDF.
 
-**[Website](https://nono638.github.io/DjinnItAgreementForm/)  ·  [Download the installer](../../releases/latest)**
+**[Website](https://nono638.github.io/YinItAgreementForm/)  ·  [Download the installer](../../releases/latest)**
 
-![DjinnItAgreementForm](docs/screenshot.png)
+*Formerly DjinnItAgreementForm. Updating from it keeps your settings, rate sheets, records and run sheets.*
+
+![YinItAgreementForm](docs/screenshot.png)
 
 - **Works offline, and nothing leaves your computer.** Photos are read by the text recognition built into Windows. An AI helper is optional and runs locally too. The one time the app goes online is to ask GitHub, once a day, whether there is a newer version; nothing about you or your cases is sent, and Settings → Options turns it off.
 - **Asks when unsure.** Guesses are highlighted. When there are several candidates (two dates, several attorneys), you pick from a list. It asks about anything important that's missing before filling.
@@ -31,7 +33,7 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 
 ## Install
 
-1. Download `DjinnItAgreementForm-Setup-x.y.z.exe` from the [Releases](../../releases) page.
+1. Download `YinItAgreementForm-Setup-x.y.z.exe` from the [Releases](../../releases) page.
 2. Run it. **No administrator rights are needed**; it installs just for you.
    - The installer isn't code-signed yet, so Windows may show "Windows protected your PC". Click **More info → Run anyway**.
 3. On first launch, enter your details (name, address, phone, email). You can change them later in **Settings**.
@@ -56,7 +58,7 @@ Drop in a transcript, invoice, or photo of a court document, or paste an e-mail.
 
 The first time the app starts it asks for your name, address, rate sheet and where to save files; all of it, and much more, is in **Settings**. **File → Open recent** lists the last 10 documents and folders you opened. **File → Export settings** saves your details, options and rate sheets as one file for another computer or a colleague (your signature picture and your records are not in it). It first asks whether to **include your personal details**: your name, address and contact details, the payment text of your invoices, other reporters' names and your folders. Include them for another computer of your own; leave them out for a colleague, who then keeps their own and gets your options, invoice wording and rate sheets, and **File → Import settings** reads it there; the settings you had are kept as *settings before import.json* in the app's settings folder.
 
-**Help → How to use** (F1) sums this up in the app: what it reads, what it makes, the steps, tips and the keyboard shortcuts, with a link to the [website](https://nono638.github.io/DjinnItAgreementForm/).
+**Help → How to use** (F1) sums this up in the app: what it reads, what it makes, the steps, tips and the keyboard shortcuts, with a link to the [website](https://nono638.github.io/YinItAgreementForm/).
 
 ## Invoices and records
 
@@ -107,11 +109,11 @@ Each party pays its share, rounded up to the cent so the shares cover the total:
 
 **Summary.** **Summary…** sums up this or last month, this or last year, or all time: invoices made, pages billed, billed, paid, still owed, payments received in the period, the average per page and per invoice, and the firms billed most. **Copy** puts it on the clipboard. The first time you open Records in a month, a box says what last month came to ("Last month (September 2026) you made $870.00 with 243 pages (5 invoices)."), and the first time in a year, last year too. Tick *Don't show me monthly or annual recaps anymore* in it to stop them; *Recaps* in Settings → Options turns them back on.
 
-**Backups.** Each day you open the app, a copy of the records is saved in *Documents\DjinnIt Records\Backups* (the last 10 days' copies are kept, and the last 5 you made yourself or that were made before a restore). **Backups…** lists them, makes one now, and **restores** one: the records go back to what they were that day, after a copy of how they are now is made, so you can come back. Only the records are in a backup, not the PDF files. Invoice numbers given since stay taken.
+**Backups.** Each day you open the app, a copy of the records is saved in *Documents\YinIt Records\Backups* (the last 10 days' copies are kept, and the last 5 you made yourself or that were made before a restore). **Backups…** lists them, makes one now, and **restores** one: the records go back to what they were that day, after a copy of how they are now is made, so you can come back. Only the records are in a backup, not the PDF files. Invoice numbers given since stay taken.
 
 **Deleting.** Select records and press **Delete** (or right-click → *Delete*): they go to the **🗑 Trash** for 30 days, where you can restore them, and are then deleted for good. Only the records are deleted, never the PDF files; an invoice's number is never given to another invoice.
 
-The records live in `%APPDATA%\DjinnItAgreementForm\records.db`, and (except what's in the trash) are copied to `invoices.csv` and `activity.csv` in *Documents\DjinnIt Records* after every change, so you can always open them in Excel. Buttons export an HTML report, an Excel workbook (with *By firm* and *By month* sheets) or CSV files.
+The records live in `%APPDATA%\YinItAgreementForm\records.db`, and (except what's in the trash) are copied to `invoices.csv` and `activity.csv` in *Documents\YinIt Records* after every change, so you can always open them in Excel. Buttons export an HTML report, an Excel workbook (with *By firm* and *By month* sheets) or CSV files.
 
 Prefer a spreadsheet? **File → Save the invoice spreadsheet template** gives you an Excel/Google Sheets workbook that prices invoices the same way when every party orders every page: one original, index and judge's index split between the parties, a copy and an e-mailed copy for each, each share rounded up to the cent (it has no excerpts). Fill in *Setup* once, then *Job* for each invoice, and print the *Invoice* tab.
 
@@ -119,7 +121,7 @@ Prefer a spreadsheet? **File → Save the invoice spreadsheet template** gives y
 
 The Minute Order Form/Receipt gets the reporter's parts only: county, Civil/Criminal (*Case* in the MOFR column of the Outputs box), title, your name and location, index number, part, judge, dates, total copies, the type of order and the page count. The judge's, counsel's, clerk's and auditor's sections are left blank. On a civil form the printed "PEOPLE V" is covered, so the full caption fits.
 
-The djinn in the drop zone shows what's happening: working while documents are read, smiling when the form is ready, and stumped when something required is missing. If you'd rather not see him, turn him off in Settings → Options.
+The yin-yang in the drop zone shows what's happening: it swirls while documents are read, settles when the form is ready, and cracks when something required is missing. If you'd rather not see it, turn it off in Settings → Options.
 
 ## Run sheets
 
@@ -133,9 +135,9 @@ When several reporters share a trial, each one writes their initials at the foot
 - **Title pages alone** show as half a take in *Day's Take* (Note: *title page only*), as on a hand-kept run sheet. The *By Reporter* totals don't count them as a take, but do count their pages.
 - The weekday, take counts and page numbers are formulas (the *Don't write here* columns; the first page of a transcript is written as a number), so rows you type in or correct are counted too. Filter the Reporter column to see one reporter's rows; the total of the pages shown is at the top. The **By Reporter** sheet totals each reporter's takes and pages.
 
-**One run sheet per trial.** Before adding, the app looks for the case's run sheet in the run sheets folder (*Documents\DjinnIt Run Sheets*, Settings → Options → Folders) and next to the transcript. It's the case's when it has the same **index number**, or the same **case name**: a trial can have several index numbers that are billed together. It then asks whether to add the takes to it or start a new one (or, if you prefer, always adds or always starts a new one: *If one exists* in the Run sheet column of the Outputs box). Takes already on the run sheet are not added twice, and an unchanged run sheet isn't saved again. New takes go in date and page order; rows already there keep their place, and what you typed on them (notes, formulas, extra columns) is kept. If the run sheet is open in Excel, nothing is made until you close it, so trying again never makes a second invoice.
+**One run sheet per trial.** Before adding, the app looks for the case's run sheet in the run sheets folder (*Documents\YinIt Run Sheets*, Settings → Options → Folders) and next to the transcript. It's the case's when it has the same **index number**, or the same **case name**: a trial can have several index numbers that are billed together. It then asks whether to add the takes to it or start a new one (or, if you prefer, always adds or always starts a new one: *If one exists* in the Run sheet column of the Outputs box). Takes already on the run sheet are not added twice, and an unchanged run sheet isn't saved again. New takes go in date and page order; rows already there keep their place, and what you typed on them (notes, formulas, extra columns) is kept. If the run sheet is open in Excel, nothing is made until you close it, so trying again never makes a second invoice.
 
-A run sheet made elsewhere, such as one downloaded from Google Sheets as .xlsx, can be added to as well. It needs Date, Reporter and Pages columns. New rows go at its end (or on a row you typed in ahead for that day) with its own formulas copied down, and a copy of the file is kept first ("… (before DjinnIt).xlsx").
+A run sheet made elsewhere, such as one downloaded from Google Sheets as .xlsx, can be added to as well. It needs Date, Reporter and Pages columns. New rows go at its end (or on a row you typed in ahead for that day) with its own formulas copied down, and a copy of the file is kept first ("… (before YinIt).xlsx").
 
 ## Batches
 
@@ -154,13 +156,13 @@ The jobs appear in a list on the left. Click one to check or correct it in the u
 Batches are read with the built-in rules and Windows' text recognition only; the AI helper is not used, as it would take most of a minute per document.
 
 The same can be done without the window:
-`DjinnItAgreementForm.exe --batch <output folder> [--outputs agreement,mofr,invoice,runsheet] <files or folders…>` makes the outputs (those ticked in the window, unless `--outputs` says otherwise) into the output folder, whatever folders Settings give each kind (run sheets still go to theirs), and writes a `batch.json` report. With nobody to ask, no invoice is made for a transcript several reporters wrote whose pages to bill can't be told (pages with nobody's initials at the start, or none with yours): `batch.json` says why. Likewise, takes are added to a run sheet only when it has the same index number (or, with Settings → Run sheet set to always add, the same case name).
+`YinItAgreementForm.exe --batch <output folder> [--outputs agreement,mofr,invoice,runsheet] <files or folders…>` makes the outputs (those ticked in the window, unless `--outputs` says otherwise) into the output folder, whatever folders Settings give each kind (run sheets still go to theirs), and writes a `batch.json` report. With nobody to ask, no invoice is made for a transcript several reporters wrote whose pages to bill can't be told (pages with nobody's initials at the start, or none with yours): `batch.json` says why. Likewise, takes are added to a run sheet only when it has the same index number (or, with Settings → Run sheet set to always add, the same case name).
 
 Files this app made (agreements, MOFRs, invoices) are recognised and skipped when a folder is read again, so its output can live next to your documents.
 
 ## Rate sheets
 
-Rates come from small CSV files you can edit in Excel. Open their folder with **File → Open rate sheets folder**; it's `%APPDATA%\DjinnItAgreementForm\Rate Sheets`, or any folder you choose in Settings.
+Rates come from small CSV files you can edit in Excel. Open their folder with **File → Open rate sheets folder**; it's `%APPDATA%\YinItAgreementForm\Rate Sheets`, or any folder you choose in Settings.
 
 To add one (for example city rates):
 1. Copy `Rate Sheet TEMPLATE.csv`.
@@ -200,7 +202,7 @@ If photos come out blank, Windows' OCR language pack is missing. Install it from
 
 ## If something goes wrong
 
-The program keeps a small log at `%APPDATA%\DjinnItAgreementForm\logs\app.log` (about 3 MB at most). It records the program and Windows versions, which kind of file was read or failed, each form filled, and any crash with where it happened.
+The program keeps a small log at `%APPDATA%\YinItAgreementForm\logs\app.log` (about 3 MB at most). It records the program and Windows versions, which kind of file was read or failed, each form filled, and any crash with where it happened.
 
 **It never records what the documents say.** File names, e-mail addresses, index numbers, phone numbers and case names are left out, and nothing is sent anywhere.
 
@@ -208,7 +210,7 @@ The program keeps a small log at `%APPDATA%\DjinnItAgreementForm\logs\app.log` (
 - **Help → Open the log folder** opens the folder, if you would rather attach the file.
 - **Help → Send feedback…** starts an e-mail with the version in the subject; paste the details into it.
 
-**Help → How to use** (F1) and the [website](https://nono638.github.io/DjinnItAgreementForm/) explain each feature.
+**Help → How to use** (F1) and the [website](https://nono638.github.io/YinItAgreementForm/) explain each feature.
 
 ## Building from source
 
@@ -218,18 +220,18 @@ Requires Python 3.12 on Windows.
 setup_env.bat           :: create .venv and install requirements
 run.bat                 :: run from source
 .venv\Scripts\python -m pytest
-build_exe.bat           :: dist\DjinnItAgreementForm\DjinnItAgreementForm.exe
+build_exe.bat           :: dist\YinItAgreementForm\YinItAgreementForm.exe
 build_installer.bat     :: tests + exe + installer (needs Inno Setup 6) -> dist\installer\
 ```
 
 **Release checklist:**
 1. Run `build_installer.bat`. It runs the tests, then raises the version by one patch step (1.0.1 → 1.0.2) if that version was already released on GitHub (or, without the `gh` tool, already built). The number lives only in `minute_filler/__init__.py`.
    - For a bigger step, run `python tools/bump_version.py minor` (or `major`, or an exact number such as `1.4.0`) first. `python tools/bump_version.py` alone shows the current version.
-2. Upload `dist\installer\DjinnItAgreementForm-Setup-x.y.z.exe` to a GitHub release.
+2. Upload `dist\installer\YinItAgreementForm-Setup-x.y.z.exe` to a GitHub release.
 
 With Claude Code, `/update-the-app` runs the whole cycle: a bug sweep, a docstrings review, commit and push, the installer, the GitHub release, the website and these notes (`.claude/skills/update-the-app/`).
 
-Never change the `AppId` in `installer/DjinnItAgreementForm.iss`; Windows uses it to recognise upgrades.
+Never change the `AppId` in `installer/YinItAgreementForm.iss`; Windows uses it to recognise upgrades.
 
 **Testing with real documents:** put them in `samples_internal/`. That folder is git-ignored and never published. Every file there is run through extraction and form filling by `tests/test_private_samples.py`, and expected values can be listed in `samples_internal/expected.json`. The public tests use the fictional documents in `tests/samples/`.
 
@@ -263,4 +265,4 @@ If this saves you time, you can [buy me a coffee ☕](https://buymeacoffee.com/n
 
 [GNU AGPL-3.0](LICENSE). You're free to use, share and modify this program. If you distribute a modified version, you must share its source under the same license.
 
-Built with Qt for Python (LGPL-3.0), PyMuPDF (AGPL-3.0), Pillow, PyWinRT and ollama-python. The Minute Agreement Form itself is a New York State Unified Court System form. The djinn artwork was generated with Google Gemini.
+Built with Qt for Python (LGPL-3.0), PyMuPDF (AGPL-3.0), Pillow, PyWinRT and ollama-python. The Minute Agreement Form itself is a New York State Unified Court System form. The yin-yang artwork was generated with Google Gemini.

@@ -2,7 +2,7 @@
 
 A scan or photo of a signature has a paper background that would cover the form's
 signature line, so the paper is made transparent and the margins are cut off. The
-result is kept with the settings (%APPDATA%\\DjinnItAgreementForm\\signature.png).
+result is kept with the settings (%APPDATA%\\YinItAgreementForm\\signature.png).
 """
 from __future__ import annotations
 

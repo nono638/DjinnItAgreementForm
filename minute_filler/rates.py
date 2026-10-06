@@ -17,7 +17,7 @@ Format (same layout as the reporter's own invoice sheet):
   turnaround days from Settings are used.
 - Files whose name contains "template" are ignored, so the blank template can sit alongside.
 
-Sheets live in a user-editable folder (default %APPDATA%\\DjinnItAgreementForm\\Rate Sheets),
+Sheets live in a user-editable folder (default %APPDATA%\\YinItAgreementForm\\Rate Sheets),
 seeded from the sheets bundled with the app.
 """
 from __future__ import annotations

@@ -8,7 +8,7 @@ from helpers import pat_settings
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-WEBSITE = "https://nono638.github.io/DjinnItAgreementForm/"
+WEBSITE = "https://nono638.github.io/YinItAgreementForm/"
 
 
 @pytest.fixture
@@ -42,12 +42,12 @@ def test_the_help_menu_has_the_guide_and_the_website(window, monkeypatch):
     from minute_filler.gui import dialogs
     assert [a.text() for a in window.menuBar().actions()] == ["&File", "&Help"]  # no View menu: zoom is Ctrl +/-
     actions = {a.text().split("\t")[0]: a for a in help_menu(window).actions() if a.text()}
-    assert list(actions)[0] == "&How to use DjinnItAgreementForm…"
+    assert list(actions)[0] == "&How to use YinItAgreementForm…"
     shown, opened = [], []
     monkeypatch.setattr(dialogs.GuideDialog, "exec", lambda self: shown.append(self.windowTitle()))
     monkeypatch.setattr(mw, "open_url", opened.append)
-    actions["&How to use DjinnItAgreementForm…"].trigger()
-    assert shown == ["How to use DjinnItAgreementForm"]
+    actions["&How to use YinItAgreementForm…"].trigger()
+    assert shown == ["How to use YinItAgreementForm"]
     next(a for t, a in actions.items() if "website" in t).trigger()
     assert opened == [WEBSITE]
 

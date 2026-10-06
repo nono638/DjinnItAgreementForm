@@ -13,8 +13,8 @@ import urllib.request
 
 from . import __version__
 
-RELEASES_PAGE = "https://github.com/nono638/DjinnItAgreementForm/releases"
-LATEST_API = "https://api.github.com/repos/nono638/DjinnItAgreementForm/releases/latest"
+RELEASES_PAGE = "https://github.com/nono638/YinItAgreementForm/releases"
+LATEST_API = "https://api.github.com/repos/nono638/YinItAgreementForm/releases/latest"
 
 
 def version_key(version: str) -> tuple[int, ...]:
@@ -25,7 +25,7 @@ def version_key(version: str) -> tuple[int, ...]:
 def latest(timeout: float = 6) -> tuple[str, str]:
     """(version, page) of the latest release on GitHub: ("1.7.0", its release page). OSError when GitHub
     can't be reached; ValueError when the answer isn't what a release looks like."""
-    req = urllib.request.Request(LATEST_API, headers={"User-Agent": f"DjinnItAgreementForm/{__version__}",
+    req = urllib.request.Request(LATEST_API, headers={"User-Agent": f"YinItAgreementForm/{__version__}",
                                                       "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as answer:
         data = json.loads(answer.read(200_000).decode("utf-8"))

@@ -127,6 +127,7 @@ def test_file_name(case, settings):
 
 
 def test_old_settings_switch_to_ucs_form(tmp_path, monkeypatch):
+    """A settings file from before version 2 (no settings_version) moves to the UCS form, the default since."""
     import json
     from minute_filler.settings import settings_dir
     monkeypatch.setenv("APPDATA", str(tmp_path))

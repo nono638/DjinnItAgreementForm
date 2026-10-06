@@ -1,6 +1,6 @@
 """Records of everything the app made, and the invoice ledger.
 
-Kept in a small SQLite database (%APPDATA%\\DjinnItAgreementForm\\records.db, the program's own copy) and
+Kept in a small SQLite database (%APPDATA%\\YinItAgreementForm\\records.db, the program's own copy) and
 mirrored as invoices.csv / activity.csv in the records folder (Settings.records_folder) after every
 change, so the data can always be opened in Excel. Unlike the log file, these hold case details:
 they are the user's own business records and never leave the computer.
@@ -8,10 +8,14 @@ they are the user's own business records and never leave the computer.
   activity  one row per file made (minute agreement, MOFR, invoice) or run sheet added to
   invoices  one row per invoice, with the amount of each speed offered and whether it was paid
 
-An invoice's "billed" amount is what it was paid at once paid, else the price of the first speed it
-offers: the job's own speed, or on a choice invoice the first (slowest, cheapest) of the speeds it offers
-(the attorney picks; that is what they owe at the least). Void ones count 0. The amounts are the ones the
-invoice was made with, until they are changed here (Ledger.set_amounts: an amount corrected in the PDF).
+An invoice's "billed" amount is what it was paid at once paid, else the price of its billed speed
+(Invoice.billed_speed, see invoice.billed_speed: the job's own speed, the one the agreement form names, when the
+invoice offers it, else the first, cheapest, of the speeds it offers; the first one listed when the record names
+none). Void ones count 0. The amounts are the ones the invoice was made with, until they are changed here
+(Ledger.set_amounts: an amount corrected in the PDF).
+
+Invoices made in another reporter's name (Invoice.reporter: "ds") are numbered on a count of their own
+("DS-2026-0001") and left out of the user's sums (summarize, period_stats): that money is theirs.
 
 A record deleted goes to the trash (its `deleted` time is set): it is left out of every list, total and copy,
 and can be restored for 30 days (TRASH_DAYS); after that it is deleted for good. The files themselves are
@@ -69,7 +73,7 @@ _ADDED = [
     ("invoices", "my_pages", "INTEGER"), ("invoices", "reporters", "TEXT"), ("invoices", "excerpt", "TEXT"),
     ("invoices", "email_copy", "TEXT"), ("invoices", "idx", "TEXT"), ("invoices", "deleted", "TEXT"),
     ("activity", "transcript_pages", "INTEGER"), ("activity", "my_pages", "INTEGER"), ("activity", "deleted", "TEXT"),
-    ("activity", "origin", "TEXT"),
+    ("activity", "origin", "TEXT"), ("invoices", "reporter", "TEXT"), ("used_numbers", "reporter", "TEXT"),
 ]
 
 _SCHEMA = """
@@ -95,10 +99,12 @@ CREATE TABLE IF NOT EXISTS invoices (
     paid_speed TEXT, amount_paid TEXT, paid_date TEXT,
     file_path TEXT, notes TEXT,
     court TEXT, part TEXT, transcript_pages INTEGER, my_pages INTEGER, reporters TEXT, excerpt TEXT,
-    email_copy TEXT, idx TEXT, deleted TEXT
+    email_copy TEXT, idx TEXT, deleted TEXT,
+    reporter TEXT                 -- made for another reporter's pages: their initials ('' or NULL = the user's)
 );
 CREATE TABLE IF NOT EXISTS used_numbers (     -- every invoice number given, even of invoices deleted for good
-    invoice_no TEXT PRIMARY KEY, year INTEGER, seq INTEGER
+    invoice_no TEXT PRIMARY KEY, year INTEGER, seq INTEGER,
+    reporter TEXT                 -- whose count it is ('' or NULL = the user's; see Invoice.reporter)
 );
 """
 
@@ -141,6 +147,9 @@ class Invoice:
     email_copy: str = ""           # "Yes" / "No": an e-mailed copy was charged ("" = not known, older records)
     index: str = ""                # "Yes" / "No": an index was charged (the column is "idx")
     deleted: str = ""              # when it went to the trash (ISO time); "" = not deleted
+    # made for another reporter's pages, in their name (their initials, "ds"); "" = the user's own. Their
+    # numbers are counted apart, and they are left out of the user's sums (summarize)
+    reporter: str = ""
 
     @property
     def client(self) -> str:
@@ -210,6 +219,7 @@ class Summary:
     outstanding: Decimal = Decimal("0.00")
 
     def add(self, inv: Invoice) -> None:
+        """Counts one invoice in. A void one adds nothing (no count, and its amounts are 0)."""
         if inv.status != "void":
             self.count += 1
         self.billed += inv.billed
@@ -218,9 +228,12 @@ class Summary:
 
 
 def summarize(invoices: list[Invoice]) -> tuple[Summary, dict[str, Summary], dict[str, Summary]]:
-    """(totals, per client, per month 'YYYY-MM'); void invoices are left out of the counts and sums."""
+    """(totals, per client, per month 'YYYY-MM'); void invoices are left out of the counts and sums, and so are
+    the invoices made in another reporter's name (Invoice.reporter): that money is theirs."""
     total, by_client, by_month = Summary(), {}, {}
     for inv in invoices:
+        if inv.reporter:
+            continue
         total.add(inv)
         if inv.status == "void":
             continue
@@ -237,6 +250,7 @@ INVOICE_TABLE = [
     ("Bill to", lambda i: i.bill_to), ("Firm", lambda i: i.firm), ("E-mail", lambda i: i.email),
     ("Pages", lambda i: i.pages), ("My pages", lambda i: i.my_pages or ""),
     ("Transcript pages", lambda i: i.transcript_pages or ""), ("Reporters", lambda i: i.reporters),
+    ("For reporter", lambda i: i.reporter.upper()),
     ("Excerpt", lambda i: i.excerpt), ("Parties", lambda i: i.parties),
     ("Speeds offered", lambda i: ", ".join(i.amounts)), ("Offered (per party)", Invoice.offered_text),
     ("E-mailed copy", lambda i: i.email_copy), ("Index", lambda i: i.index),
@@ -278,7 +292,9 @@ def _from_row(cls, row: sqlite3.Row, **override):
 
 
 class Ledger:
-    """The records database. mirror_dir: where invoices.csv / activity.csv are kept up to date (None = not)."""
+    """The records database (path: default_db() when not given). mirror_dir: where invoices.csv / activity.csv
+    are kept up to date (None = not). Opening it brings an older database up to date (_migrate) and deletes for
+    good what has been in the trash too long (purge)."""
 
     def __init__(self, path: Path | None = None, mirror_dir: Path | None = None):
         self.path = Path(path) if path else default_db()
@@ -303,7 +319,8 @@ class Ledger:
                         if "duplicate column name" not in str(e):
                             raise
             if db.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
-                db.execute("INSERT OR IGNORE INTO used_numbers SELECT invoice_no, year, seq FROM invoices")
+                db.execute("INSERT OR IGNORE INTO used_numbers (invoice_no, year, seq) "
+                           "SELECT invoice_no, year, seq FROM invoices")
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _db(self) -> sqlite3.Connection:
@@ -342,10 +359,12 @@ class Ledger:
     def _insert(self, table: str, values: dict) -> None:
         self._run(*self._insert_sql(table, values))
 
-    def _next_seq(self, year: int) -> int:
-        """The next count of the year, after every number given (deleted invoices' too)."""
-        rows = self._rows("SELECT MAX(seq) FROM invoices WHERE year = ? UNION ALL "
-                          "SELECT MAX(seq) FROM used_numbers WHERE year = ?", (year, year))
+    def _next_seq(self, year: int, reporter: str = "") -> int:
+        """The next count of the year, after every number given (deleted invoices' too): the user's own, or
+        another reporter's (their initials: counted apart)."""
+        rows = self._rows("SELECT MAX(seq) FROM invoices WHERE year = ? AND COALESCE(reporter, '') = ? UNION ALL "
+                          "SELECT MAX(seq) FROM used_numbers WHERE year = ? AND COALESCE(reporter, '') = ?",
+                          (year, reporter, year, reporter))
         return max([r[0] or 0 for r in rows] + [0]) + 1
 
     def _set_status(self, invoice_no: str, status: str, speed: str = "", amount: str = "", paid: str = "") -> None:
@@ -360,12 +379,14 @@ class Ledger:
             db.close()
 
     # ----------------------------------------------------------- invoice numbers
-    def next_invoice_no(self, pattern: str = "{year}-{seq:04}", today: date | None = None) -> tuple[str, int, int]:
+    def next_invoice_no(self, pattern: str = "{year}-{seq:04}", today: date | None = None,
+                        reporter: str = "") -> tuple[str, int, int]:
         """(number, year, seq): the next number for this year, e.g. '2026-0007'. pattern: the number's format
-        ({year}, {yy}, {seq}); a number already taken is skipped. Hold NUMBER_LOCK until add_invoice, or two
-        invoices may get the same number."""
+        ({year}, {yy}, {seq}); a number already taken is skipped. reporter: another reporter's initials, whose
+        numbers are counted apart (Settings.number_format gives them their own pattern). Hold NUMBER_LOCK until
+        add_invoice, or two invoices may get the same number."""
         year = (today or date.today()).year
-        seq = self._next_seq(year)
+        seq = self._next_seq(year, reporter)
         taken = {r[0] for r in self._rows("SELECT invoice_no FROM invoices UNION SELECT invoice_no FROM used_numbers")}
 
         def number(pattern: str, seq: int) -> str:
@@ -398,11 +419,11 @@ class Ledger:
         one of its year."""
         year = year or int(inv.created[:4])
         values = asdict(inv)
-        values.update(amounts=json.dumps(inv.amounts), year=year, seq=seq or self._next_seq(year))
+        values.update(amounts=json.dumps(inv.amounts), year=year, seq=seq or self._next_seq(year, inv.reporter))
         values["deleted"] = values["deleted"] or None
         self._run_all([self._insert_sql("invoices", values),
-                       ("INSERT OR IGNORE INTO used_numbers VALUES (?, ?, ?)",
-                        (inv.invoice_no, year, values["seq"]))])
+                       ("INSERT OR IGNORE INTO used_numbers (invoice_no, year, seq, reporter) VALUES (?, ?, ?, ?)",
+                        (inv.invoice_no, year, values["seq"], inv.reporter))])
 
     def mark_paid(self, invoice_no: str, speed: str, amount, paid_date: str | None = None) -> None:
         """Paid at this speed. amount: '$63.00' or 63; paid_date: ISO ('2026-09-30'), today when not given."""
@@ -413,7 +434,7 @@ class Ledger:
         self._set_status(invoice_no, "open")
 
     def void(self, invoice_no: str) -> None:
-        """Cancelled: it counts 0 from now on (the number stays taken)."""
+        """Cancelled: it counts 0 from now on (the number stays taken). A payment entered is cleared."""
         self._set_status(invoice_no, "void")
 
     def set_notes(self, invoice_no: str, notes: str) -> None:
@@ -497,9 +518,9 @@ class Ledger:
         """Newest first, filtered by year, month, status ("open", "paid", "void"), client (the exact
         firm/attorney, see Invoice.client) and text: found anywhere in the invoice (number, case, index number,
         firm, attorney, e-mail, court, part, judge, dates, excerpt, reporters, notes, the speed paid, file),
-        as `how` says
-        (see matcher: "words", "regex" or "fuzzy"; ValueError for a pattern that isn't one; fuzzy_numbers:
-        see matcher). trash: the invoices in the trash instead of the others."""
+        as `how` says (see matcher: "words", "regex" or "fuzzy"; ValueError for a pattern that isn't one;
+        fuzzy_numbers: see matcher). trash: the invoices in the trash instead of the others. Invoices made in
+        another reporter's name are listed too."""
         found = matcher(text, how, fuzzy_numbers)
         out = []
         where = "deleted IS NOT NULL" if trash else "deleted IS NULL"
@@ -570,19 +591,21 @@ class Ledger:
         (every number given is entered in it). For the preview before saving: its invoices are made for show
         and must not be recorded or take a number."""
         other = Ledger(Path(folder) / "records.db")
-        rows = self._rows("SELECT invoice_no, year, seq FROM used_numbers UNION "
-                          "SELECT invoice_no, year, seq FROM invoices")
-        other._run_all([("INSERT OR IGNORE INTO used_numbers VALUES (?, ?, ?)", tuple(r)) for r in rows])
+        rows = self._rows("SELECT invoice_no, year, seq, COALESCE(reporter, '') FROM used_numbers UNION "
+                          "SELECT invoice_no, year, seq, COALESCE(reporter, '') FROM invoices")
+        other._run_all([("INSERT OR IGNORE INTO used_numbers (invoice_no, year, seq, reporter) VALUES (?, ?, ?, ?)",
+                         tuple(r)) for r in rows])
         return other
 
     def backup(self, folder: Path, keep: int = BACKUPS_KEPT, now: datetime | None = None,
                force: bool = False, prune: bool = True) -> Path | None:
         """Copies the database into `folder` as "records 2026-10-03.db" and deletes the oldest daily copies
-        beyond `keep`. Once a day: None when today's copy is there already, or when there is nothing to copy
-        yet. force: a copy now whatever there is ("records 2026-10-03 141500.db": Back up now, and before a
-        copy is put back); of those the last FORCED_KEPT are kept, apart from the daily ones, so a busy
-        afternoon of them doesn't push out the older days. prune False: no old copy is deleted (before a copy is
-        put back: the oldest may be the very one chosen)."""
+        beyond `keep`. Once a day: None when there is a copy of today already (the daily one, or one made by
+        hand), or when there is nothing to copy yet. force: a copy now whatever there is
+        ("records 2026-10-03 141500.db": Back up now, and before a copy is put back); of those the last
+        FORCED_KEPT are kept, apart from the daily ones, so a busy afternoon of them doesn't push out the older
+        days. prune False: no old copy is deleted (before a copy is put back: the oldest may be the very one
+        chosen)."""
         now = now or datetime.now()
         folder = Path(folder)
         if self.is_empty():
@@ -627,14 +650,15 @@ class Ledger:
 
     def _restore(self, copy: Path) -> None:
         """Copies a backup over the database (see restore_backup, which holds the locks)."""
-        used = [tuple(r) for r in self._rows("SELECT invoice_no, year, seq FROM used_numbers")]
+        used = [tuple(r) for r in self._rows("SELECT invoice_no, year, seq, reporter FROM used_numbers")]
         # read-only: a copy that is gone must raise, not be made anew (empty) and copied over the records
         with closing(sqlite3.connect(_read_only(copy), uri=True)) as src, closing(self._db()) as dst:
             src.backup(dst)
             dst.executescript(_SCHEMA)
             self._migrate(dst)
             with dst:
-                dst.executemany("INSERT OR IGNORE INTO used_numbers VALUES (?, ?, ?)", used)
+                dst.executemany("INSERT OR IGNORE INTO used_numbers (invoice_no, year, seq, reporter) "
+                                "VALUES (?, ?, ?, ?)", used)
 
     def years(self) -> list[int]:
         """The years with any invoice or activity, newest first."""
@@ -674,7 +698,8 @@ class Ledger:
 
     def export_xlsx(self, path: Path, invoices: list[Invoice] | None = None) -> Path:
         """An Excel workbook: Invoices, Activity, By firm and By month sheets. invoices: the ones to list
-        (default: all); the Activity sheet always has every row."""
+        (default: all); the Activity sheet always has every row. By firm and By month leave out the invoices
+        made in another reporter's name (summarize)."""
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
         from openpyxl.utils import get_column_letter
@@ -720,7 +745,7 @@ class Ledger:
         return path
 
     def export_html(self, path: Path, invoices: list[Invoice] | None = None, title: str = "Invoice report") -> Path:
-        """A self-contained report page (totals, a monthly chart, per-firm and per-invoice tables)."""
+        """A self-contained report page (totals, a monthly chart, per-firm and per-invoice tables; see report_html)."""
         invoices = self.invoices() if invoices is None else invoices
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -770,9 +795,9 @@ def backup_day(copy: Path) -> str:
     """'records 2026-10-03 141500.db' -> 'October 3, 2026, 2:15 PM'; 'records 2026-10-03.db' -> 'October 3,
     2026'; the file's name when it isn't named like a copy."""
     stamp = Path(copy).stem[len("records "):].split(" (")[0]
-    for fmt, out in (("%Y-%m-%d %H%M%S", "%B {d}, %Y, {h}:%M %p"), ("%Y-%m-%d", "%B {d}, %Y")):
+    for pattern, out in (("%Y-%m-%d %H%M%S", "%B {d}, %Y, {h}:%M %p"), ("%Y-%m-%d", "%B {d}, %Y")):
         try:
-            t = datetime.strptime(stamp, fmt)
+            t = datetime.strptime(stamp, pattern)
         except ValueError:
             continue
         return t.strftime(out).format(d=t.day, h=t.hour % 12 or 12)
@@ -802,10 +827,12 @@ class Stats:
 
 def period_stats(invoices: list[Invoice], since: str = "", until: str = "") -> Stats:
     """Sums up the invoices made from `since` to `until` (ISO dates, inclusive; "" = no limit), and the
-    payments dated within them. invoices: every invoice not in the trash (Ledger.invoices())."""
+    payments dated within them. invoices: every invoice not in the trash (Ledger.invoices()); those made in
+    another reporter's name are left out."""
     def within(day: str) -> bool:
         return bool(day) and (not since or day[:10] >= since) and (not until or day[:10] <= until)
 
+    invoices = [i for i in invoices if not i.reporter]  # (made in another reporter's name: theirs)
     mine = [i for i in invoices if within(i.created)]
     total, by_client, by_month = summarize(mine)
     live = [i for i in mine if i.status != "void"]
@@ -976,7 +1003,8 @@ def _month_name(ym: str) -> str:
 
 
 def report_html(invoices: list[Invoice], title: str = "Invoice report") -> str:
-    """The HTML report as one string: no outside files, works offline, light and dark."""
+    """The HTML report as one string: no outside files, works offline, light and dark. The sums leave out the
+    invoices made in another reporter's name (summarize); the table of invoices lists every one given."""
     e = html.escape
     total, by_client, by_month = summarize(invoices)
     tiles = "".join(f'<div class="tile"><div class="k">{k}</div><div class="v">{v}</div></div>' for k, v in (
@@ -1042,7 +1070,7 @@ th {{ color:var(--muted); font-weight:600; font-size:12px; text-transform:upperc
 .st {{ font-weight:600; }} .st.paid {{ color:var(--ok); }} .st.open {{ color:var(--due); }} .st.void {{ color:var(--void); }}
 .legend span {{ display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 4px 0 12px; }}
 </style></head><body><main>
-<h1>{e(title)}</h1><div class="muted">Made by DjinnIt on {e(stamp)}</div>
+<h1>{e(title)}</h1><div class="muted">Made by YinIt on {e(stamp)}</div>
 <div class="tiles">{tiles}</div>
 <h2>Billed per month</h2>
 <div class="card">{chart}<div class="muted legend"><span style="background:var(--accent)"></span>Paid

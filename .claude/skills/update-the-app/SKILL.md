@@ -1,7 +1,7 @@
 ---
 name: update-the-app
 description: >
-  Full release cycle for DjinnItAgreementForm, in order: bug sweep and fixes, a
+  Full release cycle for YinItAgreementForm, in order: bug sweep and fixes, a
   comments and docstrings review, commit and push, rebuild the installer, publish
   a GitHub release with the new version, update the website (GitHub Pages) and
   update the README and internal notes. Use when the user says "update the app",
@@ -11,7 +11,7 @@ disable-model-invocation: true
 
 # Update the app
 
-Run the steps below in order, in this repository (the folder with `DjinnItAgreementForm.spec`).
+Run the steps below in order, in this repository (the folder with `YinItAgreementForm.spec`).
 Invoking this skill is the user's go-ahead to commit, push and publish **for this run**. Still stop and
 ask if a step fails in a way you can't fix, or if a decision belongs to the user (a change in what is
 billed, a feature removed, anything about their money or clients).
@@ -41,7 +41,7 @@ Tell the user in a line or two what you're on as you go, e.g. "Step 2 of 7: docs
   user's own Python programs). Only processes it started itself. Every script that imports minute_filler
   must first (at the very top, before that import) set `APPDATA`, `USERPROFILE` and `HOME` to a
   `tempfile.mkdtemp()` folder: setting records_dir/output_dir is not enough, as `Ledger()` otherwise writes
-  the user's real `%APPDATA%\DjinnItAgreementForm\records.db` (made-up invoices once had to be removed from
+  the user's real `%APPDATA%\YinItAgreementForm\records.db` (made-up invoices once had to be removed from
   it by hand). pytest is safe (conftest isolates them).
 - Read the project memory (`MEMORY.md` and the files it points to) for the current state and known
   limits before starting.
@@ -108,14 +108,14 @@ Go through every module in `minute_filler/` (including `gui/` and `forms/`), `to
 
 ## Step 4: Rebuild the installer
 
-1. `.venv/Scripts/python.exe -m PyInstaller --noconfirm --clean DjinnItAgreementForm.spec` (in the
+1. `.venv/Scripts/python.exe -m PyInstaller --noconfirm --clean YinItAgreementForm.spec` (in the
    background; it prints "Build complete!" at the end of its output).
 2. Check the built program headless on made-up inputs:
    `.venv/Scripts/python.exe .claude/skills/update-the-app/scripts/exe_check.py`.
    It must say the right version, report no errors in the log, and make all four outputs.
 3. Installer: `MSYS_NO_PATHCONV=1 "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" /Qp
-   /DMyAppVersion=X.Y.Z installer/DjinnItAgreementForm.iss`. The result is
-   `dist/installer/DjinnItAgreementForm-Setup-X.Y.Z.exe`. Never change the `AppId` in the `.iss`.
+   /DMyAppVersion=X.Y.Z installer/YinItAgreementForm.iss`. The result is
+   `dist/installer/YinItAgreementForm-Setup-X.Y.Z.exe`. Never change the `AppId` in the `.iss`.
 
 ## Step 5: Publish the release
 
@@ -123,8 +123,8 @@ Go through every module in `minute_filler/` (including `gui/` and `forms/`), `to
    v<previous>`): a `## X.Y.Z: <headline>` title, then what changed **for the user** in plain words.
    Bold lead-ins, one short paragraph or a few bullets per change, made-up examples only, and the same
    "### Install" paragraph as before (with the new file name).
-2. `gh release create vX.Y.Z dist/installer/DjinnItAgreementForm-Setup-X.Y.Z.exe --title
-   "DjinnItAgreementForm X.Y.Z" --notes-file <notes>`.
+2. `gh release create vX.Y.Z dist/installer/YinItAgreementForm-Setup-X.Y.Z.exe --title
+   "YinItAgreementForm X.Y.Z" --notes-file <notes>`.
 3. The website's download button points at `releases/latest`, so it serves the new installer at once.
    Check with `gh release view vX.Y.Z` that the installer is attached.
 
@@ -157,7 +157,7 @@ The site is `docs/index.html` (plus its pictures), served by GitHub Pages from `
 ## Finish
 
 Report to the user in a few lines:
-- the version and release link: https://github.com/nono638/DjinnItAgreementForm/releases/tag/vX.Y.Z
+- the version and release link: https://github.com/nono638/YinItAgreementForm/releases/tag/vX.Y.Z
 - the bugs fixed, in plain words
-- what changed in the docs and on the site: https://nono638.github.io/DjinnItAgreementForm/
+- what changed in the docs and on the site: https://nono638.github.io/YinItAgreementForm/
 - anything left for their decision

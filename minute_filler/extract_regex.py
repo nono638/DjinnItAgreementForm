@@ -12,7 +12,7 @@ import re
 from datetime import date, timedelta
 
 from .ingest import Ingested
-from .models import Attorney, Extraction, SRC_REGEX
+from .models import Attorney, Extraction, SRC_PDF, SRC_REGEX
 from .settings import Profile
 from .takes import body_pages
 
@@ -319,7 +319,7 @@ class RegexExtractor:
 
         First decides what kind of document it is (invoice, transcript, a court caption or none), then
         fills each field. The file name is searched too (index number, case, dates), at 90% of the
-        confidence, because names like '5-22-2026 Smith v Jones - 712345-2024' are common.
+        confidence, because names like '5-22-2026 Roe v Poe - 712345-2024' are common.
         """
         ex = Extraction()
         text, numbered = strip_line_numbers(self._clean(ing.text))
@@ -359,7 +359,8 @@ class RegexExtractor:
 
     @staticmethod
     def _clean(text: str) -> str:
-        """Straightens curly quotes and dashes, drops replacement characters and trailing blanks, keeps the page breaks (form feeds)."""
+        """Straightens curly quotes and dashes, drops replacement characters and trailing blanks, and keeps
+        the page breaks (form feeds)."""
         text = text.replace("\xa0", " ").replace("’", "'").replace("‘", "'")
         text = text.replace("“", '"').replace("”", '"').replace("–", "-").replace("—", "-")
         text = text.replace("�", "")
@@ -596,7 +597,7 @@ class RegexExtractor:
         return [p.strip(" ,") for p in parties if p.strip(" ,")]
 
     def _short_caption(self, left: str, right: str) -> str:
-        """The first party on each side with 'et al.' added when there are more, e.g. 'Smith, et al. v. Jones'."""
+        """The first party on each side with 'et al.' added when there are more, e.g. 'Roe, et al. v. Poe'."""
         lp, rp = self._split_parties(left), self._split_parties(right)
         l = lp[0] + (", et al." if len(lp) > 1 else "") if lp else left
         r = rp[0] + (", et al." if len(rp) > 1 else "") if rp else right
@@ -608,10 +609,9 @@ class RegexExtractor:
 
         Highest: after a label such as 'Date of proceedings:' or 'held on'. Next: a date alone on one of
         the first lines of a court document. Then a date after 'on', 'from' or 'for', then any other date.
-        E-mails and other plain text skip 'Sent:', 'Date:' and 'On ... wrote:' lines and allow dates
-        without a year. Runs of dates
-        joined by 'and', commas or 'through' also become one multi-date candidate, and an e-mail naming
-        two to six different dates gets an 'all dates in the text' candidate.
+        E-mails and other plain text skip 'Sent:', 'Date:', 'Received:' and 'On ... wrote:' lines and allow
+        dates without a year. Runs of dates joined by 'and', commas or 'through' also become one multi-date
+        candidate, and an e-mail naming two to six different dates gets an 'all dates in the text' candidate.
         """
         is_email = self.kind in ("email", "text")
         body = text
@@ -732,7 +732,8 @@ class RegexExtractor:
     def _pages(self, ing: Ingested, text: str, ex: Extraction) -> None:
         """Estimated pages: the page count of a transcript PDF (noting its page numbers, such as
         'transcript pages 358-380', when it does not start at 1), or 'N pages' written in an e-mail.
-        A transcript's count leaves out the word index printed after it (see takes.scan_pdf).
+        A transcript's count leaves out the word index printed after it (see takes.scan_pdf). It is
+        counted, not read from the words, so its source is SRC_PDF (the "PDF" badge), not SRC_REGEX.
         """
         if ing.kind == "pdf" and self.is_transcript and ing.page_count:
             pages = body_pages(ing.marks, ing.page_count)  # without the word index printed after it
@@ -742,7 +743,7 @@ class RegexExtractor:
             if pages < ing.page_count:
                 note = (note or f"{pages} transcript pages") + \
                     f", not counting {ing.page_count - pages} page(s) after the transcript (word index)"
-            ex.add("est_pages", str(pages), SRC_REGEX, 0.95, note or "page count of the transcript")
+            ex.add("est_pages", str(pages), SRC_PDF, 0.95, note or "page count of the transcript")
         for m in re.finditer(r"(?i)\b(?:about|approx\.?|approximately|~|est\.?|estimated)?\s*(\d{1,4})\s+pages?\b", text):
             if self.kind in ("email", "text"):
                 ex.add("est_pages", m.group(1), SRC_REGEX, 0.7)
@@ -753,8 +754,9 @@ class RegexExtractor:
 
         In a transcript only the title page(s) are read (from APPEARANCES down, if it has that heading).
         Lines of dialogue ('MR. POE: ...') are dropped everywhere. Then two passes. First, an invoice's
-        'To: Firm, attn: e-mail' and an e-mail's 'From:' line become the orderer, ticked. Then the text is cut into blocks
-        at blank lines and headings such as APPEARANCES; in each block names come from 'Name, Esq.' or
+        'To: Firm, attn: e-mail' line and an e-mail's 'From:' line become ticked entries (the orderer, the
+        sender). Then the text is cut into blocks at blank lines and headings such as APPEARANCES; in each
+        block names come from 'Name, Esq.' or
         'BY:', the firm from FIRM_RE, and address, phone, fax, e-mail and role ('Attorney for the
         Plaintiff') from the other lines. Placeholders such as 'Unrepresented' become unticked entries.
         The reporter's own block, e-mail and phone are skipped, and duplicates are merged by

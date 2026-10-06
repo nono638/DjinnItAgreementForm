@@ -1,5 +1,7 @@
 """The run sheet from the window (off screen): Generate and Generate all ask where the takes go when the case
-has one (once per trial), the Settings → Run sheet tab, and work that ends while a question is on screen."""
+has one (once per trial), one run sheet counted per case, a run sheet open in Excel, the Settings → Run sheet tab
+(initials and reporter lines written different ways) and its folder, and work that ends while a question is on
+screen."""
 import os
 from copy import deepcopy
 
@@ -66,7 +68,7 @@ def test_run_sheet_settings(qt, tmp_path, monkeypatch):
     dlg.r_names.setPlainText("DS = Dana\nkl: Kim\nnonsense\n")
     dlg.r_existing.setCurrentIndex(dlg.r_existing.findData("add"))
     dlg.accept()
-    assert s.profile.initials == "pr" and s.reporters == {"ds": "Dana", "kl": "Kim"}
+    assert s.profile.initials == "pr" and s.reporter_names() == {"ds": "Dana", "kl": "Kim"}
     assert len(warned) == 1 and "nonsense" in warned[0]  # the rest is saved; the line left out is named
     assert s.runsheet_existing == "add"
     again = SettingsDialog(s)
@@ -193,6 +195,7 @@ def test_batch_message_says_why_the_run_sheet_was_not_saved(window, tmp_path, mo
 
 
 def test_reading_gets_its_own_copy_of_the_settings(window, monkeypatch):
+    """The background read works on a copy of the settings: Settings saved meanwhile can't change them under it."""
     import minute_filler.gui.main_window as mw
     seen = []
     real = mw.read_loaders
@@ -203,6 +206,7 @@ def test_reading_gets_its_own_copy_of_the_settings(window, monkeypatch):
 
 
 def test_reporter_lines_written_other_ways(qt, monkeypatch):
+    """"D. S. = Dana", "kl Kim", "mt - Maria" and a tab are all read; "Dana Smith - ds" (name first) is named."""
     from minute_filler.gui.dialogs import SettingsDialog
     warned = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: warned.append(a[2]))
@@ -210,7 +214,7 @@ def test_reporter_lines_written_other_ways(qt, monkeypatch):
     dlg = SettingsDialog(s)
     dlg.r_names.setPlainText("D. S. = Dana\nkl Kim\nmt - Maria\npr\tPat\nDana Smith - ds\n")
     dlg.accept()
-    assert s.reporters == {"ds": "Dana", "kl": "Kim", "mt": "Maria", "pr": "Pat"}
+    assert s.reporter_names() == {"ds": "Dana", "kl": "Kim", "mt": "Maria", "pr": "Pat"}
     assert "Dana Smith - ds" in warned[0]
 
 

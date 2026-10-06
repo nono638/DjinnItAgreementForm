@@ -1,9 +1,9 @@
 """Invoices that cover several days of one case: the joint invoice (or one per day, as Settings say), the index
 rule, a job's Extras and what granular detail shows. Also: a day billed once (Job.invoiced) is not billed
 again, choices kept when jobs or days come together (Excerpts... too), a failed joint invoice, a day with
-nobody ticked holding the joint invoice back, the progress
-count, the files counted for Generate all, Pages typed as 0, and the invoice's field names. Attorneys ordering
-different days or pages are in test_portions.py. All names and numbers are made up."""
+nobody ticked holding the joint invoice back, the progress count, the files counted for Generate all, Pages
+typed as 0, and the invoice's field names. Attorneys ordering different days or pages are in test_portions.py.
+All names and numbers are made up."""
 from decimal import Decimal
 
 import pymupdf
@@ -71,6 +71,7 @@ def test_a_day_with_nobody_ticked_holds_the_joint_invoice_back(three_days, s):
 
 
 def test_index_rules():
+    """index_days(days, mode, rule, threshold): which days get an index ("on" and "off" need no rule)."""
     assert index_days([30, 60], "auto", "any", 50) == [True, True]   # one long day: every day gets an index
     assert index_days([30, 60], "auto", "each", 50) == [False, True]
     assert index_days([30, 30], "auto", "total", 50) == [True, True]  # 60 pages together
@@ -168,6 +169,8 @@ def test_granular_detail_shows_what_was_chosen(s, tmp_path):
 
 
 def test_settings_v6(tmp_path):
+    """Settings saved by version 5: an index rule it can't be ("sometimes") loads as "any", detail items it
+    doesn't know are dropped, and the joint invoice is on."""
     import json
     s = Settings()
     s.path.write_text(json.dumps({"settings_version": 5, "invoice_index_rule": "sometimes",

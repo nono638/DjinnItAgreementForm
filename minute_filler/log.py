@@ -1,4 +1,4 @@
-"""A small log file to help with problem reports: %APPDATA%\\DjinnItAgreementForm\\logs\\app.log
+"""A small log file to help with problem reports: %APPDATA%\\YinItAgreementForm\\logs\\app.log
 
 It records what the program did and what went wrong (versions, file types, crashes with their
 tracebacks), never what the documents said. Anything that could come from a document - file
@@ -20,7 +20,7 @@ from typing import Callable
 from . import __version__
 from .settings import settings_dir
 
-NAME = "djinn"
+NAME = "yin"
 log = logging.getLogger(NAME)
 _handler: RotatingFileHandler | None = None
 on_crash: Callable[[str], None] | None = None  # the window sets this to tell the user
@@ -146,7 +146,7 @@ def recent(lines: int = 60) -> str:
 def diagnostics(settings=None) -> str:
     """Text for a problem report: versions, the machine, a few settings and the recent log."""
     from .ingest import ocr_available
-    out = [f"DjinnItAgreementForm {__version__} ({'installed app' if getattr(sys, 'frozen', False) else 'from source'})",
+    out = [f"YinItAgreementForm {__version__} ({'installed app' if getattr(sys, 'frozen', False) else 'from source'})",
            windows_version(), f"Python {platform.python_version()}",
            f"Windows text recognition (photos, scans): {'available' if ocr_available() else 'NOT available'}"]
     if settings is not None:

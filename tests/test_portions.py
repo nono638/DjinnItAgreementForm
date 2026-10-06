@@ -1,10 +1,10 @@
 """Excerpts (who ordered which pages): each attorney's invoice bills only the days it is ticked on and, of a day
-split with Excerpts... (Job.portions), only the pages it ordered. Pages ordered together share the original, the
-judge's index and (by default) the index; each firm pays its own copies. Also the index setting, the Parties
-number, portions kept to be checked when the pages or the attorneys change, the same attorney entered twice,
-a run stopped part way, the files counted for Generate all and the records of each firm. All names and numbers
-are made up; prices are from the bundled "Sample Rates" sheet (Regular: original $4.30, copy, e-mailed copy and
-index $1.00 a page; Expedite: $5.40 and $1.10)."""
+split in the Excerpts window (Job.portions), only the pages it ordered. Pages ordered together share the original,
+the judge's index and (by default) the index; each firm pays its own copies. Also the index setting, the Parties
+number (and one below the firms ticked), portions kept to be checked when the pages or the attorneys change, the
+same attorney entered twice, a run stopped part way, the files counted for Generate all and the records of each
+firm. All names and numbers are made up; prices are from the bundled "Sample Rates" sheet (Regular: original
+$4.30, copy, e-mailed copy and index $1.00 a page; Expedite: $5.40 and $1.10)."""
 import json
 from decimal import Decimal
 
@@ -132,13 +132,15 @@ def test_a_share_is_rounded_up_to_the_cent(s):
 
 
 def test_the_index_setting_is_kept_and_checked(tmp_path):
-    assert Settings().invoice_index_shared == "split" and Settings().settings_version == 8
+    """invoice_index_shared defaults to "split"; a value it can't be ("sometimes") loads as "split", "each" as
+    saved."""
+    assert Settings().invoice_index_shared == "split" and Settings().settings_version == 10
     s = Settings()
     s.path.write_text(json.dumps({"settings_version": 6, "invoice_index_shared": "sometimes"}), encoding="utf-8")
     assert Settings.load().invoice_index_shared == "split"
     s.path.write_text(json.dumps({"settings_version": 7, "invoice_index_shared": "each"}), encoding="utf-8")
     loaded = Settings.load()
-    assert loaded.invoice_index_shared == "each" and loaded.settings_version == 8
+    assert loaded.invoice_index_shared == "each" and loaded.settings_version == Settings.settings_version
 
 
 # ------------------------------------------------------------------ the days and pages of each firm
@@ -221,9 +223,11 @@ def test_portions_that_no_longer_fit_are_kept_to_be_checked(tmp_path, s):
 
 
 def test_portions_need_a_job_of_one_day(tmp_path, s):
+    """A job of two days is not refused by the Excerpts window (it is listed, ordered whole), but rows splitting
+    it don't bill; a job without transcript pages can't be split at all."""
     s.batch_combine_dates = True  # both days in one job
     job, = read_days(tmp_path, s, {"June 3, 2026": 30, "June 4, 2026": 20})
-    assert "several days" in job.portions_unavailable()
+    assert not job.portions_unavailable()  # (in the Excerpts window, ordered whole)
     job.portions = [(10, [A]), (50, [A, B])]
     assert job.valid_portions() is None
     assert "no transcript pages" in Job().portions_unavailable()
@@ -246,10 +250,10 @@ def test_a_firms_detail_says_which_pages_are_shared(tmp_path, s):
     paths = make_invoices(job.case, s, tmp_path / "out", job.invoice_opts(), Ledger(tmp_path / "r.db"))
     with pymupdf.open(paths[0]) as doc:
         text = " ".join(doc[0].get_text().replace("ﬁ", "fi").replace("E-\n", "E-").split())
-    assert "Original: 20 pp. × $4.30 (shared pages split between the firms)" in text
+    assert "Original: 10 pp. × $4.30 + 20 pp. × $4.30 ÷ 2 firms" in text
     assert "Copy: 30 pp. × $1.00 + E-mailed copy: 30 pp. × $1.00 = $146.00" in text
     assert "split 2 ways" not in text and "Amounts are your share" in text
-    assert "the original and the index of pages ordered together" in text
+    assert "the original, the index and the judge's index of pages ordered together" in text
 
 
 # ------------------------------------------------------------------ found in the sweep of who ordered which pages
@@ -268,8 +272,8 @@ def test_rows_naming_an_attorney_no_longer_ticked_bill_nobody_until_checked(tmp_
     assert not ledger_for(s).invoices() and not job.invoiced
     assert job.error == "invoice not made: check Excerpts… for 6/3/2026"
     assert [p.name.split(" - ")[0] for p in job.saved] == ["Minute Agreement"]  # the rest is made
-    job.portions = [(10, [A]), (30, [A])]  # names only Alex, but a split needs two attorneys on the day
-    assert job.portions_problem() == "fewer than two attorneys are ticked" and job.valid_portions() is None
+    job.portions = [(10, [A]), (30, [A])]  # names only Alex: fine (one firm may order a day in runs)
+    assert job.portions_problem() == "" and job.valid_portions() == [(10, [A]), (30, [A])]
     job.portions = [(10, [A]), (30, [A, B])]
 
     job.case.attorneys[1].checked = True
@@ -295,12 +299,12 @@ def test_a_name_filled_in_by_a_merge_renames_the_attorney_in_the_rows(tmp_path, 
 
 
 def test_portions_of_a_day_name_only_its_own_attorneys(tmp_path, s):
-    """Dana is ticked on the second day only; rows of the first day giving Dana pages need checking, so Generate
-    all and Generate this job can't bill that day differently (the first day's invoice is left out)."""
+    """Dana is ticked on the second day only; rows of the first day giving Dana pages need checking: Generate all
+    bills the second day and leaves the first day's invoice out, saying why."""
     jobs = read_days(tmp_path, s, {"June 3, 2026": 30, "June 4, 2026": 60})
     jobs[0].case.attorneys = [alex(), dana(checked=False)]
     jobs[1].case.attorneys = [alex(), dana()]
-    assert "two attorneys on this day" in jobs[0].portions_unavailable() and not jobs[1].portions_unavailable()
+    assert not jobs[0].portions_unavailable() and not jobs[1].portions_unavailable()  # (one firm is enough)
     jobs[0].portions = [(10, [B]), (30, [A])]
     assert jobs[0].portions_problem() == "it names an attorney no longer ticked"
     fill_jobs(jobs, s, outputs=["invoice"])
@@ -372,3 +376,14 @@ def test_shared_pages_show_without_trailing_zeros_and_undated_days_keep_the_case
                        orders=[DayOrder("6/3/2026", 30, [Portion(30, [A], 1)]), DayOrder("", 60, [Portion(60, [B], 1)])])
     firms = {f.atty.name: f.case.get("dates") for f in firm_invoices(case, s, opts)}
     assert firms == {"Alex B. Counsel": "6/3/2026", "Dana Smith": "6/3/2026, 6/4/2026"}
+
+
+def test_a_parties_number_below_the_firms_ticked_bills_no_more_than_their_share(tmp_path, s):
+    """Bug (1.8.0): Parties 1 with two attorneys ticked billed each of them the whole original and index."""
+    job, = read_days(tmp_path, s, {"June 3, 2026": 30})
+    job.case.attorneys = [alex(), dana()]
+    even = {f.atty.name: f.quotes[0].per_party for f in firm_invoices(job.case, s, job.invoice_opts())}
+    job.parties = 1
+    clamped = {f.atty.name: f.quotes[0].per_party for f in firm_invoices(job.case, s, job.invoice_opts())}
+    # 30 x 4.30 / 2 + 30 + 30 = 124.50 each, as with the number left alone
+    assert clamped == even == {"Alex B. Counsel": Decimal("124.50"), "Dana Smith": Decimal("124.50")}

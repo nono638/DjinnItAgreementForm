@@ -1,8 +1,9 @@
 """What was added around the forms themselves: File -> Open recent; the settings exported and imported; the
 daily backup of the records and putting one back; the look for a newer version (GitHub is never asked: its
-answer is faked); the preview before saving and "Don't show previews anymore"; printing (to a PDF, not a
-printer); Undo, Summary... and the monthly and yearly recap in the Records window; a past job opened again
-from its record; and the first-run welcome. All names and numbers are made up."""
+answer is faked); the preview before saving (its "The math" tab first) and "Don't show previews anymore"; the
+AI model box in Settings; printing (to a PDF, not a printer); Undo, Summary..., Mark paid..., a locked database
+and the monthly and yearly recap in the Records window; a past job opened again from its record; and the
+first-run welcome. All names and numbers are made up."""
 import io
 import json
 import os
@@ -92,7 +93,7 @@ def test_settings_exported_and_imported_on_another_computer(tmp_path, monkeypatc
     from minute_filler.rates import sheets_dir
     (sheets_dir() / "City Rates.csv").write_text("Rate,Original,Copy\nRegular,$5.00,$1.00\n", encoding="utf-8")
     s.rate_sheet = "City Rates"
-    out = s.export_to(tmp_path / "DjinnIt settings.json")
+    out = s.export_to(tmp_path / "YinIt settings.json")
     data = json.loads(out.read_text(encoding="utf-8"))
     assert "window_geometry" not in data and "recent_files" not in data and "signature_image" not in data
     assert "City Rates.csv" in data["rate_sheets"]
@@ -161,12 +162,12 @@ def test_export_settings_asks_about_personal_details(window, tmp_path, monkeypat
     assert "Include your personal details" in asked[0] and saved_as == []  # cancelled: nothing saved
     monkeypatch.setattr(qt.QMessageBox, "exec", click("Leave them out"))
     window.export_settings()
-    assert saved_as == ["DjinnIt settings (no personal details).json"]
+    assert saved_as == ["YinIt settings (no personal details).json"]
     assert "Pat Reporter" not in (tmp_path / saved_as[0]).read_text(encoding="utf-8")
     monkeypatch.setattr(qt.QMessageBox, "exec", click("Include my details"))
     window.export_settings()
-    assert saved_as[-1] == "DjinnIt settings.json"
-    assert "Pat Reporter" in (tmp_path / "DjinnIt settings.json").read_text(encoding="utf-8")
+    assert saved_as[-1] == "YinIt settings.json"
+    assert "Pat Reporter" in (tmp_path / "YinIt settings.json").read_text(encoding="utf-8")
 
 
 def test_an_imported_rate_sheet_never_replaces_one_with_other_prices(tmp_path):
@@ -377,6 +378,8 @@ def test_backups_in_the_records_window(window, monkeypatch, qt):
 
 # ------------------------------------------------------------------ a newer version
 class _Answer(io.BytesIO):
+    """A faked urlopen() answer: its body, usable in a `with` block."""
+
     def __enter__(self):
         return self
 
@@ -393,9 +396,9 @@ def test_a_newer_version_on_github_is_found(monkeypatch):
     def github(req, timeout):
         asked.append((req.full_url, dict(req.header_items())))
         return _Answer(json.dumps({"tag_name": "v1.10.0", "html_url":
-                                   "https://github.com/nono638/DjinnItAgreementForm/releases/tag/v1.10.0"}).encode())
+                                   "https://github.com/nono638/YinItAgreementForm/releases/tag/v1.10.0"}).encode())
     monkeypatch.setattr(update.urllib.request, "urlopen", github)
-    assert update.newer("1.9.3") == ("1.10.0", "https://github.com/nono638/DjinnItAgreementForm/releases/tag/v1.10.0")
+    assert update.newer("1.9.3") == ("1.10.0", "https://github.com/nono638/YinItAgreementForm/releases/tag/v1.10.0")
     assert update.newer("1.10.0") is None and update.newer("2.0.0") is None
     url, headers = asked[0]
     assert url == update.LATEST_API and set(headers) == {"User-agent", "Accept"}  # nothing about the user is sent
@@ -462,6 +465,7 @@ def previewing(tmp_path, monkeypatch, make_window, qt):
 
 
 def test_the_preview_shows_the_files_and_going_back_saves_nothing(previewing, tmp_path, monkeypatch):
+    """The preview has "The math" first, then a tab per file. Going back saves, records and numbers nothing."""
     from minute_filler.deliver import ledger_for
     from minute_filler.gui.preview import PreviewDialog
     seen = []
@@ -472,7 +476,7 @@ def test_the_preview_shows_the_files_and_going_back_saves_nothing(previewing, tm
     monkeypatch.setattr(PreviewDialog, "exec", go_back)
     previewing.fill()
     (tabs, pages), = seen
-    assert len(tabs) == 2 and any(t.startswith("Invoice 20") for t in tabs) and pages >= 2
+    assert len(tabs) == 3 and tabs[0] == "The math" and any(t.startswith("Invoice 20") for t in tabs) and pages >= 2
     assert not (tmp_path / "out").exists() and not previewing.cur.saved
     lg = ledger_for(previewing.s)
     assert lg.invoices() == [] and lg.activity() == []  # nothing recorded
@@ -522,6 +526,26 @@ def test_a_file_name_with_an_ampersand_shows_whole_on_its_tab(qt, tmp_path):
     assert dlg.tabs.tabText(0) == "Invoice - Roe - Counsel && Counsel" and dlg.pages == 1
 
 
+def test_ctrl_wheel_over_the_math_zooms_the_preview(qt, tmp_path):
+    """Ctrl and the wheel over The math zoomed only its text box (it isn't a QScrollArea), undone at the next
+    zoom of the preview. Now it zooms the whole preview."""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from helpers import ROE, make_case
+    from minute_filler.invoice import InvoiceOpts, firm_invoices
+    from minute_filler.models import Attorney
+    from minute_filler.gui.preview import PreviewDialog
+    s = pat_settings()
+    case = make_case(ROE, [Attorney(name="Alex B. Counsel", checked=True)])
+    math = [(f, "2026-0001") for f in firm_invoices(case, s, InvoiceOpts(10, 1, days=[("6/3/2026", 10)]))]
+    dlg = PreviewDialog([transcript_pdf(tmp_path / "Invoice.pdf", 1)], s, math=math)
+    view = dlg.math.text.viewport()
+    wheel = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120), Qt.NoButton,
+                        Qt.ControlModifier, Qt.NoScrollPhase, False)
+    qt.QApplication.sendEvent(view, wheel)
+    assert dlg.zoom > 1.0
+
+
 def test_a_document_added_while_the_preview_is_open_is_still_billed_later(previewing, monkeypatch, tmp_path):
     from minute_filler.gui.preview import PreviewDialog
 
@@ -553,6 +577,9 @@ def test_the_run_sheet_is_not_made_for_the_preview(previewing, monkeypatch, tmp_
     from minute_filler.gui.preview import PreviewDialog
     notes = []
     monkeypatch.setattr(PreviewDialog, "exec", lambda dlg: notes.append(dlg.tabs.count()) or PreviewDialog.Rejected)
+    # one reporter wrote it, so the box was left unticked for it: the user ticks it
+    assert not previewing.output_boxes["runsheet"].isChecked()
+    previewing.output_boxes["runsheet"].setChecked(True)
     previewing.s.outputs, previewing.s.runsheet_existing = ["runsheet"], "add"
     previewing.s.output_dirs = {"runsheet": str(tmp_path / "sheets")}
     monkeypatch.setattr(previewing, "_saved_box", lambda *a, **k: None)
@@ -748,6 +775,44 @@ def test_summary_in_the_records_window(window, qt):
     assert dlg.plain.startswith("October 2026\nInvoices made: 0") and "No invoices" in dlg.text.toPlainText()
     dlg._copy()
     assert qt.QApplication.clipboard().text() == dlg.plain
+
+
+def test_a_payment_must_be_an_amount(qt):
+    """Mark paid… recorded "sixty three" as $0.00 paid, and "-5" as a payment."""
+    from minute_filler.gui.records_window import PaidDialog
+    dlg = PaidDialog(inv("2026-0001"))
+    for bad in ("sixty three", "-5", ""):
+        dlg.amount.setText(bad)
+        dlg.setResult(0)
+        dlg.accept()
+        assert dlg.result() != qt.QDialog.Accepted and dlg.error.text(), bad
+    dlg.amount.setText("$63")
+    dlg.accept()
+    assert dlg.result() == qt.QDialog.Accepted and dlg.values()[1] == "63.00"
+
+
+def test_void_and_notes_say_so_when_the_records_cant_be_changed(window, monkeypatch, qt):
+    """A locked database raised out of the menu's slot: nothing said, the change lost."""
+    import sqlite3
+    from minute_filler.deliver import ledger_for
+    lg = ledger_for(window.s)
+    lg.add_invoice(inv("2026-0001", date.today().isoformat()))
+    window.s.recaps = False
+    window.open_records()
+    win = window._records_win
+    said = []
+    monkeypatch.setattr(qt.QMessageBox, "warning", lambda *a, **k: said.append(a[1]))
+    monkeypatch.setattr(qt.QMessageBox, "question", lambda *a, **k: qt.QMessageBox.Yes)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    for name in ("void", "mark_unpaid", "set_notes"):
+        monkeypatch.setattr(win.ledger, name, locked)
+    monkeypatch.setattr(qt.QInputDialog, "getText", lambda *a, **k: ("call Monday", True))
+    win._set_void(lg.invoice("2026-0001"))
+    win._unvoid(lg.invoice("2026-0001"))
+    win._notes(lg.invoice("2026-0001"))
+    assert said == ["Could not save"] * 3 and lg.invoice("2026-0001").status == "open"
 
 
 # ------------------------------------------------------------------ undo

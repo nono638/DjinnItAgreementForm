@@ -2,8 +2,8 @@
 
 Its widgets have random names ("Text-gJUsgvzPVi"; fill.py drops the "Text-"), so each one
 is mapped to a logical key here by its position on the page. Things the original lacks (signature lines, date of
-agreement, fax, case name lines 2-3) are stamped as text at fixed rectangles
-(PDF points, origin top-left, page 608.4 x 790.2).
+agreement, fax, case name lines 2-3) get a text field that fill.py adds at a fixed rectangle (OVERLAYS, in PDF
+points, origin top-left, page 608.4 x 790.2), so they can still be changed in a PDF viewer.
 """
 
 WIDGETS = {

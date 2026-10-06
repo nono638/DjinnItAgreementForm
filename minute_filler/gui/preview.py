@@ -2,17 +2,21 @@
 
 PreviewDialog shows the files Generate is about to make as pictures of their pages; nothing is saved until the
 user says so (MainWindow.fill makes them in a temporary folder first, with a records database of its own, so
-no invoice number is taken). Its "Don't show previews anymore" turns the preview off (Settings -> Options turns
-it back on).
+no invoice number is taken). With invoices among the files, its first tab is "The math" (math_view): how each
+amount is reached, shown before anything is saved. Each kind of file has a colour of its own (KIND_COLORS, told
+by file_kind from the mark in the PDF) on its tab (ColorTabBar); "Side by side" shows every file at once; the
+preview has its own zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl and the mouse wheel). Its "Don't show previews anymore"
+turns the preview off (Settings -> Options turns it back on). Generate all shows one too, for every file of the
+batch.
 
 print_files sends PDFs to a printer through Qt's own print box: each page is drawn as a picture (300 dpi),
 so it prints the same whatever PDF program the computer has (Edge, the default one, can't be asked to print a
 file). A page is printed at its actual size when the paper is big enough for it (a court form is not shrunk),
 else made to fit. Other files (the Excel run sheet) are handed to their own program's Print.
 
-MathDialog spells out the math of the invoices Generate just made (invoice_math.explain): a glance and OK. It can
-also copy the text or save it as a PDF, and its "Don't show this anymore" turns it off (Settings -> Options
-turns it back on).
+MathDialog spells out the math of the invoices Generate just made, when previews are off (invoice_math.explain):
+a glance and OK. It can also copy the text or save it as a PDF, and its "Don't show this anymore" turns it off
+(Settings -> Options turns it back on).
 
 WelcomeDialog asks a new user the few things the forms can't do without.
 """
@@ -22,10 +26,11 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QScrollArea, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QAbstractScrollArea, QPushButton, QScrollArea, QStackedWidget, QTabBar, QTabWidget, QTextBrowser, QVBoxLayout,
+    QWidget,
 )
 
 from ..log import error as log_error
@@ -36,6 +41,8 @@ PREVIEW_DPI = 110  # the pages' pictures at 100 % zoom: a letter page is about 9
 PRINT_DPI = 300    # the pages as sent to the printer: the usual resolution for printed text
 OFF_NOTE = "Previews are off from now on. Settings → Options turns them back on."
 MATH_OFF_NOTE = "Off from now on. Settings → Options turns it back on."
+# the math's lines: a line each, close together
+MATH_CSS = "p {margin: 0 0 3px 0;} h2 {margin: 14px 0 2px 0;} h3 {margin: 8px 0 3px 0;}"
 
 
 def page_image(page, dpi: int) -> QImage:
@@ -70,29 +77,101 @@ def print_rect(printer, width: float, height: float) -> QRect:
     return QRect(round((paper.width() - w) / 2), round((paper.height() - h) / 2), round(w), round(h))
 
 
-class PreviewDialog(QDialog):
-    """The files about to be saved, a tab each, their pages as pictures. accept() = save them. Clicking
-    "Don't show previews anymore" sets Settings.preview_before_saving off at once (and saves the settings); the
-    box stays open for the answer about these files."""
+# Each kind of file has a colour of its own: its tab, and its heading side by side (the math first)
+KIND_COLORS = {"math": "#0d9488", "agreement": "#2563eb", "invoice": "#16a34a", "detailed": "#84cc16",
+               "MOFR": "#9333ea", "other": "#64748b"}
+KIND_NAMES = {"math": "The math", "agreement": "Minute agreement", "invoice": "Invoice",
+              "detailed": "Invoice (detailed copy)", "MOFR": "MOFR", "other": "File"}
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.35, 2.5, 1.15  # the preview's own zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl+wheel)
+SIDE_WIDTH = 300  # a page's width side by side at zoom 1 (px at 100 % app zoom): several files fit across
 
-    def __init__(self, files: list[Path], s: Settings, parent=None, note: str = ""):
-        """files: the PDFs to show; note: a line under the heading (e.g. that the run sheet is not shown)."""
+
+def file_kind(path: Path | str) -> str:
+    """Which kind of file this app made (a key of KIND_COLORS): from the mark it puts in each PDF (fill.mark),
+    "detailed" for an invoice's detailed copy; "other" when it can't tell."""
+    try:
+        import pymupdf
+        with pymupdf.open(path) as doc:
+            creator = (doc.metadata or {}).get("creator", "")
+    except Exception:
+        return "other"
+    from ..fill import MARK, OLD_MARKS
+    kind = next((creator.removeprefix(m) for m in (MARK, *OLD_MARKS) if creator.startswith(m)), "").strip()
+    if kind == "invoice" and Path(path).stem.endswith("(detailed)"):
+        return "detailed"
+    return kind if kind in KIND_COLORS else "other"
+
+
+class ColorTabBar(QTabBar):
+    """A tab bar whose tabs are tinted with the colour in their tab data (a "#rrggbb"), with a bar of it along
+    the bottom: stronger on the tab shown."""
+
+    def paintEvent(self, _e) -> None:
+        from PySide6.QtWidgets import QStyle, QStyleOptionTab, QStylePainter
+        painter = QStylePainter(self)
+        for i in range(self.count()):
+            opt = QStyleOptionTab()
+            self.initStyleOption(opt, i)
+            painter.drawControl(QStyle.CE_TabBarTabShape, opt)
+            color = self.tabData(i)
+            if color:
+                c = QColor(color)
+                selected = i == self.currentIndex()
+                c.setAlpha(95 if selected else 45)
+                r = opt.rect.adjusted(1, 1, -1, 0)
+                painter.fillRect(r, c)
+                c.setAlpha(255)
+                painter.fillRect(r.adjusted(0, r.height() - (4 if selected else 2), 0, 0), c)
+            painter.drawControl(QStyle.CE_TabBarTabLabel, opt)
+
+
+class PreviewDialog(QDialog):
+    """The files about to be saved, a tab each, their pages as pictures; each kind of file (agreement, invoice,
+    MOFR, the math) has a colour of its own (KIND_COLORS). "Side by side" shows every file at once, next to each
+    other and smaller; Ctrl + / Ctrl - / Ctrl 0 (or Ctrl and the mouse wheel) zoom either view. accept() = save
+    them. Clicking "Don't show previews anymore" sets Settings.preview_before_saving off at once (and saves the
+    settings); the box stays open for the answer about these files."""
+
+    def __init__(self, files: list[Path], s: Settings, parent=None, note: str = "", math: list | None = None):
+        """files: the files to show (only PDFs get pictures); note: a line under the heading (e.g. that the run
+        sheet is not shown); math: (FirmInvoice, invoice number) of each invoice about to be saved, shown on a
+        first tab, "The math" (see math_view), when there are any."""
+        from PySide6.QtGui import QKeySequence, QShortcut
         super().__init__(parent)
         self.s = s
         self.setWindowTitle("Preview")
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         lay = QVBoxLayout(self)
+        top = QHBoxLayout()
         head = QLabel("This is what will be saved. <b>Nothing is saved yet.</b>")
         head.setWordWrap(True)
-        lay.addWidget(head)
+        top.addWidget(head, 1)
+        self.zoom_label = QLabel("")
+        self.zoom_label.setObjectName("muted")
+        self.zoom_label.setToolTip("Ctrl + and Ctrl - zoom, Ctrl 0 goes back (or Ctrl and the mouse wheel)")
+        top.addWidget(self.zoom_label)
+        self.side = QPushButton("Side by side")
+        self.side.setCheckable(True)
+        self.side.setAutoDefault(False)
+        self.side.setToolTip("Every file at once, next to each other (smaller): Ctrl + and Ctrl - zoom")
+        self.side.toggled.connect(self._side_by_side)
+        top.addWidget(self.side)
+        lay.addLayout(top)
         if note:
             more = QLabel(note)
             more.setObjectName("muted")
             more.setWordWrap(True)
             lay.addWidget(more)
         self.tabs = QTabWidget()
-        lay.addWidget(self.tabs, 1)
+        self.tabs.setTabBar(ColorTabBar())
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.tabs)
+        lay.addWidget(self.stack, 1)
         self.pages = 0
+        self.zoom = 1.0
+        # the pages' pictures, to draw again at each zoom: (label, image, width at zoom 1, side by side)
+        self.pics: list[tuple[QLabel, QImage, int, bool]] = []
+        self.texts: list[QTextBrowser] = []  # the math, zoomed with the pages
         # as big as a letter page at this zoom, but never more than the screen has room for; the pages are
         # drawn to fit its width, so only up and down is scrolled
         screen = self.screen() or (parent.screen() if parent is not None else None)
@@ -101,37 +180,46 @@ class PreviewDialog(QDialog):
         if avail is not None:
             w, h = min(w, int(avail.width() * 0.95)), min(h, int(avail.height() * 0.9))
         widest = w - z(80)  # (margins, the frame and the scroll bar)
+        self.math = None
+        shown: list[tuple[str, str, list[QImage], str]] = []  # (name, kind, pages, tooltip) of each file
+        if math:
+            self.math = math_view(math, "How the amounts on " + ("this invoice" if len(math) == 1 else "these invoices")
+                                  + " are reached. The numbers are the ones they get when you click Save.")
+            self.texts.append(self.math.text)
+            self._add_tab(self.math, "The math", "math", "How each amount is reached, line by line")
         for f in files:
             page = QWidget()
             col = QVBoxLayout(page)
             col.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-            try:
-                images = page_images(f, z(PREVIEW_DPI)) if Path(f).suffix.lower() == ".pdf" else []
+            try:  # (drawn sharper than shown, so zooming in stays clear)
+                images = page_images(f, int(z(PREVIEW_DPI) * 1.5)) if Path(f).suffix.lower() == ".pdf" else []
             except Exception as e:  # the other files are still shown
                 log_error("could not draw a preview", e)
                 images = []
             for img in images:
                 pic = QLabel()
-                if img.width() > widest:
-                    img = img.scaledToWidth(widest, Qt.SmoothTransformation)
-                pic.setPixmap(QPixmap.fromImage(img))
                 pic.setFrameShape(QLabel.Box)
+                self.pics.append((pic, img, min(img.width() * 2 // 3, widest), False))
                 col.addWidget(pic)
             if not images:
                 col.addWidget(QLabel("(no preview of this file)"))
             self.pages += len(images)
             scroll = QScrollArea()
             scroll.setWidget(page)
+            scroll.setWidgetResizable(False)
             scroll.setAlignment(Qt.AlignHCenter)
             name = Path(f).stem
-            name = name if len(name) <= 34 else name[:33].rstrip() + "…"
-            self.tabs.addTab(scroll, name.replace("&", "&&"))  # (a single & would be read as a shortcut mark)
-            self.tabs.setTabToolTip(self.tabs.count() - 1, Path(f).name)
+            kind = file_kind(f)
+            shown.append((name, kind, images, Path(f).name))
+            short = name if len(name) <= 34 else name[:33].rstrip() + "…"
+            self._add_tab(scroll, short.replace("&", "&&"), kind, Path(f).name)  # (a lone & is a shortcut mark)
+        self.stack.addWidget(self._side_view(shown, math))
 
         row = QHBoxLayout()
         self.off = QPushButton("Don't show previews anymore")
         self.off.setFlat(True)
-        self.off.setToolTip("Generate then saves at once, as before. Settings → Options turns previews back on.")
+        self.off.setToolTip("Generate and Generate all then save at once. Settings → Options turns previews back "
+                            "on.")
         self.off.clicked.connect(self._turn_off)
         row.addWidget(self.off)
         self.off_note = QLabel("")
@@ -150,7 +238,105 @@ class PreviewDialog(QDialog):
         row.addWidget(back)
         row.addWidget(self.save)
         lay.addLayout(row)
+        for keys, step in (("Ctrl++", 1), ("Ctrl+=", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):
+            QShortcut(QKeySequence(keys), self, activated=lambda s=step: self.zoom_step(s))
+        self._draw()
         self.resize(w, h)
+
+    def _add_tab(self, widget: QWidget, text: str, kind: str, tip: str) -> None:
+        """A tab in the colour of its kind of file (KIND_COLORS), its kind said in its tooltip."""
+        i = self.tabs.addTab(widget, text)
+        self.tabs.tabBar().setTabData(i, KIND_COLORS[kind])
+        self.tabs.setTabToolTip(i, f"{KIND_NAMES[kind]}: {tip}")
+        self._zoom_with_wheel(widget)
+
+    def _side_view(self, shown: list, math: list | None) -> QWidget:
+        """Side by side: a column per file (the math first), each headed by its name in its colour, its pages
+        under it, scrolled across and down together."""
+        from ..invoice_math import explain
+        box = QWidget()
+        cols = QHBoxLayout(box)
+        cols.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        cols.setSpacing(z(14))
+
+        def column(name: str, kind: str, tip: str) -> QVBoxLayout:
+            col = QVBoxLayout()
+            col.setAlignment(Qt.AlignTop)
+            title = QLabel(name if len(name) <= 40 else name[:39].rstrip() + "…")
+            title.setToolTip(f"{KIND_NAMES[kind]}: {tip}")
+            title.setStyleSheet(f"color: white; background: {KIND_COLORS[kind]}; border-radius: 4px; "
+                                "padding: 3px 8px; font-weight: 600;")
+            col.addWidget(title)
+            cols.addLayout(col)
+            return col
+
+        if math:
+            col = column("The math", "math", "How each amount is reached")
+            text = QTextBrowser()
+            text.document().setDefaultStyleSheet(MATH_CSS)
+            text.setHtml(explain(math)[0])
+            text.setMinimumWidth(z(SIDE_WIDTH + 60))
+            text.setMinimumHeight(z(560))
+            self.texts.append(text)
+            col.addWidget(text)
+        for name, kind, images, tip in shown:
+            col = column(name, kind, tip)
+            for img in images:
+                pic = QLabel()
+                pic.setFrameShape(QLabel.Box)
+                self.pics.append((pic, img, z(SIDE_WIDTH), True))
+                col.addWidget(pic)
+        cols.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidget(box)
+        scroll.setWidgetResizable(True)
+        self._zoom_with_wheel(scroll)
+        return scroll
+
+    def _zoom_with_wheel(self, widget: QWidget) -> None:
+        """Ctrl and the mouse wheel over a page, or over the math, zoom the preview (the scroll area would
+        scroll instead, and the math's text box would zoom only itself, and only until the next draw)."""
+        areas = [widget] if isinstance(widget, QAbstractScrollArea) else []
+        for scroll in areas + widget.findChildren(QAbstractScrollArea):
+            scroll.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, e) -> bool:
+        """Ctrl and the mouse wheel over the viewports _zoom_with_wheel watches: the preview's zoom, not a
+        scroll."""
+        from PySide6.QtCore import QEvent
+        if e.type() == QEvent.Wheel and e.modifiers() & Qt.ControlModifier:
+            self.zoom_step(1 if e.angleDelta().y() > 0 else -1)
+            return True
+        return super().eventFilter(obj, e)
+
+    def zoom_step(self, step: int) -> None:
+        """Zooms in (1), out (-1) or back to the start (0), within ZOOM_MIN and ZOOM_MAX."""
+        before = self.zoom
+        self.zoom = 1.0 if step == 0 else min(ZOOM_MAX, max(ZOOM_MIN, self.zoom * ZOOM_STEP ** step))
+        if abs(self.zoom - 1.0) < 0.01:
+            self.zoom = 1.0
+        if self.zoom != before:
+            self._draw(before)
+
+    def _draw(self, before: float = 1.0) -> None:
+        """Draws the pages at the zoom (the math's text too), and says the zoom when it isn't 100 %."""
+        for pic, img, width, _ in self.pics:
+            pic.setPixmap(QPixmap.fromImage(img.scaledToWidth(max(40, int(width * self.zoom)),
+                                                              Qt.SmoothTransformation)))
+            pic.adjustSize()
+            pic.parentWidget().adjustSize()
+        for text in self.texts:  # (scaled from the size it started at, kept on it, so zooms don't add up)
+            font = text.font()
+            base = getattr(text, "_base_pt", None) or font.pointSizeF()
+            text._base_pt = base
+            font.setPointSizeF(max(6.0, base * self.zoom))
+            text.setFont(font)
+        self.zoom_label.setText("" if self.zoom == 1.0 else f"{round(self.zoom * 100)} %")
+
+    def _side_by_side(self, on: bool) -> None:
+        """Side by side: every file at once (the button stays pressed), or the tabs again."""
+        self.stack.setCurrentIndex(1 if on else 0)
+        self.side.setText("One at a time" if on else "Side by side")
 
     def _turn_off(self) -> None:
         """No more previews: saved in the settings now, whatever is answered about these files."""
@@ -161,6 +347,36 @@ class PreviewDialog(QDialog):
             log_error("could not save the settings", e)
         self.off.setVisible(False)
         self.off_note.setText(OFF_NOTE)
+
+
+def math_view(made: list, heading: str) -> QWidget:
+    """The math of invoices (invoice_math.explain), as the preview's "The math" tab shows it: a heading, the
+    text, and Copy all. made: (FirmInvoice, invoice number) for each invoice. The widget returned keeps its
+    text box as .text (PreviewDialog zooms it) and the plain text as .plain."""
+    from ..invoice_math import explain
+    html, plain = explain(made)
+    w = QWidget()
+    col = QVBoxLayout(w)
+    head = QLabel(heading)
+    head.setWordWrap(True)
+    col.addWidget(head)
+    text = QTextBrowser()
+    text.document().setDefaultStyleSheet(MATH_CSS)
+    text.setHtml(html)
+    col.addWidget(text, 1)
+    row = QHBoxLayout()
+    note = QLabel("")
+    note.setObjectName("muted")
+    row.addWidget(note)
+    row.addStretch(1)
+    copy = QPushButton("Copy all")
+    copy.setAutoDefault(False)
+    copy.setToolTip("Put all of it on the clipboard as text, to paste into an e-mail")
+    copy.clicked.connect(lambda: (QApplication.clipboard().setText(plain), note.setText("Copied.")))
+    row.addWidget(copy)
+    col.addLayout(row)
+    w.text, w.plain = text, plain
+    return w
 
 
 class MathDialog(QDialog):
@@ -183,8 +399,7 @@ class MathDialog(QDialog):
         head.setWordWrap(True)
         lay.addWidget(head)
         self.text = QTextBrowser()
-        self.text.document().setDefaultStyleSheet("p {margin: 0 0 3px 0;} h2 {margin: 14px 0 2px 0;} "
-                                                  "h3 {margin: 8px 0 3px 0;}")  # (a line each, close together)
+        self.text.document().setDefaultStyleSheet(MATH_CSS)
         self.text.setHtml(self.html)
         lay.addWidget(self.text, 1)
 
@@ -259,10 +474,10 @@ class MathDialog(QDialog):
 def print_files(parent, files: list, printer=None) -> int:
     """Prints files and returns how many were sent. PDFs go to one printer, chosen once in the print box
     (printer: a QPrinter to use without asking, for the tests), every page of them: the box offers no page
-    range. Each page is drawn at 300 dpi at its actual size (see print_rect), upright or sideways as the page
-    is; the copies asked for are made here when the printer can't make them itself. Other files (the Excel run
-    sheet) are handed to their own program's Print. Says so when a file could not be printed, or the printer
-    stopped."""
+    range. Each page is drawn at 300 dpi at its actual size, or made to fit (see print_rect), upright or
+    sideways as the page is; the copies asked for are made here when the printer can't make them itself. Other
+    files (the Excel run sheet) are handed to their own program's Print. Says so when a file could not be
+    printed, or the printer stopped."""
     import pymupdf
     from PySide6.QtGui import QPageLayout
     from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter

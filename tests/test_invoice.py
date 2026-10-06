@@ -117,7 +117,7 @@ def test_invoice_pdf_and_record(case, s, tmp_path):
     paths = make_invoices(case, s, tmp_path / "out", InvoiceOpts(pages=60, parties=2), ledger)
     assert len(paths) == 2  # one per ticked attorney
     doc = pymupdf.open(paths[0])
-    assert doc.page_count == 1 and doc.metadata["creator"] == "DjinnIt invoice"
+    assert doc.page_count == 1 and doc.metadata["creator"] == "YinIt invoice"
     text = page_text(paths[0])
     for want in ("INVOICE", "Pat Reporter", "Regular", "Expedite", "Daily", "2-4 weeks from receipt of payment",
                  "Please choose one", "delivered once every party has paid"):  # 2 parties, said without detail

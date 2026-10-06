@@ -13,7 +13,8 @@ from pathlib import Path
 def selftest(out_dir: str, files: list[str]) -> int:
     """Headless check of a build: reads each file and fills its agreement on both forms (clean and original),
     checks the libraries a build can lose without anything else failing (fuzzy_search, regex_search,
-    heic_photos, update_check, printing, math_pdf: True each, else the error), then writes selftest.json into out_dir.
+    heic_photos, update_check, printing, math_pdf, moving_picture: True each, else the error), then writes
+    selftest.json into out_dir.
     The default settings are used; the saved ones are not touched."""
     import json
     from minute_filler.extract_regex import RegexExtractor
@@ -62,6 +63,15 @@ def selftest(out_dir: str, files: list[str]) -> int:
         report["math_pdf"] = to_pdf("<p>Copy: 2 × 1 page × $1.00 = $2.00</p>", out / "math.pdf").exists()
     except Exception as e:
         report["math_pdf"] = f"{type(e).__name__}: {e}"
+    try:  # the swirling yin-yang while documents are read is a WebP: needs Qt's imageformats plugin for it
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtGui import QImageReader
+        app = QCoreApplication.instance() or QCoreApplication(["selftest"])  # noqa: F841 (loads the plugins)
+        from minute_filler.gui.widgets import ASSETS
+        reader = QImageReader(str(ASSETS / "yin_working.webp"))
+        report["moving_picture"] = reader.supportsAnimation() and reader.imageCount() > 1
+    except Exception as e:
+        report["moving_picture"] = f"{type(e).__name__}: {e}"
     for f in files:
         try:
             case = merge([RegexExtractor(s.profile).extract(ingest_file(f))], s)
@@ -170,12 +180,12 @@ def main() -> int:
 
     try:  # own taskbar icon/grouping instead of python.exe's
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DjinnItAgreementForm")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YinItAgreementForm")
     except Exception:
         pass
 
     app = QApplication(sys.argv)
-    app.setApplicationName("DjinnItAgreementForm")
+    app.setApplicationName("YinItAgreementForm")
     _tell_user_about_crashes(app)
     app.setStyle("Fusion")
     icon = app_icon()

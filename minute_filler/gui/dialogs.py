@@ -1,12 +1,14 @@
-"""The app's dialogs: Settings, the "please clarify" questions before filling, the run sheet choice, a job's
-invoice Extras, granular detail, excerpts (who ordered which pages) and whose pages of a transcript of several
-reporters to bill, the Ollama setup help (with a model download), About and the How to use guide (GUIDE).
-The preview before saving and the first-run welcome are in preview.py."""
+"""The app's dialogs: Settings (with its invoice text editor), the "please clarify" questions before filling, the
+run sheet choice, a job's invoice Extras, granular detail and whose pages of a transcript of several reporters to
+bill, another reporter's invoice details (ReporterDialog), the Ollama setup help (with a model download), About
+and the How to use guide (GUIDE). The preview before saving and the first-run welcome are in preview.py; the
+Excerpts window (who ordered which pages) is gui/excerpts.py."""
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
-from PySide6.QtCore import QEvent, QThread, Qt, Signal
+from PySide6.QtCore import QSignalBlocker, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
@@ -15,8 +17,9 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..models import Attorney, FIELD_LABELS
-from ..settings import (DETAIL_ITEMS, INDEX_RULES, INDEX_SHARED, OUTPUT_FOLDERS, OUTPUTS, SPEEDS, TEXT_PLACEHOLDERS,
-                        TEXT_PLACES, TEXT_WHEN, Settings, default_invoice_texts, reporter_key)
+from ..settings import (AGREEMENT_FALLBACKS, DETAIL_ITEMS, INDEX_RULES, INDEX_SHARED, OUTPUT_FOLDERS, OUTPUTS, SPEEDS,
+                        ReporterProfile, TEXT_PLACEHOLDERS, TEXT_PLACES, TEXT_WHEN, Settings, default_invoice_texts,
+                        reporter_key)
 from .widgets import check_row, open_path, open_url, refill_combo, rounded
 from .zoom import z
 
@@ -66,7 +69,8 @@ class SettingsDialog(QDialog):
         self.p_initials = QLineEdit(p.initials)
         self.p_initials.setPlaceholderText("as you put them at the foot of your transcript pages, e.g. pr")
         self.p_initials.setToolTip("Run sheets and invoices: the pages with these initials are yours (an invoice "
-                                   "of a transcript several reporters wrote bills only yours).\n"
+                                   "of a transcript several reporters\nwrote bills yours, unless Whose pages… says "
+                                   "otherwise).\n"
                                    "Blank = the first letters of your first and last name.")
         for label, wid in (("Name", self.p_name), ("Title", self.p_title), ("Address", self.p_addr1),
                            ("", self.p_addr2), ("Telephone", self.p_phone), ("Fax", self.p_fax),
@@ -106,12 +110,9 @@ class SettingsDialog(QDialog):
 
         # Rate sheets
         self.d_sheet = QComboBox()
-        self.d_delivery = QComboBox()
         self._sheet_dir = settings.rate_sheets_dir
         self._load_sheet_names()
-        self.d_sheet.currentIndexChanged.connect(lambda _: self._load_speeds())
         f.addRow("Rate sheet", self.d_sheet)
-        f.addRow("Default speed", self.d_delivery)
         row = QHBoxLayout()
         self.d_dir = QLineEdit(settings.rate_sheets_dir)
         from ..rates import default_dir
@@ -161,16 +162,16 @@ class SettingsDialog(QDialog):
         self.o_flat.setToolTip("Applies to minute agreements, MOFRs and invoices: they are locked as they are made.\n"
                                "Unticked, they stay fillable; File → Lock finished PDFs locks a copy later.")
         self.o_open = QCheckBox("Open the PDF after saving")
-        self.o_preview = QCheckBox("Show a preview before saving (Generate)")
-        self.o_preview.setToolTip("Generate first shows the files as pictures; nothing is saved until you say so.\n"
-                                  "Generate all (a batch) saves without a preview.")
+        self.o_preview = QCheckBox("Show a preview before saving (Generate, Generate all)")
+        self.o_preview.setToolTip("Generate and Generate all first show the files as pictures, with the math of the "
+                                  "invoices;\nnothing is saved until you click Save.")
         self.o_tc = QCheckBox("Convert ALL-CAPS names to Title Case")
-        self.o_djinn = QCheckBox("Show the Djinn (working / done / stumped pictures)")
+        self.o_yin = QCheckBox("Show the yin-yang (working / done / stumped pictures)")
         for cb, val in ((self.o_per_email, settings.per_email),
                         (self.o_today, settings.agreement_today), (self.o_flat, settings.flatten),
                         (self.o_open, settings.open_after), (self.o_preview, settings.preview_before_saving),
                         (self.o_tc, settings.title_case_names),
-                        (self.o_djinn, settings.show_djinn)):
+                        (self.o_yin, settings.show_yin)):
             cb.setChecked(val)
             f.addRow("", cb)
         from ..fill import FORMS
@@ -229,10 +230,10 @@ class SettingsDialog(QDialog):
                                  "the year before.")
         self.o_recaps.setChecked(settings.recaps)
         f.addRow("Recaps", self.o_recaps)
-        self.o_math = QCheckBox("Show the math after making an invoice")
-        self.o_math.setToolTip("After Generate makes an invoice, a window spells out how each amount was reached\n"
-                               "(pages × rate, the copies, the split between parties): glance at it and click OK,\n"
-                               "or copy it or save it as a PDF. Generate all with several jobs doesn't show it.")
+        self.o_math = QCheckBox("Show the math of each invoice")
+        self.o_math.setToolTip("How each amount is reached (pages × rate, the copies, the split between parties):\n"
+                               "the preview's first tab, The math, or, with previews off, a window after saving\n"
+                               "that can copy it or save it as a PDF. For Generate and Generate all.")
         self.o_math.setChecked(settings.show_math)
         f.addRow("Invoice math", self.o_math)
         self.o_updates = QCheckBox("Look for a newer version once a day")
@@ -257,14 +258,41 @@ class SettingsDialog(QDialog):
         from ..rates import speed_key
         offered = {speed_key(x) for x in settings.invoice_speeds}
         speeds, self.i_speeds = check_row({n: n for n in SPEEDS}, [n for n in SPEEDS if speed_key(n) in offered],
-                                          spacing=12)
+                                          self._show_agreement_speed, spacing=12)
         speeds.addStretch(1)
         f.addRow("Speeds offered", speeds)
-        hint = QLabel("The attorney chooses one. With one ticked the invoice bills that speed alone; with none, "
-                      "the speed chosen under Order.")
+        hint = QLabel("The attorney chooses one. With one ticked the invoice bills that speed alone. "
+                      "The same boxes are in the Order card of the main window.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         f.addRow("", hint)
+        # the one speed the minute agreement form names, out of those offered (Settings.agreement_speed)
+        first = QHBoxLayout()
+        self.i_first = QComboBox()
+        names = list(SPEEDS)
+        if settings.agreement_speed_first and not any(speed_key(n) == speed_key(settings.agreement_speed_first)
+                                                      for n in names):
+            names.append(settings.agreement_speed_first)  # a sheet's own spelling ("Expedite"): kept, not Regular
+        for n in names:
+            self.i_first.addItem(n, n)
+        self.i_first.setCurrentIndex(max(0, next((i for i, n in enumerate(names)
+                                                  if speed_key(n) == speed_key(settings.agreement_speed_first)), 0)))
+        self.i_fallback = QComboBox()
+        for k, label in AGREEMENT_FALLBACKS.items():
+            self.i_fallback.addItem(label, k)
+        self.i_fallback.setCurrentIndex(max(0, self.i_fallback.findData(settings.agreement_speed_fallback)))
+        first.addWidget(self.i_first)
+        first.addWidget(QLabel("when it is offered; otherwise"))
+        first.addWidget(self.i_fallback)
+        first.addStretch(1)
+        f.addRow("Agreement form speed", first)
+        self.i_agreement_note = QLabel("")
+        self.i_agreement_note.setObjectName("muted")
+        self.i_agreement_note.setWordWrap(True)
+        f.addRow("", self.i_agreement_note)
+        self.i_first.currentIndexChanged.connect(self._show_agreement_speed)
+        self.i_fallback.currentIndexChanged.connect(self._show_agreement_speed)
+        self._show_agreement_speed()
         shows = QGridLayout()
         shows.setHorizontalSpacing(16)
         shows.setVerticalSpacing(6)
@@ -367,7 +395,7 @@ class SettingsDialog(QDialog):
         self.r_pattern = QLineEdit(settings.runsheet_filename_pattern)
         self.r_pattern.setToolTip("Placeholders: {month} {year} (of the first day)  {case}  {index}  {date}")
         f.addRow("File name", self.r_pattern)
-        self.r_names = QPlainTextEdit("\n".join(f"{k} = {v}" for k, v in sorted(settings.reporters.items())))
+        self.r_names = QPlainTextEdit("\n".join(f"{k} = {v}" for k, v in sorted(settings.reporter_names().items())))
         self.r_names.setPlaceholderText("ds = Dana\nkl = Kim")
         self.r_names.setFixedHeight(z(110))
         f.addRow("Reporters", self.r_names)
@@ -377,6 +405,21 @@ class SettingsDialog(QDialog):
         help_lbl.setWordWrap(True)
         help_lbl.setObjectName("muted")
         f.addRow("", help_lbl)
+        # the details on the invoices made for another reporter's pages (Whose pages... ticks them)
+        from copy import deepcopy
+        self._details = deepcopy(settings.reporters)
+        row = QHBoxLayout()
+        self.r_who = QComboBox()
+        self.r_who.setMinimumContentsLength(14)
+        self.r_edit = QPushButton("Invoice details…")
+        self.r_edit.setToolTip("Their name, address and how to pay them, for the invoices you make for their "
+                               "pages\n(Invoice → Whose pages… ticks whose pages are billed)")
+        self.r_edit.clicked.connect(self._edit_reporter)
+        row.addWidget(self.r_who, 1)
+        row.addWidget(self.r_edit)
+        f.addRow("Invoices for", row)
+        self.r_names.textChanged.connect(self._fill_reporters)
+        self._fill_reporters()
         self.tabs.addTab(w, "Run sheet")
 
         # --- AI
@@ -427,7 +470,8 @@ class SettingsDialog(QDialog):
 
     # --- signature picture
     def _show_signature(self, path: str):
-        """Shows the signature picture at `path` scaled to the row, or a hint if there is none, and enables Remove accordingly."""
+        """Shows the signature picture at `path` scaled to the row, or a hint if there is none, and enables
+        Remove accordingly."""
         from pathlib import Path
         from PySide6.QtGui import QPixmap
         pix = QPixmap(path) if path and Path(path).is_file() else QPixmap()
@@ -486,21 +530,24 @@ class SettingsDialog(QDialog):
 
     # --- rate sheet helpers
     def _load_sheet_names(self):
-        """Lists the rate sheets found in the sheets folder, keeps the current choice if it still exists, then reloads the speeds."""
+        """Lists the rate sheets found in the sheets folder and keeps the current choice if it still exists (else
+        rates.pick chooses one)."""
         from ..rates import list_sheets, pick
         sheets, _ = list_sheets(self._sheet_dir)
         self._sheets = {s.name: s for s in sheets}
         current = pick(sheets, self.d_sheet.currentData() or self.s.rate_sheet)
         refill_combo(self.d_sheet, [(s.name, s.name) for s in sheets or [current]], current.name)
-        self._load_speeds()
 
-    def _load_speeds(self):
-        """Fills the default-speed box with the chosen rate sheet's speeds, keeping the current speed if the sheet has it."""
-        from ..rates import FALLBACK
-        sheet = self._sheets.get(self.d_sheet.currentData(), FALLBACK)
-        keep = self.d_delivery.currentData() or self.s.default_delivery
-        found = sheet.find(keep)
-        refill_combo(self.d_delivery, [(sp.label(), sp.name) for sp in sheet.speeds], found.name if found else None)
+    def _show_agreement_speed(self, _=None):
+        """The line under Agreement form speed: which speed the form gets with the speeds ticked now."""
+        from copy import copy
+        trial = copy(self.s)
+        trial.invoice_speeds = [k for k, cb in self.i_speeds.items() if cb.isChecked()]
+        trial.agreement_speed_first = self.i_first.currentData() or ""
+        trial.agreement_speed_fallback = self.i_fallback.currentData() or "slowest"
+        ticked = " + ".join(trial.invoice_speeds) or "no speed"
+        self.i_agreement_note.setText(f"With {ticked} ticked, the agreement form says {trial.agreement_speed()}. "
+                                      "A job's own choice (Order card) comes first.")
 
     def _pick_sheet_dir(self):
         """Lets the user choose another rate sheets folder and reloads the sheet list from it."""
@@ -516,7 +563,8 @@ class SettingsDialog(QDialog):
         open_path(sheets_dir(self.d_dir.text().strip()))
 
     def _load_models(self):
-        """Fills the model box with the models Ollama has installed. Silent if Ollama is not running (waits at most 2 seconds)."""
+        """Adds the models Ollama has installed to the model box. Silent if Ollama is not running (waits at most
+        2 seconds)."""
         from ..extract_llm import OllamaExtractor
         try:
             names = OllamaExtractor(self.s).installed_models(timeout=2)
@@ -537,7 +585,8 @@ class SettingsDialog(QDialog):
         self.a_model.addItems(sorted({*installed, self.s.ollama_model} - set(MODELS) - {""}))
 
     def _test_ai(self):
-        """Checks the typed model and URL with a throwaway Settings object, so nothing is saved, and shows the result."""
+        """Checks the typed model and URL with a throwaway Settings object, so nothing is saved, and shows the
+        result."""
         from ..extract_llm import OllamaExtractor
         tmp = Settings()
         tmp.ollama_model, tmp.ollama_host = self.a_model.currentText().strip(), self.a_host.text().strip()
@@ -651,6 +700,45 @@ class SettingsDialog(QDialog):
                 bad.append(line)
         return out, bad
 
+    def _fill_reporters(self) -> None:
+        """The reporters listed in the Reporters box, and those with invoice details but no line in it (details
+        saved from Whose pages...), for Invoice details...; marked when they have details."""
+        names, _ = self._reporter_names(self.r_names.toPlainText())
+        keep = self.r_who.currentData()
+        listed = {**{k: "" for k, d in self._details.items() if d.has_details()}, **names}
+        items = [(f"{k.upper()}" + (f" - {v}" if v else "")
+                  + ("  ✓" if self._details.get(k, ReporterProfile()).has_details() else ""), k)
+                 for k, v in sorted(listed.items())]
+        refill_combo(self.r_who, items, keep)
+        self.r_edit.setEnabled(bool(items))
+
+    def _edit_reporter(self) -> None:
+        """Invoice details... for the reporter chosen: kept with the settings when they are saved."""
+        k = self.r_who.currentData()
+        if not k:
+            return
+        names, _ = self._reporter_names(self.r_names.toPlainText())
+        dlg = ReporterDialog(k, replace(self._details.get(k, ReporterProfile()), name=names.get(k, "")), self)
+        if dlg.exec() == QDialog.Accepted:
+            self._details[k] = dlg.value()
+            if self._details[k].name != names.get(k, ""):  # (else the box's line would undo it on Save)
+                self._set_reporter_line(k, self._details[k].name)
+            self._fill_reporters()
+
+    def _set_reporter_line(self, k: str, name: str) -> None:
+        """Writes reporter k's line in the Reporters box as "k = name" (none for a blank name), where it was."""
+        lines, done = [], False
+        for line in self.r_names.toPlainText().splitlines():
+            if k in self._reporter_names(line)[0]:
+                if name and not done:
+                    lines.append(f"{k} = {name}")
+                done = True
+            else:
+                lines.append(line)
+        if name and not done:
+            lines.append(f"{k} = {name}")
+        self.r_names.setPlainText("\n".join(lines))
+
     def _pick_into(self, edit: QLineEdit, title: str):
         """Asks for a folder, starting at the one in `edit`, and puts the choice into `edit`."""
         d =QFileDialog.getExistingDirectory(self, title, edit.text() or edit.placeholderText())
@@ -668,7 +756,8 @@ class SettingsDialog(QDialog):
         p.website = self.p_web.text().strip()
         p.initials = self.p_initials.text().strip().lower().replace(".", "").replace(" ", "")
         s.default_court, s.default_county = self.d_court.text().strip(), self.d_county.text().strip()
-        s.default_delivery = self.d_delivery.currentData() or s.default_delivery
+        s.agreement_speed_first = self.i_first.currentData() or s.agreement_speed_first
+        s.agreement_speed_fallback = self.i_fallback.currentData() or s.agreement_speed_fallback
         s.default_copies = self.d_copies.text().strip()
         s.rate_sheet = self.d_sheet.currentData() or s.rate_sheet
         s.rate_sheets_dir = self.d_dir.text().strip()
@@ -692,7 +781,7 @@ class SettingsDialog(QDialog):
         s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
         s.mofr_division = self.o_division.currentData()
         s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
-        # speeds named otherwise on a rate sheet (ticked in the Outputs box) have no box here: they stay
+        # speeds named otherwise on a rate sheet (ticked in the Order card) have no box here: they stay
         from ..rates import speed_key
         keep = [x for x in s.invoice_speeds if speed_key(x) not in {speed_key(n) for n in SPEEDS}]
         s.invoice_speeds = keep + [k for k, cb in self.i_speeds.items() if cb.isChecked()]
@@ -710,11 +799,15 @@ class SettingsDialog(QDialog):
         s.output_dirs = {k: e.text().strip() for k, e in self.o_dirs.items() if e.text().strip()}
         s.runsheet_existing = self.r_existing.currentData()
         s.runsheet_filename_pattern = self.r_pattern.text().strip() or s.runsheet_filename_pattern
-        s.reporters, bad = self._reporter_names(self.r_names.toPlainText())
+        names, bad = self._reporter_names(self.r_names.toPlainText())
+        s.reporters = {k: replace(self._details.get(k, ReporterProfile()), name=v) for k, v in names.items()}
+        for k, d in self._details.items():  # invoice details of a reporter with no line: kept, without a name
+            if k not in s.reporters and d.has_details():
+                s.reporters[k] = replace(d, name="")
         if bad:
             QMessageBox.warning(self, "Reporters", "These lines under Run sheet → Reporters were left out (write "
                                 "them as initials = name, e.g. ds = Dana):\n\n" + "\n".join(bad[:10]))
-        s.show_djinn = self.o_djinn.isChecked()
+        s.show_yin = self.o_yin.isChecked()
         s.use_ai, s.ai_for_text = self.a_use.isChecked(), self.a_text.isChecked()
         s.ollama_model, s.ollama_host = self.a_model.currentText().strip(), self.a_host.text().strip()
         s.ai_timeout = self.a_timeout.value()
@@ -729,6 +822,8 @@ class InvoiceTextEditor(QWidget):
     Settings.invoice_texts keeps them."""
 
     def __init__(self, rows: list[dict], on_preview=None, parent=None):
+        """rows: Settings.invoice_texts (copied, not changed); on_preview: called by Preview… (no such button
+        without it)."""
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -827,6 +922,7 @@ class InvoiceTextEditor(QWidget):
         self.table.item(i).setText(self._label(self._rows[i]))
 
     def _add(self) -> None:
+        """Add: a blank row under the one selected, ready to type in."""
         i = self.table.currentRow() + 1 if self._rows else 0
         self._rows.insert(i, {"where": "amounts", "when": "always", "text": ""})
         self._refresh(i)
@@ -1028,280 +1124,29 @@ class InvoiceShowDialog(QDialog):
         return None if set(items) == set(self.default) else items
 
 
-def excerpt_rows(pages: int, everyone: list[str], who: str, first: int, last: int) -> list[tuple[int, list[str]]]:
-    """The Excerpts... rows for an excerpt: `who` ordered pages first to last, everyone else the whole day.
-    excerpt_rows(100, ["a", "b"], "b", 20, 40) -> [(19, ["a"]), (40, ["a", "b"]), (100, ["a"])]."""
-    first, last = max(1, min(first, pages)), max(1, min(last, pages))
-    first, last = min(first, last), max(first, last)
-    others = [k for k in everyone if k != who]
-    rows = [(first - 1, others)] if first > 1 else []
-    rows.append((last, [k for k in everyone if k in others or k == who]))
-    if last < pages:
-        rows.append((pages, others))
-    return rows
-
-
-class PortionsDialog(QDialog):
-    """Excerpts…: which attorney ordered which pages of one day. One attorney ordering the whole
-    transcript and another an excerpt is set in one go at the top (excerpt_rows); otherwise each row is a
-    stretch of pages, from the page after the row above up to the page chosen (the last row ends at the day's
-    pages), with a box per attorney. values() gives the rows as Job.portions keeps them, or None when every
-    attorney ticked on the day ordered every page."""
-
-    def __init__(self, attorneys: list[Attorney], pages: int, rows: list | None, ticked: list[str], parent=None,
-                 printed: list | None = None):
-        """attorneys: the columns (the attorneys ticked on the day); pages: the day's pages; rows: the job's
-        Job.portions (None = everyone ordered every page; ticks of attorneys not among the columns are left
-        out); ticked: the Attorney.key()s ticked on the day (the default row); printed: the number printed on
-        each of the pages (Job.printed_pages), shown next to each row ([] = not known)."""
-        super().__init__(parent)
-        self.setWindowTitle("Excerpts: who ordered which pages")
-        self.setMinimumWidth(z(560))
-        self.pages = max(1, pages)
-        self.printed = list(printed or [])
-        self.keys = list(dict.fromkeys(a.key() for a in attorneys))
-        self.default = [k for k in self.keys if k in ticked] or list(self.keys)  # nobody ticked: everyone
-        self.result_rows: list | None = None
-        self.lines: list[tuple[QLabel, QSpinBox, QLabel, list[QCheckBox]]] = []
-        lay = QVBoxLayout(self)
-        intro = QLabel(f"This day has {self.pages} pages. Did an attorney order only some of them (an excerpt)? "
-                       "Set it here.")
-        intro.setObjectName("subtitle")
-        intro.setWordWrap(True)
-        lay.addWidget(intro)
-        named = {}  # one column per attorney (the same one written two ways is one)
-        for a in attorneys:
-            named.setdefault(a.key(), a)
-        # the usual case in one go: one attorney's excerpt, the others the whole transcript
-        quick = QHBoxLayout()
-        quick.setSpacing(6)
-        self.ex_who = QComboBox()
-        for k, a in named.items():
-            self.ex_who.addItem(a.name or a.firm, k)
-        self.ex_from, self.ex_to = QSpinBox(), QSpinBox()
-        for spin, value in ((self.ex_from, 1), (self.ex_to, self.pages)):
-            spin.setRange(1, self.pages)
-            spin.setValue(value)
-        self.ex_printed = QLabel("")  # the numbers printed on those pages, when known: "(pp. 358–377)"
-        self.ex_printed.setObjectName("muted")
-        self.ex_printed.setToolTip("The page numbers printed on these pages")
-        for spin in (self.ex_from, self.ex_to):
-            spin.valueChanged.connect(self._update_quick)
-            spin.installEventFilter(self)  # Enter sets the excerpt (see eventFilter)
-        self.ex_who.installEventFilter(self)
-        set_btn = QPushButton("Set excerpt")
-        set_btn.setToolTip("Fills in the rows below: this attorney ordered these pages, the others every page")
-        set_btn.setAutoDefault(False)
-        set_btn.clicked.connect(self._excerpt)
-        for w in (QLabel("Excerpt:"), self.ex_who, QLabel("ordered pages"), self.ex_from, QLabel("to"), self.ex_to,
-                  self.ex_printed, set_btn):
-            quick.addWidget(w)
-        quick.addStretch(1)
-        self._update_quick()
-        lay.addLayout(quick)
-        hint = QLabel("…and the others ordered the whole transcript. For anything else, split the pages into rows "
-                      "below and tick who ordered each.")
-        hint.setObjectName("muted")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
-        line = QFrame()
-        line.setObjectName("outputRule")
-        line.setFixedHeight(1)
-        lay.addWidget(line)
-        box = QWidget()
-        self.grid = QGridLayout(box)
-        self.grid.setContentsMargins(0, 6, 0, 6)
-        self.grid.setHorizontalSpacing(14)
-        self.grid.setVerticalSpacing(6)
-        for c, a in enumerate(named.values()):
-            name = a.name or a.firm
-            head = QLabel(name if len(name) <= 24 else name[:23] + "…")
-            head.setToolTip(" - ".join(x for x in (a.name, a.firm) if x))
-            self.grid.addWidget(head, 0, 3 + c, Qt.AlignHCenter | Qt.AlignBottom)
-        lay.addWidget(box)
-        buttons = QHBoxLayout()
-        for text, slot, tip in (("Add row", self._add_row, "Splits the last row in two"),
-                                ("Remove row", self._remove_row, "The row above then runs to the last page"),
-                                ("Everyone ordered every page", self._everyone,
-                                 "Back to the default: every attorney ticked on the day ordered all of it")):
-            b = QPushButton(text)
-            b.setToolTip(tip)
-            b.clicked.connect(slot)
-            buttons.addWidget(b)
-        buttons.addStretch(1)
-        lay.addLayout(buttons)
-        lay.addWidget(_tip("Pages ordered by several attorneys share the original and the judge's index; each "
-                           "attorney pays for their own copy (Settings → Invoice says who pays the index). The "
-                           "Parties number doesn't apply to a day split here."))
-        self.error = QLabel("")
-        self.error.setObjectName("problem")
-        self.error.setWordWrap(True)
-        self.error.setVisible(False)
-        lay.addWidget(self.error)
-        ok = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        ok.accepted.connect(self.accept)
-        ok.rejected.connect(self.reject)
-        lay.addWidget(ok)
-        self._show_rows(rows or [(self.pages, self.default)])
-
-    def _show_rows(self, rows: list) -> None:
-        """Puts these rows ((last page, keys) each) in the grid, in place of the ones shown."""
-        for label, spin, printed, boxes in self.lines:
-            for w in [label, spin, printed] + boxes:
-                self.grid.removeWidget(w)
-                w.hide()  # at once: until it is deleted it would be drawn over the rows, at the top left
-                w.deleteLater()
-        self.lines = []
-        for r, (last, keys) in enumerate(rows, 1):
-            label = QLabel("")
-            spin = QSpinBox()
-            spin.setRange(1, self.pages)
-            spin.setValue(min(max(1, int(last)), self.pages))
-            spin.setToolTip("The last page of this stretch")
-            spin.valueChanged.connect(self._update_starts)
-            printed = QLabel("")
-            printed.setObjectName("muted")
-            printed.setToolTip("The page numbers printed on these pages")
-            boxes = []
-            for c, k in enumerate(self.keys):
-                cb = QCheckBox()
-                cb.setChecked(k in keys)
-                boxes.append(cb)
-                self.grid.addWidget(cb, r, 3 + c, Qt.AlignHCenter)
-            self.grid.addWidget(label, r, 0, Qt.AlignRight)
-            self.grid.addWidget(spin, r, 1)
-            self.grid.addWidget(printed, r, 2)
-            self.lines.append((label, spin, printed, boxes))
-        last_spin = self.lines[-1][1]
-        last_spin.setValue(self.pages)
-        last_spin.setEnabled(False)  # the last row always runs to the day's last page
-        last_spin.setToolTip("The last row runs to the day's last page")
-        self._update_starts()
-
-    def _update_starts(self, _=None) -> None:
-        """Each row's label says where its pages start: the page after the row above ends; and, when known, the
-        numbers printed on its pages ("pp. 358–397")."""
-        start = 1
-        for label, spin, printed, _ in self.lines:
-            label.setText(f"Pages {start} to")
-            printed.setText(self._printed(start, spin.value()))
-            start = spin.value() + 1
-
-    def _printed(self, first: int, last: int) -> str:
-        """'pp. 358–397': the printed numbers of pages first to last of the day ("" when not known)."""
-        if len(self.printed) != self.pages or first > last:
-            return ""
-        a, b = self.printed[first - 1], self.printed[last - 1]
-        if a is None or b is None:
-            return ""
-        return f"p. {a}" if first == last else f"pp. {a}–{b}"
-
-    def _update_quick(self, _=None) -> None:
-        """The excerpt row's printed page numbers, for the pages chosen in it ("" when not known)."""
-        text = self._printed(self.ex_from.value(), self.ex_to.value())
-        self.ex_printed.setText(f"({text})" if text else "")
-
-    def eventFilter(self, obj, event) -> bool:
-        """Enter in the excerpt row sets the excerpt, rather than pressing OK (which closed the window without
-        it)."""
-        if (event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter)
-                and obj in (self.ex_who, self.ex_from, self.ex_to)):
-            for spin in (self.ex_from, self.ex_to):
-                spin.interpretText()  # a number being typed counts
-            self._excerpt()
-            return True
-        return super().eventFilter(obj, event)
-
-    def _excerpt(self) -> None:
-        """Set excerpt: the attorney chosen ordered the pages chosen, the others every page (see excerpt_rows)."""
-        who = self.ex_who.currentData()
-        self._show_rows(excerpt_rows(self.pages, self.keys, who, self.ex_from.value(), self.ex_to.value()))
-
-    def rows(self) -> list[tuple[int, list[str]]]:
-        """The rows as shown: (last page, keys of the attorneys ticked) each."""
-        return [(spin.value(), [k for k, cb in zip(self.keys, boxes) if cb.isChecked()])
-                for _, spin, _, boxes in self.lines]
-
-    def _add_row(self) -> None:
-        """Splits the last row in two halves with the same attorneys ticked (no row of a single page is split)."""
-        rows = self.rows()
-        start = rows[-2][0] + 1 if len(rows) > 1 else 1
-        if start >= self.pages:
-            return
-        mid = min(self.pages - 1, max(start, start - 1 + (self.pages - start + 1) // 2))
-        rows[-1] = (mid, rows[-1][1])
-        rows.append((self.pages, list(rows[-1][1])))
-        self._show_rows(rows)
-
-    def _remove_row(self) -> None:
-        """Removes the last row; the row above then runs to the last page."""
-        rows = self.rows()
-        if len(rows) > 1:
-            rows.pop()
-            rows[-1] = (self.pages, rows[-1][1])
-            self._show_rows(rows)
-
-    def _everyone(self) -> None:
-        """Everyone ordered every page: the job goes back to the default, and the window closes with OK."""
-        self.result_rows = None
-        super().accept()
-
-    def problem(self) -> str:
-        """What is wrong with the rows ("" when nothing is): a row nobody ordered, or a row that doesn't end
-        after the one above."""
-        prev = 0
-        for last, keys in self.rows():
-            if not keys:
-                return f"Pages {prev + 1} to {last}: tick who ordered them."
-            if last <= prev:
-                return f"The row after page {prev} must end on a later page than the row above."
-            prev = last
-        if prev != self.pages:
-            return f"The last row must end on page {self.pages}."
-        return ""
-
-    def accept(self):
-        """Closes with OK when the rows make sense (else says what is wrong). Rows next to each other with the
-        same attorneys are joined; one row of everyone ticked on the day is the default (None)."""
-        why = self.problem()
-        self.error.setText(why)
-        self.error.setVisible(bool(why))
-        if why:
-            return
-        rows: list[tuple[int, list[str]]] = []
-        for last, keys in self.rows():
-            if rows and set(rows[-1][1]) == set(keys):
-                rows[-1] = (last, rows[-1][1])
-            else:
-                rows.append((last, keys))
-        default = len(rows) == 1 and set(rows[0][1]) == set(self.default)
-        self.result_rows = None if default else rows
-        super().accept()
-
-    def values(self) -> list | None:
-        """The rows for Job.portions ((last page, keys) each), or None for everyone ordering every page."""
-        return self.result_rows
-
-
 class PagesOwnerDialog(QDialog):
     """Whose pages…: for each transcript several reporters wrote (their initials alternate at the foot of its
-    pages), which pages to bill: the user's own (the default), another reporter's, or the whole transcript;
-    and, when it begins with pages nobody's initials are on, whose those are. values() gives Job.page_basis and
+    pages), whose pages to bill: the user's own (the default), any of the other reporters' (each on invoices in
+    their name, with the details Settings keep for them: Details... edits them), or the whole transcript; and,
+    when it begins with pages nobody's initials are on, whose those are. values() gives Job.page_basis and
     Job.front_owner for these transcripts."""
 
     def __init__(self, transcripts: list[tuple[str, str, list[str]]], own: set[str], basis: dict, front: dict,
-                 reason: str = "", parent=None):
+                 reason: str = "", parent=None, settings: Settings | None = None):
         """transcripts: (Doc.key(), file name, Doc.owners()) of each transcript to ask about; own: the user's
         initials (empty when not known); basis, front: the job's Job.page_basis and Job.front_owner; reason:
-        why the dialog opened by itself (shown at the top)."""
+        why the dialog opened by itself (shown at the top); settings: where the other reporters' details are
+        kept (Details... saves them there)."""
         super().__init__(parent)
         self.setWindowTitle("Whose pages to bill")
         self.setMinimumWidth(z(520))
         self.own = set(own)
+        self.s = settings
         self.items: list[dict] = []
         lay = QVBoxLayout(self)
         intro = QLabel("These transcripts have pages by more than one reporter: the initials at the foot of the pages "
-                       "change. An invoice bills your own pages unless you choose otherwise.")
+                       "change. An invoice bills your own pages unless you choose otherwise. Tick another reporter "
+                       "to make the invoices for their pages too, in their name.")
         intro.setObjectName("subtitle")
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -1319,6 +1164,7 @@ class PagesOwnerDialog(QDialog):
             title = QLabel(name)
             title.setObjectName("section")
             fl.addWidget(title)
+            # "radios" holds checkboxes now (several reporters can be billed at once); the name stayed
             item = {"key": key, "owners": owners, "found": found, "radios": {}, "front": None, "count": QLabel("")}
             item["count"].setObjectName("muted")
             item["count"].setWordWrap(True)
@@ -1340,26 +1186,35 @@ class PagesOwnerDialog(QDialog):
                 row.addStretch(1)
                 fl.addLayout(row)
                 item["front"] = combo
-            group = QButtonGroup(frame)
             choices = [("me", "My pages")] + [(x, f"{x.upper()}'s pages") for x in found if x not in self.own] + [
                 ("*", "The whole transcript")]
             row = QHBoxLayout()
             row.addWidget(QLabel("Bill:"))
             for value, label in choices:
-                rb = QRadioButton(label)
+                cb = QCheckBox(label)
                 if value == "me" and not self.own:
-                    rb.setEnabled(False)
-                    rb.setToolTip("Your initials aren't known: enter them under Settings → My info")
-                group.addButton(rb)
-                item["radios"][value] = rb
-                rb.toggled.connect(self._update)
-                row.addWidget(rb)
+                    cb.setEnabled(False)
+                    cb.setToolTip("Your initials aren't known: enter them under Settings → My info")
+                elif value not in ("me", "*"):
+                    cb.setToolTip(f"Invoices in {value.upper()}'s name for their pages, numbered apart from yours")
+                item["radios"][value] = cb
+                cb.toggled.connect(lambda on, it=item, v=value: self._ticked(it, v, on))
+                row.addWidget(cb)
+                if value not in ("me", "*") and self.s is not None:
+                    more = QPushButton("Details…")
+                    more.setToolTip(f"{value.upper()}'s name, address and payment details, for their invoices")
+                    more.clicked.connect(lambda _=False, v=value: self._details(v))
+                    row.addWidget(more)
             row.addStretch(1)
             fl.addLayout(row)
-            chosen = basis.get(key, "me")
-            if chosen not in item["radios"] or not item["radios"][chosen].isEnabled():
-                chosen = "*" if not self.own else "me"
-            item["radios"][chosen].setChecked(True)
+            v = basis.get(key, "me")
+            chosen = [x for x in ([v] if isinstance(v, str) else v if isinstance(v, list) else [])
+                      if x in item["radios"] and item["radios"][x].isEnabled()]
+            if not chosen:
+                chosen = ["*" if not self.own else "me"]
+            for x in chosen:
+                with QSignalBlocker(item["radios"][x]):
+                    item["radios"][x].setChecked(True)
             item["labels"] = dict(choices)
             lay.addWidget(frame)
             self.items.append(item)
@@ -1373,6 +1228,34 @@ class PagesOwnerDialog(QDialog):
         ok.rejected.connect(self.reject)
         lay.addWidget(ok)
         self._update()
+
+    def _ticked(self, item: dict, value: str, on: bool) -> None:
+        """A box ticked or unticked: the whole transcript goes alone (it bills every page, on the user's
+        invoices); some pages must stay billed (the last box can't be unticked)."""
+        boxes = item["radios"]
+        if on and value == "*":
+            others = [b for v, b in boxes.items() if v != "*"]
+        elif on:
+            others = [boxes["*"]]
+        else:
+            others = []
+            if not any(b.isChecked() for b in boxes.values()):
+                with QSignalBlocker(boxes[value]):
+                    boxes[value].setChecked(True)
+        for b in others:
+            with QSignalBlocker(b):
+                b.setChecked(False)
+        self._update()
+
+    def _details(self, initials: str) -> None:
+        """Details...: another reporter's invoice details, saved in the settings at once."""
+        dlg = ReporterDialog(initials, self.s.reporter(initials), self)
+        if dlg.exec() == QDialog.Accepted:
+            self.s.reporters = {**self.s.reporters, initials: dlg.value()}
+            try:
+                self.s.save()
+            except OSError:
+                pass
 
     @staticmethod
     def _count(owners: list[str], targets: set[str], front: str | None) -> int:
@@ -1415,14 +1298,67 @@ class PagesOwnerDialog(QDialog):
             super().accept()
 
     def values(self) -> tuple[dict, dict]:
-        """(Job.page_basis, Job.front_owner) for the transcripts shown: by Doc.key(), "me", initials or "*";
-        and the initials (or "none") the first pages count for."""
+        """(Job.page_basis, Job.front_owner) for the transcripts shown: by Doc.key(), "me", initials or "*", or a
+        list of "me" and initials when several are ticked; and the initials (or "none") the first pages count
+        for."""
         basis, front = {}, {}
         for item in self.items:
-            basis[item["key"]] = next(v for v, rb in item["radios"].items() if rb.isChecked())
+            ticked = [v for v, cb in item["radios"].items() if cb.isChecked()] or ["me"]
+            basis[item["key"]] = ticked[0] if len(ticked) == 1 else ticked
             if item["front"] is not None and item["front"].currentData() is not None:
                 front[item["key"]] = item["front"].currentData()
         return basis, front
+
+
+class ReporterDialog(QDialog):
+    """Another reporter's details, for the invoices the user makes for their pages: name, address, how to pay
+    them, and how their invoice numbers begin. value() gives them (a settings.ReporterProfile)."""
+
+    def __init__(self, initials: str, profile: ReporterProfile, parent=None):
+        """initials: the reporter's ("ds"); profile: their details so far, shown to edit."""
+        super().__init__(parent)
+        self.setWindowTitle(f"Invoices for {initials.upper()}")
+        self.setMinimumWidth(z(520))
+        self.initials, self.base = initials, profile
+        lay = QVBoxLayout(self)
+        intro = QLabel(f"The invoices you make for {initials.upper()}'s pages carry these details instead of yours, "
+                       "and their own numbers. Your earnings in Records leave them out.")
+        intro.setWordWrap(True)
+        intro.setObjectName("muted")
+        lay.addWidget(intro)
+        f = QFormLayout()
+        self.name = QLineEdit(profile.name)
+        self.name.setToolTip("As the run sheet's Reporter column says it")
+        self.full_name = QLineEdit(profile.full_name)
+        self.full_name.setPlaceholderText(profile.name or "Dana Smith")
+        self.title = QLineEdit(profile.title)
+        self.address1, self.address2 = QLineEdit(profile.address1), QLineEdit(profile.address2)
+        self.phone, self.email = QLineEdit(profile.phone), QLineEdit(profile.email)
+        self.payment = QPlainTextEdit(profile.payment)
+        self.payment.setPlaceholderText("Zelle: ...\nCheck: payable to ...")
+        self.payment.setFixedHeight(z(90))
+        self.prefix = QLineEdit(profile.prefix)
+        self.prefix.setPlaceholderText(initials.upper())
+        self.prefix.setToolTip("Their invoice numbers: this, a dash and your number format (DS-2026-0001), "
+                               "counted apart from yours")
+        for label, w in (("Name (run sheet)", self.name), ("Name on invoices", self.full_name),
+                         ("Title", self.title), ("Address", self.address1), ("", self.address2),
+                         ("Phone", self.phone), ("E-mail", self.email), ("Payment", self.payment),
+                         ("Numbers begin with", self.prefix)):
+            f.addRow(label, w)
+        lay.addLayout(f)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def value(self) -> ReporterProfile:
+        """The details as entered (spaces trimmed; the prefix without spaces)."""
+        return ReporterProfile(
+            name=self.name.text().strip(), full_name=self.full_name.text().strip(),
+            title=self.title.text().strip(), address1=self.address1.text().strip(),
+            address2=self.address2.text().strip(), phone=self.phone.text().strip(), email=self.email.text().strip(),
+            payment=self.payment.toPlainText().strip(), prefix="".join(self.prefix.text().split()))
 
 
 class RunSheetDialog(QDialog):
@@ -1522,7 +1458,8 @@ class _PullThread(QThread):
         self.model, self.host = model, host
 
     def run(self):
-        """Streams the download and reports progress. Any error, including Ollama not running, is turned into a message."""
+        """Streams the download and reports progress. Any error, including Ollama not running, is turned into a
+        message."""
         try:
             import ollama
             client = ollama.Client(host=self.host or None, timeout=None)
@@ -1619,9 +1556,9 @@ _BACKGROUND: list[QThread] = []
 
 
 CONTACT_EMAIL = "noahcollincourtreporter@gmail.com"
-WEBSITE_URL = "https://nono638.github.io/DjinnItAgreementForm/"
-SOURCE_URL = "https://github.com/nono638/DjinnItAgreementForm"
-FEEDBACK_URL = f"mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm%20{__version__}"
+WEBSITE_URL = "https://nono638.github.io/YinItAgreementForm/"
+SOURCE_URL = "https://github.com/nono638/YinItAgreementForm"
+FEEDBACK_URL = f"mailto:{CONTACT_EMAIL}?subject=YinItAgreementForm%20{__version__}"
 COFFEE_URL = "https://buymeacoffee.com/noahcollin"
 
 COMPONENTS = [
@@ -1651,17 +1588,17 @@ class AboutDialog(QDialog):
         super().__init__(parent)
         from pathlib import Path
         from ..settings import settings_dir
-        self.setWindowTitle("About DjinnItAgreementForm")
+        self.setWindowTitle("About YinItAgreementForm")
         self.setMinimumWidth(z(560))
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
-        pic = Path(__file__).resolve().parent.parent / "assets" / "djinn_done.jpg"
+        pic = Path(__file__).resolve().parent.parent / "assets" / "yin_done.jpg"
         if pic.exists():
             img = QLabel()
             img.setPixmap(rounded(pic, 420, 12))
             img.setAlignment(Qt.AlignCenter)
             lay.addWidget(img)
-        title = QLabel("DjinnItAgreementForm")
+        title = QLabel("YinItAgreementForm")
         title.setObjectName("title")
         lay.addWidget(title)
         ver = QLabel(f"Version {__version__}")
@@ -1669,11 +1606,11 @@ class AboutDialog(QDialog):
         lay.addWidget(ver)
         body = QLabel(
             "Fills in New York UCS Court Reporter Minute Agreement Forms from transcripts, invoices, "
-            "photos and e-mails.<br>"
+            "photos and e-mails. (It was called DjinnItAgreementForm before version 2.0.)<br>"
             f'Website, with a guide and the latest version: <a href="{WEBSITE_URL}">'
             f'{WEBSITE_URL.split("//")[1].rstrip("/")}</a><br><br>'
             "Created by <b>Noah Collin</b>, Senior Court Reporter.<br>"
-            f'Questions, bugs or ideas: <a href="mailto:{CONTACT_EMAIL}?subject=DjinnItAgreementForm">'
+            f'Questions, bugs or ideas: <a href="mailto:{CONTACT_EMAIL}?subject=YinItAgreementForm">'
             f"{CONTACT_EMAIL}</a><br><br>"
             "Free software under the GNU AGPL-3.0 license."
             + (f' Source code: <a href="{SOURCE_URL}">{SOURCE_URL}</a>' if SOURCE_URL else "")
@@ -1725,7 +1662,7 @@ class AboutDialog(QDialog):
 
 
 GUIDE = """
-<h2>How to use DjinnItAgreementForm</h2>
+<h2>How to use YinItAgreementForm</h2>
 <p>The app reads the documents of an order (a transcript, an invoice, a photo of a court paper, an e-mail),
 finds the court, part, judge, case, index number, dates and attorneys, shows them for you to check, and makes
 the paperwork: the minute agreement, the invoice, the MOFR and the run sheet. Everything stays on this
@@ -1759,8 +1696,13 @@ per attorney (unless Settings → Invoice says an invoice for each day), and an 
 pays only for those pages (<b>Who ordered what</b> shows who pays for what).</li>
 <li><b>MOFR</b>: the Minute Order Form/Receipt, the reporter's parts filled in.</li>
 <li><b>Run sheet</b>: an Excel sheet of a shared trial's takes (who wrote which pages), read from the
-initials at the foot of the pages.</li>
+initials at the foot of the pages. It is ticked by itself when two or more reporters wrote a case's transcripts
+(the initials, or the names on the title page), and unticked when one did; click it to choose yourself.</li>
 </ul>
+<p>On a transcript several reporters wrote, <b>Whose pages…</b> (Invoice panel) can tick the other reporters
+too: each gets invoices for their own pages, in their name, with the details kept under Settings → Run sheet →
+<i>Invoices for</i>, and numbers of their own (DS-2026-0001). Records lists them, but leaves them out of your
+sums.</p>
 <p>The PDFs are saved next to your document, or in the folders chosen in Settings → Options → Folders, and
 they stay fillable (unless <i>Flatten the PDF</i> is ticked in Settings → Options): you can still correct any
 value in a PDF viewer. Every file made is listed in
@@ -1770,31 +1712,39 @@ value in a PDF viewer. Every file made is listed in
 <ol>
 <li><b>Add the order:</b> drop the documents on the drop zone (or click <b>Browse...</b>, or Ctrl+O).</li>
 <li><b>Check the fields.</b> Amber fields are guesses; a ▾ button lists the other candidates. The badge
-on each field says where its value came from (found in the document, AI, your defaults, calculated or
-typed by you).</li>
+on each field says where its value came from (found in the document, counted from the transcript PDF, AI,
+your defaults, calculated or typed by you). <i>No. of copies</i> follows the firms ticked.</li>
 <li><b>Tick the attorneys who ordered.</b> A transcript lists everyone who appeared, not who ordered.</li>
-<li><b>Pick the rate sheet and speed</b> under Order.</li>
+<li><b>Pick the rate sheet and the speeds</b> under Order: the invoice offers every speed ticked, and the
+agreement form names one of them (Settings → Invoice says which; change it for one job under Order).</li>
 <li><b>Tick the outputs</b> and click <b>Generate</b> (Ctrl+Enter), or <b>Generate all</b>
 (Ctrl+Shift+Enter) for every ticked job in the list on the left.</li>
 <li><b>Look at the preview</b> and click <b>Save</b>, or <b>Go back</b> to change something: nothing is saved
-until then. (Generate all saves without a preview. <i>Don't show previews anymore</i> turns it off; Settings →
-Options turns it back on.) The box that says what was saved can <b>print</b> it.</li>
+until then. Its first tab, <b>The math</b>, shows how each invoice's amount is reached. (<i>Don't show previews
+anymore</i> turns it off; Settings → Options turns it back on.) After Generate (not Generate all), the box
+that says what was saved can <b>print</b> it.</li>
 </ol>
 
 <h3>Tips</h3>
 <ul>
 <li>The first time, fill in <b>Settings → My info</b> (your name, contact details, initials and signature)
-and <b>Settings → Defaults</b> (rate sheet, speed, copies) once, and they are used on every form.</li>
+and <b>Settings → Defaults</b> (rate sheet, copies) once, and they are used on every form.</li>
 <li>Several documents for one order can be added together; what they say is combined.</li>
-<li>In the job list, ✓ marks a job already made and ⚠ one that failed or has something missing. Right-click a
-document to
-move it to a job of its own.</li>
-<li>When one attorney ordered the whole transcript and another only some pages, set it with
-<b>Excerpts…</b> in the Invoice panel of the Outputs box, and check the <b>Who ordered what</b> card before generating.</li>
+<li>In the job list, ✓ marks a job already made and ⚠ one with something to check: a field missing, no
+attorney ticked, Whose pages… or Excerpts… to choose, or a Generate that failed. Hover over the job to see
+what. Right-click a document to move it to a job of its own.</li>
+<li>When one firm ordered the whole trial and others only some pages, open <b>Excerpts…</b> (Invoice panel):
+a table of every day of the case on that invoice, a row per run of pages typed in the transcript's own numbers (141-170) and a
+box per firm. It shows what each run costs, the pages by the firms ordering together and each firm's invoice,
+as you change it, and stays open beside the window. Check the <b>Who ordered what</b> card before
+generating.</li>
+<li>The preview's tabs have a colour for each kind of file; <b>Side by side</b> shows everything at once, and
+Ctrl + / Ctrl - zoom it.</li>
 <li>Your own invoice text (shown always, or only when it applies) is in Settings → Invoice → <i>Invoice
 text</i>; <b>Preview…</b> shows a made-up invoice with it.</li>
-<li>After an invoice is made, <b>The math</b> shows how each amount was reached: click OK, or copy it or save
-it as a PDF for an attorney who asks (Settings → Options turns it on or off). Settings → Invoice can also save a
+<li><b>The math</b> shows how each amount is reached, stretch by stretch of pages and firm by firm: in the
+preview, or after saving when previews are off (there it can be saved as a PDF for an attorney who asks;
+Settings → Options turns it on or off). Settings → Invoice can also save a
 <i>detailed copy</i> of each invoice, with the same number, ready for when someone asks.</li>
 <li>In <b>Records</b>, type a firm, case or index number to find its invoices, tick <b>Paid</b> when they
 pay, and choose the columns with <b>Columns…</b>. Deleted records stay in the trash for 30 days; the PDFs
@@ -1838,7 +1788,7 @@ class GuideDialog(QDialog):
     def __init__(self, parent=None):
         """Builds the window: the guide in a scrolling text box, a Website button and Close."""
         super().__init__(parent)
-        self.setWindowTitle("How to use DjinnItAgreementForm")
+        self.setWindowTitle("How to use YinItAgreementForm")
         self.resize(z(680), z(720))
         lay = QVBoxLayout(self)
         self.text = QTextBrowser()

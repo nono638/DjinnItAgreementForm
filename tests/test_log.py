@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from minute_filler import log
+from minute_filler import __version__, log
 from minute_filler.ingest import ingest_file
 from minute_filler.settings import Settings
 
@@ -94,7 +94,7 @@ def test_diagnostics_have_the_facts_and_no_case_data(logfile):
     s = Settings()
     s.use_ai = False
     d = log.diagnostics(s)
-    assert "DjinnItAgreementForm 1." in d and "Windows" in d and "text recognition" in d
+    assert f"YinItAgreementForm {__version__}" in d and "Windows" in d and "text recognition" in d
     assert "AI helper: off" in d and "recent log" in d
     s.profile.name, s.profile.email = "Pat Reporter", "preporter@example.com"
     d = log.diagnostics(s)
@@ -104,7 +104,7 @@ def test_diagnostics_have_the_facts_and_no_case_data(logfile):
 def test_no_log_when_the_folder_cannot_be_written(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     log.shutdown()
-    (tmp_path / "DjinnItAgreementForm").write_text("a file where the folder should be")
+    (tmp_path / "YinItAgreementForm").write_text("a file where the folder should be")
     try:
         log.setup()                       # must not raise
         log.log.info("still fine")
@@ -119,4 +119,4 @@ def test_menu_has_the_log_items(qt, make_window):
     names = [a.text() for m in win.menuBar().findChildren(qt.QMenu) for a in m.actions()]
     assert "Open the &log folder" in names and "&Copy details for a problem report" in names
     win._copy_diagnostics()
-    assert "DjinnItAgreementForm" in qt.QApplication.clipboard().text()
+    assert "YinItAgreementForm" in qt.QApplication.clipboard().text()

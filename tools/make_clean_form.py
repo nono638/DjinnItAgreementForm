@@ -165,8 +165,8 @@ def build(out: Path = OUT) -> Path:
     b.labeled(L, y, "Name of Court Reporter", "rep_name", MID)
     b.labeled(R, y, "Name of Attorney/Party", "atty_name", RIGHT)
     y += 15
-    x0 = b.labeled(L, y, "Address", "rep_address_1", MID)
-    x1 = b.labeled(R, y, "Firm/Address", "atty_firm", RIGHT)
+    b.labeled(L, y, "Address", "rep_address_1", MID)
+    b.labeled(R, y, "Firm/Address", "atty_firm", RIGHT)
     y += 15
     b.field("rep_address_2", L, MID, y)
     b.field("atty_address_1", R, RIGHT, y)

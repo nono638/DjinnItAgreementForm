@@ -25,10 +25,12 @@ def widgets(path):
 
 
 def test_civil_mofr(case, s, tmp_path):
-    p = fill_mofr(case, s, tmp_path, pages="30")
+    """A civil form: the case, the reporter and the pages filled in, the speed and proceedings ticked, and the
+    printed "PEOPLE V" covered."""
+    p =fill_mofr(case, s, tmp_path, pages="30")
     f, doc = widgets(p)
     assert p.name.startswith("MOFR - Jane Roe v. X.Y. Holding Corporation - 712345-2021")
-    assert doc.metadata["creator"] == "DjinnIt MOFR"
+    assert doc.metadata["creator"] == "YinIt MOFR"
     assert (f["Text Field0"], f["Text Field1"], f["Text Field3"], f["Text Field4"]) == \
         ("Queens", "Jane Roe v. X.Y. Holding Corporation", "Pat Reporter", "Room 100")
     assert (f["Text Field5"], f["Text Field7"], f["Text Field8"], f["Text Field9"], f["Text Field34"]) == \

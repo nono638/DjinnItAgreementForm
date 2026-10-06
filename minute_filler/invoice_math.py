@@ -4,14 +4,19 @@ Most invoices show only each speed's amount; when someone later asks how an amou
 answer. explain() gives, for each invoice, each speed's charges line by line (pages x rate, times the copies),
 their total and how it was split between the parties, as HTML for the window that shows it
 (gui.preview.MathDialog) and as plain text for the clipboard. to_pdf() saves the same HTML as a PDF.
-A firm's own share of pages ordered together is worked out exactly (invoice_calc.quote_shares), so a line can
-come to part of a cent: it is shown as it is ("1.5 pages × $5.45 = $8.175") and the lines add up to the
-"Together" amount, which is then rounded up to the cent.
+A firm's own share of pages ordered together is worked out exactly (invoice_calc.quote_shares) and spelled
+out stretch by stretch: the pages it ordered alone at the full price, and the pages ordered with other firms
+divided between them ("50 pages × $4.30 = $215.00 ÷ 2 firms = $107.50"). A line can come to part of a cent: it
+is shown as it is ("$8.175") and the lines add up to "This firm's charges together", which is then rounded up
+to the cent ("This firm pays"). When several firms are billed for the same work, a last section, "All the firms
+together", adds up what they pay against their exact shares added up, which shows what rounding each one up to
+the cent added.
 """
 from __future__ import annotations
 
 import html
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 from .invoice import FirmInvoice
@@ -41,7 +46,7 @@ def _exact(d: Decimal, places: int, least: int = 0) -> str:
     return (f"{whole}.{frac}" if frac else whole) + more
 
 
-def _money(d: Decimal) -> str:
+def money_exact(d: Decimal) -> str:
     """'$8.18' for whole cents; a firm's share of split pages can come to part of a cent, shown as it is
     ('$8.175', '$1.4333…'), so the lines add up to the total shown under them."""
     return fmt(d) if d == d.quantize(CENT) else "$" + _exact(d, 4, 2)
@@ -53,24 +58,55 @@ def _pages(n) -> str:
     return f"{text} page" if n == 1 else f"{text} pages"
 
 
-def _line(l: QuoteLine, q: Quote) -> str:
-    """'Copy: 2 × 120 pages × $1.00 = $240.00' (a firm's shared pages: the note that they are split)."""
+INDENT = "      "  # a line that spells out part of the line above it
+
+
+def _firms(n: int) -> str:
+    """'1 firm', '2 firms'."""
+    return "1 firm" if n == 1 else f"{n} firms"
+
+
+def _line(l: QuoteLine, q: Quote) -> list[str]:
+    """'Copy: 2 × 120 pages × $1.00 = $240.00'. On a firm's own share, the pages split between the firms
+    are spelled out: 'Original: 60 pages × $4.30 = $258.00 ÷ 2 firms = $129.00', or for pages ordered alone
+    and with others, a line for each stretch ('40 pages ordered by this firm alone: ...', '50 pages ordered by
+    2 firms: 50 × $4.30 = $215.00 ÷ 2 = $107.50') under the line's own total. A charge each firm pays in full
+    says so when some of its pages were ordered with other firms."""
     n = f"{l.qty} × " if l.qty > 1 else ""
-    split = " (pages ordered together are split between the firms)" if l.shared else ""
-    pages = l.pages or q.pages
-    if q.share and l.rate and l.qty == 1:  # the pages exactly (QuoteLine.pages is rounded to 2 places)
-        pages = l.amount / l.rate
-    return f"{l.label}: {n}{_pages(pages)} × {fmt(l.rate)}{split} = {_money(l.amount)}"
+    if not q.share or not l.parts:
+        return [f"{l.label}: {n}{_pages(l.pages or q.pages)} × {fmt(l.rate)} = {money_exact(l.amount)}"]
+    pages = sum(p for p, _ in l.parts)
+    if not l.shared:
+        own = " (each firm pays for its own)" if any(k > 1 for _, k in l.parts) else ""
+        return [f"{l.label}: {_pages(pages)} × {fmt(l.rate)} = {money_exact(l.amount)}{own}"]
+    if len(l.parts) == 1:  # every page it ordered, ordered by the same firms
+        p, k = l.parts[0]
+        whole = l.rate * p
+        return [f"{l.label}: {_pages(p)} × {fmt(l.rate)} = {money_exact(whole)} ÷ {_firms(k)} = "
+                f"{money_exact(l.amount)}"]
+    out = [f"{l.label} ({fmt(l.rate)} a page, divided between the firms that ordered each page): "
+           f"{money_exact(l.amount)}"]
+    for p, k in l.parts:
+        whole = l.rate * p
+        if k == 1:
+            out.append(f"{INDENT}{_pages(p)} ordered by this firm alone: {p:,} × {fmt(l.rate)} = "
+                       f"{money_exact(whole)}")
+        else:
+            out.append(f"{INDENT}{_pages(p)} ordered by {_firms(k)}: {p:,} × {fmt(l.rate)} = {money_exact(whole)} "
+                       f"÷ {k} = {money_exact(whole / k)}")
+    return out
 
 
 def _sum(q: Quote) -> list[str]:
-    """The total and what each party owes: '÷ 2 parties = $378.00 each (rounded up to the cent)'; a firm's own
-    share: 'Your share: $219.25', after 'Together: $219.245' when the lines come to part of a cent."""
+    """The total and what each party owes: 'Total: $319.30', '÷ 3 parties = $106.44 each (rounded up to the
+    cent)' (that last only when it does not split evenly); a firm's own
+    share: 'This firm pays: $219.25', after 'This firm's charges together: $219.245' when the lines come to part of
+    a cent."""
     if q.share:
         out = []
-        if q.total != q.per_party:  # (worked out exactly: a page split three ways is a third of a cent)
-            out.append(f"Together: {_money(q.total)}")
-        out.append(f"Your share: {fmt(q.per_party)}" + (" (rounded up to the cent)" if out else ""))
+        if q.total != q.per_party:  # (worked out exactly: $4.30 split three ways is $1.4333…, not whole cents)
+            out.append(f"This firm's charges together: {money_exact(q.total)}")
+        out.append(f"This firm pays: {fmt(q.per_party)}" + (" (rounded up to the cent)" if out else ""))
         return out
     out = [f"Total: {fmt(q.total)}"]
     if q.parties > 1:
@@ -91,9 +127,42 @@ def sections(made: list[tuple[FirmInvoice, str]]) -> list[tuple[str, list[tuple[
             who = name + (f" ({firm})" if firm and name else firm)
         head = f"Invoice {number}" + (f" · Bill to {who}" if who else "")
         head += f" · {_pages(f.opts.pages)}"
+        if f.opts.excerpt:
+            head += f" ({f.opts.excerpt})"
         if f.opts.parties > 1 and not (f.quotes and f.quotes[0].share):
             head += f", {f.opts.parties} parties"
-        out.append((head, [(q.speed, [_line(l, q) for l in q.lines], _sum(q)) for q in f.quotes]))
+        out.append((head, [(q.speed, [x for l in q.lines for x in _line(l, q)], _sum(q)) for q in f.quotes]))
+    return out
+
+
+def together(made: list[tuple[FirmInvoice, str]]) -> list[str]:
+    """For the firms billed for the same work (the invoices of one set: one case, one reporter, see
+    FirmInvoice.group), what they pay together at each speed against their exact shares added up: 'Regular:
+    the 2 firms together pay $618.00 for work that costs $618.00' (+ what rounding each one up to the cent
+    added; another reporter's set says whose: 'Regular (DS invoices): ...'). [] when no set has two firms."""
+    groups: dict[int, list[FirmInvoice]] = {}
+    for f, _ in made:
+        if f.quotes and f.quotes[0].share:
+            groups.setdefault(f.group, []).append(f)
+    out = []
+    for firms in groups.values():
+        if len(firms) < 2:
+            continue
+        for i, q0 in enumerate(firms[0].quotes):
+            quotes = [f.quotes[i] for f in firms if i < len(f.quotes) and f.quotes[i].speed == q0.speed]
+            if len(quotes) != len(firms):
+                continue
+            paid = sum((q.per_party for q in quotes), Decimal("0.00"))
+            # the exact shares added up first: a third of a cent three times is a whole cent, not 0.99…
+            exact = sum((q.due for q in quotes), Fraction(0))
+            cost = Decimal(exact.numerator) / Decimal(exact.denominator)
+            whose = firms[0].opts.reporter  # (another reporter's invoices are added up apart from the user's)
+            line = (f"{q0.speed}{f' ({whose.upper()} invoices)' if whose else ''}: the {len(firms)} firms "
+                    f"together pay {fmt(paid)} for work that costs {money_exact(cost)}")
+            extra = paid - cost
+            if extra > 0:
+                line += f" (rounding each one up to the cent adds {money_exact(extra)})"
+            out.append(line)
     return out
 
 
@@ -105,11 +174,17 @@ def explain(made: list[tuple[FirmInvoice, str]]) -> tuple[str, str]:
         plain.append(head)
         for speed, lines, sums in speeds:
             parts.append(f"<h3>{html.escape(speed)}</h3>")
-            parts += [f"<p>{html.escape(x)}</p>" for x in lines]
+            parts += [f"<p style='margin-left: 22px'>{html.escape(x.strip())}</p>" if x.startswith(INDENT)
+                      else f"<p>{html.escape(x)}</p>" for x in lines]
             parts += [f"<p class='sum'>{html.escape(x)}</p>" for x in sums]
             plain.append(f"  {speed}")
             plain += [f"    {x}" for x in lines + sums]
         plain.append("")
+    check = together(made)
+    if check:
+        parts.append("<h2>All the firms together</h2>")
+        parts += [f"<p>{html.escape(x)}</p>" for x in check]
+        plain += ["All the firms together"] + [f"  {x}" for x in check]
     return "\n".join(parts), "\n".join(plain).rstrip() + "\n"
 
 

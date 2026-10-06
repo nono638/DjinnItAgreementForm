@@ -1,4 +1,4 @@
-"""Optional second opinion from a local Ollama model (default gemma4:e2b).
+"""Optional second opinion from a local Ollama model, chosen in Settings -> AI (default gemma4:e2b; see MODELS).
 
 The model gets the text (e-mail body, OCR of a photo, a transcript's title page(s))
 and answers in JSON shaped like TEMPLATE (or, if that reply can't be read, constrained
@@ -126,6 +126,7 @@ class OllamaExtractor:
     """Asks the Ollama model in Settings about one document at a time and returns what it found as an
     Extraction, checked against the document's text."""
     def __init__(self, settings: Settings):
+        """settings: the Ollama host, model and timeout, and the reporter's name (never taken for an attorney)."""
         self.s = settings
         self._client = None
 

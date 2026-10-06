@@ -91,13 +91,17 @@ def merge(extractions: list[Extraction], s: Settings, previous: CaseInfo | None 
             old = previous.fields[key]
             if old.source == SRC_USER:
                 case.fields[key] = old
+        if refresh_speed(case, s):  # a speed chosen before that is no longer offered (Speeds offered)
+            refresh_rate(case, s)
     return case
 
 
 def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]] | None = None) -> None:
-    """Fills blank fields from Settings: court, county, delivery, copies, the rate from the rate sheet, the
-    delivery date and today's agreement date. With the pooled candidates `cands`, the page count can also
-    come from an invoice's total."""
+    """Fills blank fields from Settings: court, county, the rate from the rate sheet, the delivery date (when
+    Settings.fill_delivery_date) and today's agreement date (when Settings.agreement_today). The speed and the
+    copies are set even when not blank (refresh_speed, refresh_copies): a speed not offered is replaced, and the
+    firms ticked decide the copies. With the pooled candidates `cands`, the page count can also come from an
+    invoice's total."""
     cands = cands or {}
     f = case.fields
 
@@ -107,11 +111,9 @@ def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]
 
     default("court", s.default_court)
     default("county", s.default_county)
-    default("delivery", s.delivery_name(s.default_delivery))
-    # use the rate sheet's own spelling ("Expedited" -> "Expedite")
-    if f["delivery"].value and f["delivery"].source != SRC_USER:
-        f["delivery"].value = s.delivery_name(f["delivery"].value)
-    default("copies", s.default_copies)
+    if refresh_speed(case, s):  # (a rate read for a speed no longer named would stay with the new one)
+        refresh_rate(case, s)
+    refresh_copies(case, s)
     default("rate", s.rate_for(f["delivery"].value))
 
     # Pages from an invoice's total at the chosen speed ("Regular Rate: $94.50" at $4.30 a page -> 22)
@@ -134,7 +136,8 @@ def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]
 
 
 def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
-    """Estimated delivery = today + turnaround for the chosen delivery type (unless the user typed one)."""
+    """Estimated delivery = today + turnaround for the chosen delivery type, moved off a weekend (unless the
+    user typed one; nothing when the speed's turnaround isn't known)."""
     f = case.fields["delivery_date"]
     if f.source == SRC_USER and f.value:
         return
@@ -143,6 +146,39 @@ def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
         return
     d = us_date(next_weekday(date.today() + timedelta(days=days)))
     case.fields["delivery_date"] = FieldState(d, SRC_DERIVED, 0.8, [d])
+
+
+def refresh_speed(case: CaseInfo, s: Settings) -> bool:
+    """The agreement form names one of the speeds offered (ticked under Speeds offered, Settings.offered_speeds):
+    the speed the user chose for the job or one found in its documents, when it is one of them (or "Other",
+    when the user chose it); else the one Settings picks (Settings.agreement_speed). A speed found in a document
+    is put in the rate sheet's spelling ("Expedited" -> "Expedite"). True when it changed."""
+    f = case.fields["delivery"]
+    if f.value and (s.speed_offered(f.value) or (f.source == SRC_USER and f.value == "Other")):
+        if f.source != SRC_USER:
+            f.value = s.delivery_name(f.value)
+        return False
+    pick = s.agreement_speed()
+    case.fields["delivery"] = FieldState(pick, SRC_DEFAULT, 0.7, [pick]) if pick else FieldState()
+    return f.value != pick
+
+
+def refresh_copies(case: CaseInfo, s: Settings) -> None:
+    """No. of copies = how many firms ordered (CaseInfo.ordering_firms), unless the user typed a number; with
+    nobody ticked, a number read from a document, else the default from Settings. A number read from a
+    document gives way to the firms ticked."""
+    f = case.fields["copies"]
+    if f.source == SRC_USER and f.value:
+        return
+    firms = case.ordering_firms()
+    if firms:
+        case.fields["copies"] = FieldState(str(firms), SRC_DERIVED, 0.9, [str(firms)])
+    elif f.value and f.source not in (SRC_DEFAULT, SRC_DERIVED):
+        return  # read from a document: kept until someone is ticked
+    elif s.default_copies:
+        case.fields["copies"] = FieldState(s.default_copies, SRC_DEFAULT, 0.7, [s.default_copies])
+    else:
+        case.fields["copies"] = FieldState()
 
 
 def refresh_rate(case: CaseInfo, s: Settings) -> None:
