@@ -39,7 +39,8 @@ LOCAL = ("window_geometry", "recent_files", "update_checked", "recap_month", "re
 # What says who the user is: left out of a settings file exported "without my details" (for a colleague), and
 # kept as it is when such a file is imported. The invoice's payment text (who to pay, and how) is left out
 # with them. The folders are among them: their paths name the user's Windows account.
-PERSONAL = ("profile", "reporters", "output_dir", "output_dirs", "records_dir", "rate_sheets_dir")
+# The answers about firms that may be one (firm_answers) name the user's clients: left out with them.
+PERSONAL = ("profile", "reporters", "output_dir", "output_dirs", "records_dir", "rate_sheets_dir", "firm_answers")
 
 
 _CARRY_TRIED: set[str] = set()  # the settings folders a carry-over was tried for (once a run: it copies a lot)
@@ -447,6 +448,9 @@ class Settings:
     # the day besides its printed page numbers
     excerpt_hidden_speeds: list = field(default_factory=list)
     excerpt_show_place: bool = False
+    # the user's answers when two attorney rows may be one firm or attorney ("Smith Law" and "Smith Law Group"):
+    # [[Attorney.key(), Attorney.key(), True (the same) or False], ...] (see extract_regex.use_firm_answers)
+    firm_answers: list = field(default_factory=list)
     invoice_turnaround: dict = field(default_factory=lambda: dict(INVOICE_TURNAROUND))
     # the invoice's own text, each row placed and shown as it says (see TEXT_PLACES, TEXT_WHEN); the payment
     # details and the footer note are rows too
@@ -821,6 +825,8 @@ class Settings:
             s.invoice_index_shared = "split"
         s.invoice_detail_items = [k for k in s.invoice_detail_items if isinstance(k, str) and k in DETAIL_ITEMS]
         s.excerpt_hidden_speeds = [k for k in s.excerpt_hidden_speeds if isinstance(k, str)]
+        s.firm_answers = [[r[0], r[1], r[2]] for r in s.firm_answers if isinstance(r, list) and len(r) == 3
+                          and all(isinstance(k, str) and k for k in r[:2]) and isinstance(r[2], bool)]
         if s.runsheet_existing not in RUNSHEET_EXISTING:
             s.runsheet_existing = "ask"
         # v8: a folder for each output. The run sheets' folder (runsheet_dir before) is one of them now.

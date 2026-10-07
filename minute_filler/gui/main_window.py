@@ -45,9 +45,11 @@ from PySide6.QtWidgets import (
 
 from .. import log as logfile
 from ..log import log
-from ..batch import (BATCH_EXT, NOT_INVOICED, Job, case_reporters, expand_paths, files_to_make, fill_jobs, group,
-                     ident, input_folders, job_from_origin, job_origin, out_dir_for, read_loaders, remerge, same_case)
+from ..batch import (BATCH_EXT, HELD, NOT_INVOICED, Job, case_reporters, expand_paths, files_to_make, fill_jobs,
+                     firm_questions, group, ident, input_folders, job_from_origin, job_origin, join_entries,
+                     out_dir_for, read_loaders, remerge, same_case)
 from ..extract_llm import OllamaExtractor
+from ..extract_regex import maybe_same_entry, use_firm_answers
 from ..dates import quick_date
 from ..deliver import backup_folder, backup_records, generate, ledger_for
 from ..ingest import ingest_file, ingest_pil, ingest_text
@@ -208,6 +210,35 @@ def _billed_by_copy(copy) -> list[str]:
     InvoiceOpts.skip_key names them ("key", and "key@ds" for another reporter's invoices)."""
     keys = copy.ticked_keys()
     return keys + [f"{k}@{r}" for r in copy.bill_reporters() if r != "me" for k in keys]
+
+
+def _entry_text(a: Attorney) -> str:
+    """An attorney row in a few words, for a question: "Smith Law Group (Dana Smith)", "Mr. Smith"."""
+    return f"{a.firm} ({a.name})" if a.firm and a.name else a.firm or a.name
+
+
+def _cases(jobs: list[Job]) -> list[list[Job]]:
+    """These jobs by case (batch.same_case: the same index number or case name), in their order."""
+    cases: list[list[Job]] = []
+    for j in jobs:
+        same = next((g for g in cases if same_case(ident(g[0].case), ident(j.case))), None)
+        if same is None:
+            cases.append([j])
+        else:
+            same.append(j)
+    return cases
+
+
+def _held_cases(jobs) -> dict[str, str]:
+    """The cases Generate all held (batch.HELD: a file of one of their days couldn't be saved), each with why:
+    {"Jane Roe v. Sam Poe": "June 2026 ... Run Sheet.xlsx is open in another program - close it in Excel and try
+    again"}, in full (the reason is what the user must act on)."""
+    out: dict[str, str] = {}
+    for j in jobs:
+        for part in j.error.split("; "):
+            if part.startswith(HELD) and j.title() not in out:
+                out[j.title()] = part[len(HELD):].strip().split("couldn't be saved: ", 1)[-1]
+    return out
 
 
 def _reason(error: str, width: int = 160) -> str:
@@ -589,6 +620,7 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: Settings, app: QApplication):
         super().__init__()
         self.s, self.app = settings, app
+        use_firm_answers(settings.firm_answers)  # (rows the user said are one firm, or not, are read so)
         self.runner = Runner()
         self.ai = OllamaExtractor(settings)
         self.ai_ok = False
@@ -993,6 +1025,27 @@ class MainWindow(QMainWindow):
         sized(self.att, "setMinimumHeight", 240)
         self.att.itemChanged.connect(self._att_changed)
         cl.addWidget(self.att)
+        # two rows that may be one firm or attorney ("Smith Law" and "Smith Law Group"): the user says (Same firm,
+        # Not the same), and the answer is kept for later documents too (batch.firm_questions, Settings.firm_answers)
+        self.firm_ask_box = QWidget()
+        fq = QHBoxLayout(self.firm_ask_box)
+        fq.setContentsMargins(0, 0, 0, 0)
+        fq.setSpacing(8)
+        self.firm_ask = QLabel("")
+        self.firm_ask.setObjectName("speedAsk")
+        self.firm_ask.setWordWrap(True)
+        fq.addWidget(self.firm_ask, 1)
+        self.firm_same = QPushButton("Same firm")
+        self.firm_same.setToolTip("They are one firm (or one attorney): one row, one invoice, one agreement")
+        self.firm_same.clicked.connect(lambda: self._answer_firm(True))
+        self.firm_apart = QPushButton("Not the same")
+        self.firm_apart.setToolTip("They are two firms (or two attorneys): two rows, each billed on its own")
+        self.firm_apart.clicked.connect(lambda: self._answer_firm(False))
+        fq.addWidget(self.firm_same, 0, Qt.AlignTop)
+        fq.addWidget(self.firm_apart, 0, Qt.AlignTop)
+        self.firm_ask_box.setVisible(False)
+        self._firm_q = None  # (the days asked about, (row, row)) of the question shown
+        cl.addWidget(self.firm_ask_box)
         br = QHBoxLayout()
         add = QPushButton("+ Add attorney")
         add.clicked.connect(self._add_att_row)
@@ -2129,6 +2182,29 @@ class MainWindow(QMainWindow):
             self._update_status()
         return True
 
+    def _ask_parties(self, jobs: list[Job]) -> bool:
+        """Before anything is made: a day split under Excerpts... whose Parties number, set by hand, isn't the
+        number of firms that ordered (Job.parties_mismatch) may have a firm left unticked by mistake. The
+        invoices and No. of copies count the firms that ordered; Go back leaves it to be checked (False), Go on
+        makes the files so (True)."""
+        odd = [j for j in jobs if j.parties_mismatch()]
+        if not odd:
+            return True
+        lines = "\n".join(f"•  {', '.join(x for x in (j.title(), j.case.get('dates')) if x)}: {j.parties_mismatch()}"
+                           for j in odd[:8]) + ("\n…" if len(odd) > 8 else "")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Parties and Excerpts disagree")
+        box.setText(f"{lines}\n\nThe invoices and No. of copies count the firms that ordered pages under "
+                    "Excerpts…, not the Parties number. If a firm that ordered is missing, go back and tick it "
+                    "under Excerpts….")
+        back = box.addButton("Go back", QMessageBox.RejectRole)
+        go_on = box.addButton("Go on (count the firms ticked)", QMessageBox.AcceptRole)
+        box.setDefaultButton(back)
+        box.setEscapeButton(back)
+        box.exec()
+        return box.clickedButton() is go_on and not self._batch_running()
+
     def _speed_to_rule(self):
         """↺: the job's speed goes back to the one Settings → Invoice picks; the rate and delivery date follow."""
         self.case.fields["delivery"] = FieldState()
@@ -2252,11 +2328,81 @@ class MainWindow(QMainWindow):
 
     def _update_status(self):
         """Brings the Outputs box and the cards under the attorneys (_refresh_outputs, which also brings the
-        Excerpts window along), the status pill and, in a batch, the job list up to date."""
+        Excerpts window along), the status pill, the question about rows that may be one firm and, in a batch,
+        the job list up to date."""
         self._refresh_outputs()
+        self._show_firm_question()
         self._job_status()
         if len(self.jobs) > 1:
             self._refresh_job_labels()
+
+    def _show_firm_question(self) -> None:
+        """The Attorneys card's question when two rows of the job, or of its case's other days, may be one firm or
+        attorney (batch.firm_questions: "Smith Law" and "Smith Law Group"): Same firm or Not the same answers it
+        (_answer_firm); hidden when there is none."""
+        group = self._invoice_group() if self.cur in self.jobs else [self.cur]
+        qs = firm_questions(group)
+        self._firm_q = (group, qs[0]) if qs else None
+        if qs:
+            a, b = qs[0]
+            more = f"  ({len(qs)} to answer)" if len(qs) > 1 else ""
+            self.firm_ask.setText(f"⚠ Are these one firm?{more}\n•  {_entry_text(a)}\n•  {_entry_text(b)}")
+        self.firm_ask_box.setVisible(bool(qs))
+
+    def _answer_firm(self, same: bool) -> None:
+        """Same firm / Not the same, for the question shown (see _show_firm_question)."""
+        if self._firm_q is None or self._batch_running():
+            return
+        _, (a, b) = self._firm_q
+        self._record_firm_answer(a, b, same)
+        self._show_case()
+        self._update_status()
+
+    def _record_firm_answer(self, a: Attorney, b: Attorney, same: bool) -> None:
+        """Keeps the user's answer about rows a and b (Settings.firm_answers, saved: later documents naming them
+        are read so too) and, when they are one, makes them one row on each day of every job loaded
+        (batch.join_entries, a case at a time); No. of copies follows."""
+        pair = {a.key(), b.key()}
+        self.s.firm_answers = [r for r in self.s.firm_answers if {r[0], r[1]} != pair] + [[a.key(), b.key(), same]]
+        use_firm_answers(self.s.firm_answers)
+        self._save_settings()
+        if same:  # on every job loaded, not only the case asked about: it won't be asked about again
+            for case in _cases(self.jobs):
+                join_entries(case, a, b)
+        for j in self.jobs:
+            j.refresh_copies(self.s)
+
+    def _ask_firms(self, groups: list[list[Job]]) -> bool:
+        """Before anything is made: rows of these days (each list the days of a case) that may be one firm or
+        attorney and haven't been answered are asked about, one pair at a time (Same firm, Not the same). False
+        when Go back was clicked (nothing is made), or Generate all started meanwhile."""
+        asked = False
+        for group in groups:
+            # the questions are worked out again after each answer: an answer joins rows, and a read that ends
+            # while the box is open may merge the job again (new rows); an answered pair isn't asked again
+            while qs := firm_questions([j for j in group if j in self.jobs]):
+                a, b = qs[0]
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Question)
+                box.setWindowTitle("One firm or two?")
+                case = ", ".join(x for x in (group[0].title(), group[0].case.get("dates")) if x)
+                box.setText(f"{case}: are these one firm (or one attorney)?\n\n•  {_entry_text(a)}\n"
+                            f"•  {_entry_text(b)}\n\nOne firm gets one invoice and one minute agreement. Your "
+                            "answer is kept for later documents too.")
+                same = box.addButton("Same firm", QMessageBox.YesRole)
+                apart = box.addButton("Not the same", QMessageBox.NoRole)
+                back = box.addButton("Go back", QMessageBox.RejectRole)
+                box.setEscapeButton(back)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked not in (same, apart) or self._batch_running():
+                    return False
+                self._record_firm_answer(a, b, clicked is same)
+                asked = True
+        if asked:
+            self._show_case()
+            self._update_status()
+        return True
 
     def _follow_excerpts(self) -> None:
         """The Excerpts window, when open, shows the current job's days as they are now (it is called from
@@ -2385,8 +2531,15 @@ class MainWindow(QMainWindow):
         outputs = self._without_unchecked_invoice(job, outputs)
         if not outputs:
             return
+        # rows that may be one firm: asked first (one firm is one agreement, one invoice; the run sheet doesn't
+        # name them)
+        billing = bool({"agreement", "mofr", "invoice"} & set(outputs))
+        if billing and (not self._ask_firms([[job]]) or job not in self.jobs):
+            return
         # the e-mail asks for another speed than the Settings rule's: which one the forms name
         if {"agreement", "mofr"} & set(outputs) and (not self._ask_speeds([job]) or job not in self.jobs):
+            return
+        if billing and (not self._ask_parties([job]) or job not in self.jobs):
             return
         case = job.case  # (Whose pages... or a read that ended meanwhile may have merged the job again)
         # Ask about required fields that are blank, and fields with competing values (only the case name
@@ -2430,6 +2583,8 @@ class MainWindow(QMainWindow):
         if "runsheet" in outputs:
             target = self._run_sheet_for(job)
             if target is None or job not in self.jobs or self._batch_running():
+                return
+            if not self._sheets_free([target], "Generate"):
                 return
             sheet = job.runsheet_opts(self.s)
             sheet.target = target
@@ -2571,6 +2726,25 @@ class MainWindow(QMainWindow):
             return []
         return others
 
+    def _sheets_free(self, targets: list[str], button: str) -> bool:
+        """Before anything is made: the run sheets the takes go on can be written. One open in another program
+        (Excel) is named in a message saying to close it, and False is returned: nothing is made, so that the
+        takes of a trial never go on its run sheet with a day missing. targets: the run sheets chosen ("" or
+        None: a new one, nothing to check); button: "Generate" or "Generate all", to press again."""
+        from ..runsheet import is_locked
+        locked = list(dict.fromkeys(t for t in targets if t and is_locked(t)))
+        if not locked:
+            return True
+        names = "\n".join(f"•  {Path(t).name}" for t in locked)
+        box = QMessageBox(QMessageBox.Warning, "Close the run sheet first",
+                          f"{'This run sheet is' if len(locked) == 1 else 'These run sheets are'} open in another "
+                          f"program (probably Excel), so the takes can't be added:\n\n{names}\n\n"
+                          f"Close {'it' if len(locked) == 1 else 'them'} (or the other copy of YinItAgreementForm "
+                          f"that has {'it' if len(locked) == 1 else 'them'} open), then press {button} again. "
+                          "Nothing was made.", QMessageBox.Ok, self)
+        box.exec()
+        return False
+
     def _run_sheet_for(self, job: Job) -> str | None:
         """The run sheet to add the job's takes to ("" = a new one), as Settings → Run sheet says; asks when the
         case seems to have one already. None = cancelled."""
@@ -2615,11 +2789,19 @@ class MainWindow(QMainWindow):
                 if self._batch_running():
                     return
             chosen = [j for j in chosen if j in self.jobs]
+        # Rows of a case's days that may be one firm: asked now (one firm is one agreement, one invoice)
+        billing = bool({"agreement", "mofr", "invoice"} & set(outputs))  # (the run sheet doesn't name them)
+        if billing and not self._ask_firms(_cases(chosen)):
+            return
+        chosen = [j for j in chosen if j in self.jobs]
         # The speed of the jobs whose e-mail asks for another speed than the Settings rule's: asked now, at once
         if {"agreement", "mofr"} & set(outputs):
             if not self._ask_speeds(chosen):
                 return
             chosen = [j for j in chosen if j in self.jobs]
+        if billing and not self._ask_parties(chosen):
+            return
+        chosen = [j for j in chosen if j in self.jobs]
         # Days whose invoice still waits for a choice (Excerpts... to check, whose pages to bill): say which,
         # before anything is made. Going on bills the other days of their case without them. A case with a day
         # nobody is ticked on gets no invoice at all (batch.group_problem): said too, as fill_jobs groups them.
@@ -2696,6 +2878,8 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         sheet_for = {k: v for k, v in sheet_for.items() if k in {id(j) for j in chosen}}
+        if not self._sheets_free([t for t, _ in sheet_for.values()], "Generate all"):
+            return
         # The batch is made on another thread while the window stays usable, so it gets its own copy of the
         # jobs and the settings: editing a job, an AI answer or a change in Settings can't reach files half made.
         def copy_jobs() -> dict:
@@ -2830,7 +3014,8 @@ class MainWindow(QMainWindow):
                     j.invoiced, j.invoiced_keys = copy.invoiced, copy.invoiced_keys
             # days whose only "error" is the invoice held back, as the user chose before it started (see
             # batch.fill_jobs: those messages come last, so an error that starts with one has nothing else)
-            unbilled = [j for j in chosen if j.error.startswith(NOT_INVOICED)]
+            held_days = [j for j in chosen if HELD in j.error]  # (a held case's days: listed once, under the case)
+            unbilled = [j for j in chosen if j.error.startswith(NOT_INVOICED) and not any(j is h for h in held_days)]
             failed = [j for j in chosen if j.error and not j.saved and j not in unbilled]
             partial = [j for j in chosen if j.error and j.saved and j not in unbilled]
             made = len(chosen) - len(failed) - sum(1 for j in unbilled if not j.saved)
@@ -2842,6 +3027,17 @@ class MainWindow(QMainWindow):
             folders = list(dict.fromkeys(str(p.parent) for p in paths))
             text = f"Saved {len(paths)} file{'s' if len(paths) != 1 else ''} for {plural(made, 'job')}"
             text += f" in\n{folders[0]}" if len(folders) == 1 else f" in {len(folders)} folders." if folders else "."
+            held = _held_cases(held_days)  # a file of a case couldn't be saved: nothing (more) made for its days
+            if held:
+                # ("more": a trial's run sheet is written first, and may be saved before another of its files fails)
+                text += (f"\n\nNothing more was made for {plural(len(held), 'case')} once a file couldn't be saved:\n"
+                         + "\n".join(f"•  {case}: {why}" for case, why in held.items())
+                         + "\n\nClose the file (in Excel, a PDF viewer or another copy of YinItAgreementForm), then "
+                         "press Generate all again: those days are still ticked.")
+                # (the day it happened on, whose own error doesn't say HELD, is among them: the same case)
+                in_held = [ident(h.case) for h in held_days]
+                failed = [j for j in failed if not any(same_case(ident(j.case), k) for k in in_held)]
+                partial = [j for j in partial if not any(same_case(ident(j.case), k) for k in in_held)]
             if unbilled:
                 text += f"\n\n{plural(len(unbilled), 'day')} not invoiced, as you chose:\n" + "\n".join(
                     f"•  {j.title()} {j.case.get('dates')}: {_reason(j.error[len(NOT_INVOICED):].strip())}"
@@ -2859,8 +3055,9 @@ class MainWindow(QMainWindow):
                          "them as they are now:\n" + "\n".join(f"•  {j.title()}" for j in changed[:6]))
             if math and self.s.show_math and not previewed:
                 self._show_math(math, Path(folders[0]) if folders else self.s.folder_for("invoice"))
-            self._saved_box("Batch finished", text, folders, "\n".join(str(p) for p in paths), warn=bool(failed))
-            self._set_status(f"✓  Saved {len(paths)} file(s)", "warn" if failed else "ok")
+            self._saved_box("Batch finished", text, folders, "\n".join(str(p) for p in paths),
+                            warn=bool(failed or held))
+            self._set_status(f"✓  Saved {len(paths)} file(s)", "warn" if failed or held else "ok")
             self._records_changed()
 
         def crashed(msg):
@@ -2993,7 +3190,8 @@ class MainWindow(QMainWindow):
     def _settings_changed(self) -> None:
         """The settings were changed (Settings saved, the welcome questions answered, settings imported): the
         theme, the window's options, the rate sheets and the AI check are refreshed and every job is merged
-        and priced again."""
+        and priced again (with the answers about rows that may be one firm as they are now)."""
+        use_firm_answers(self.s.firm_answers)
         if self.s.zoom != zooming.zoom():
             self.set_zoom(self.s.zoom)  # (the theme too)
         apply_theme(self.app, self.s.theme)

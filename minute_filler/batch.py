@@ -40,8 +40,8 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from .extract_regex import (RegexExtractor, dedupe_attorneys, find_dates, merge_entry, norm_index, same_entry,
-                            same_firm)
+from .extract_regex import (RegexExtractor, dedupe_attorneys, find_dates, maybe_same_entry, merge_entry, norm_index,
+                            same_entry, same_firm)
 from .deliver import NO_INVOICE, CaseForm, generate, ledger_for, make_forms
 from .fill import agreement_orderers, is_generated, short_caption
 from .invoice import (ORDERED_BY_NOBODY, DayOrder, InvoiceOpts, Portion, day_reporters, invoice_count,
@@ -602,8 +602,32 @@ class Job:
     def refresh_copies(self, s: Settings) -> None:
         """No. of copies of this day's forms follows its ordering parties, as its invoice counts them (the
         Parties number when set, else the attorneys ticked: merge.refresh_copies), unless the user typed a
-        number. Called wherever the attorneys ticked, or the Parties number, change."""
-        refresh_copies(self.case, s, self.parties)
+        number. Called wherever the attorneys ticked, or the Parties number, change. On a day split under
+        Excerpts... the Parties number counts for nothing, as on its invoices: the firms that ordered do."""
+        refresh_copies(self.case, s, self.copies_parties())
+
+    def copies_parties(self) -> int:
+        """The Parties number as No. of copies counts it: on a day split under Excerpts..., whose invoices leave
+        it out, the firms that ordered pages of it (split_orderers; a firm ticked without a run of its own orders
+        nothing and gets no forms); else the number set (0: not set, the firms ticked count)."""
+        return self.split_orderers() if self.valid_portions() is not None else self.parties
+
+    def split_orderers(self) -> int:
+        """How many firms ordered pages of the day (ordered_pages: more than 0), as its agreements are made for
+        them (fill.agreement_orderers)."""
+        return sum(1 for k, n in self.ordered_pages().items() if k and n > 0)
+
+    def parties_mismatch(self) -> str:
+        """A Parties number set by hand that the day's Excerpts... rows disagree with ("" when there is none):
+        "you set Parties to 3, but 2 firms ordered pages under Excerpts…". The invoices and No. of copies count
+        the firms that ordered; a firm left unticked by mistake is what Generate asks about."""
+        if not self.parties or self.valid_portions() is None:
+            return ""
+        n = self.split_orderers()
+        if n == self.parties:
+            return ""
+        firms = f"{n} firm{'s' if n != 1 else ''}"
+        return f"you set Parties to {self.parties}, but {firms} ordered pages under Excerpts…"
 
     def invoice_opts(self) -> InvoiceOpts:
         """The invoice's pages (of each day), ordering parties (the ticked attorneys unless set), who ordered
@@ -1065,7 +1089,7 @@ def remerge(job: Job, s: Settings) -> None:
         _all_dates(new, job)
     job.own = tuple(sorted(my_initials(s.profile.name, s.profile.initials)))
     _all_pages(new, job)
-    refresh_copies(new, s, job.parties)  # the attorneys ticked may be the user's, restored above
+    refresh_copies(new, s, job.copies_parties())  # the attorneys ticked may be the user's, restored above
     refresh_rate(new, s)  # a speed chosen by the user was restored after the defaults were applied
     if s.fill_delivery_date:
         refresh_delivery_date(new, s)
@@ -1274,6 +1298,55 @@ def invoice_groups(jobs: list[Job], s: Settings) -> list[list[Job]]:
     return groups
 
 
+def firm_questions(jobs: list[Job]) -> list[tuple[Attorney, Attorney]]:
+    """The rows of these jobs (the days of a case) that may be one firm or attorney, but it isn't sure
+    (extract_regex.maybe_same_entry: 'Smith Law' and 'Smith Law Group', 'Mr. Smith' and Dana Smith of Smith
+    Law): the user is asked (the Attorneys card, and Generate). Each pair once; placeholders are left out."""
+    rows = [a for j in jobs for a in j.case.attorneys if not a.is_placeholder() and a.key()]
+    out: list[tuple[Attorney, Attorney]] = []
+    seen: set[frozenset] = set()
+    for i, a in enumerate(rows):
+        for b in rows[i + 1:]:
+            pair = frozenset((a.key(), b.key()))
+            if len(pair) == 2 and pair not in seen and maybe_same_entry(a, b):
+                seen.add(pair)
+                out.append((a, b))
+    return out
+
+
+def join_entries(jobs: list[Job], a: Attorney, b: Attorney) -> None:
+    """The user said a and b are one firm or attorney (and the answer is in extract_regex's answers, so
+    same_entry says so from now on): on each of these days their rows become one (merge_entry: the first kept,
+    ticked when either was), and its Excerpts... rows and the attorneys already invoiced follow the row kept;
+    the days of a case then name it alike (same_entries)."""
+    keys = {a.key(), b.key()}
+    days = [(j, [x for x in j.case.attorneys if x.key() in keys]) for j in jobs]
+    found = [x for _, rows in days for x in rows]
+    if not found:
+        return
+    whole = deepcopy(found[0])  # the entry as all the days name it together
+    for x in found[1:]:
+        merge_entry(whole, x)
+    for j, rows in days:
+        if not rows:
+            continue
+        keep, old = rows[0], [x.key() for x in rows]
+        for x in rows[1:]:
+            merge_entry(keep, x)
+        j.case.attorneys = [x for x in j.case.attorneys if not any(x is y for y in rows[1:])]
+        # one key on every day: the firm, or without one the attorney's name ('Mr. Smith' on one day and 'Dana
+        # Smith' on another, which same_entries leaves apart, as neither has a firm)
+        if whole.firm:
+            keep.firm = whole.firm
+        else:
+            keep.name = whole.name
+        for k in dict.fromkeys(old):
+            if k != keep.key():
+                j.rename_in_portions(k, keep.key())
+    if len(jobs) > 1:
+        same_entries(jobs)
+
+
 def same_entries(group: list[Job]) -> None:
     """The same firm or attorney on several days of a case is one entry, with one Attorney.key() on every day
     (the days' invoices, agreements and Excerpts... rows name it by its key): a row of one day that is another
@@ -1355,7 +1428,11 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
     own copy, see Ledger.preview_copy); math: gets (FirmInvoice, number) of each invoice made (see generate).
     The days of a case that share an invoice get their agreements and MOFR once for all of them (form_groups,
     case_forms; made after the days' own files, each listed under the days it covers): a day that is not among
-    `jobs` is not on them."""
+    `jobs` is not on them.
+    The days of a case are one piece of work (case_units): its run sheet is written first, with the takes of
+    all its days in one go (never a run sheet with a day missing), and when a file of it can't be written (the
+    run sheet open in Excel) nothing more is made for any of its days, whose errors say why (HELD): they are
+    done again together."""
     outputs = list(s.outputs if outputs is None else outputs)
     ledger = ledger or ledger_for(s)
     names = [j.name_key() for j in batch or jobs]
@@ -1366,14 +1443,42 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
     # the days whose agreements and MOFR are made once for all of them (form_groups), after the loop too
     trials = form_groups(jobs, s) if set(FORMS) & set(outputs) else []
     in_trial = {id(j) for g in trials for j in g}
-    steps = len(jobs) + len(trials) + len(joint)
+    sheets = sheet_units(jobs, outputs, s)
+    unit_of = case_units(jobs, sheets + trials + joint)
+    stopped: dict[int, str] = {}  # case unit -> why nothing more is made for its days
+    failed: set[int] = set()   # id(job) of the day a held case's problem happened on (its own error says it)
+    steps = len(sheets) + len(jobs) + len(trials) + len(joint)
     done: list[Path] = []
     started: list[Path] = []  # run sheets started by this batch: the other days of the trial go on them too
-    made_by_group: dict[int, Path] = {}  # the run sheet of each case the window asked about (Job.runsheet_group)
+    sheet_of: dict[int, RunSheetOpts] = {}  # id(job) -> the run sheet its takes went on
+    for k, unit in enumerate(sheets):  # first: a run sheet open in Excel then stops its case before anything
+        if progress:
+            progress(k, steps, f"Run sheet for {unit[0].title()}")
+        if unit_of[id(unit[0])] in stopped:  # (another run sheet of its case couldn't be saved)
+            continue
+        sheet = unit_sheet(unit, s, started)
+        try:
+            made = generate(unit_case(unit), s, out_dir_for(unit[0], s), ["runsheet"], None, ledger,
+                            runsheet=sheet, folders=[f for j in unit for f in input_folders(j)],
+                            origin=job_origin(unit[0]) if len(unit) == 1 else
+                            {"sources": [d.path for j in unit for d in j.docs if d.path], "joint": True})
+        except Exception as e:
+            stopped[unit_of[id(unit[0])]] = _held_note(unit[0] if len(unit) == 1 else None, e, "the run sheet")
+            log_error("could not add the takes to the run sheet", e)
+            continue
+        for j in unit:
+            sheet_of[id(j)] = sheet
+            j.saved = list(made)  # (left out when it had every take already)
+        done += [p for p in made if p not in done]
+        if sheet.created and sheet.path and sheet.path not in started:
+            started.append(sheet.path)
     for i, job in enumerate(jobs):
         if progress:
-            progress(i, steps, job.title())
-        sheet = None
+            progress(len(sheets) + i, steps, job.title())
+        unit = unit_of[id(job)]
+        if unit in stopped:  # its run sheet, or another day of its case, couldn't be saved
+            continue
+        sheet = sheet_of.get(id(job))
         keys: list[str] = []  # the attorneys invoiced for this job by generate
         try:
             want = job.makeable(outputs)
@@ -1384,17 +1489,17 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             if id(job) in in_trial:  # its agreements and MOFR cover the other days of the case too
                 want = [o for o in want if o not in FORMS]
             job.refresh_copies(s)  # (the parties as they are now, whatever changed the ticks)
-            sheet = job.runsheet_opts(s) if "runsheet" in want else None
-            if sheet and job.runsheet_group in made_by_group:
-                sheet.target = str(made_by_group[job.runsheet_group])
-            elif sheet and sheet.target is None and s.runsheet_existing != "new":
-                sheet.target = _started_for(job, started, s)
-            job.saved = generate(job.case, s, out_dir_for(job, s), want, job.invoice_sets(), ledger,
-                                 dated=names.count(job.name_key()) > 1, runsheet=sheet,
-                                 folders=input_folders(job), invoiced=keys, origin=job_origin(job), math=math,
-                                 ordered=job.ordered_pages())
+            ran_sheet = "runsheet" in want  # (written above, for its case)
+            want = [o for o in want if o != "runsheet"]
+            sheet_made = list(job.saved) if ran_sheet else []
+            job.saved = sheet_made + [
+                p for p in generate(job.case, s, out_dir_for(job, s), want, job.invoice_sets(), ledger,
+                                    dated=names.count(job.name_key()) > 1, folders=input_folders(job),
+                                    invoiced=keys, origin=job_origin(job), math=math, ordered=job.ordered_pages())
+                if p not in sheet_made] if want else sheet_made
             job.invoiced |= "invoice" in want
             left_out = [o for o in outputs if o not in want and not job.unneeded(o)
+                        and not (o == "runsheet" and ran_sheet)
                         and not (o == "invoice" and (billed_elsewhere or unchecked_here))
                         and not (o in FORMS and id(job) in in_trial)]
             why: dict[str, list[str]] = {}  # the outputs left out by reason ("no invoice or run sheet: ...")
@@ -1408,20 +1513,20 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             job.error = "; ".join(problems)
             done += [p for p in job.saved if p not in done]  # one run sheet takes several days
         except Exception as e:
-            job.saved = list(getattr(e, "made", []))  # what was made before the problem
+            job.saved = (list(job.saved) if sheet else []) + list(getattr(e, "made", []))  # made before it
             job.error = f"{type(e).__name__}: {e}"
             if keys:  # some attorneys' invoices were made: the next run leaves them out
                 job.invoiced_keys = list(dict.fromkeys(job.invoiced_keys + keys))
             done += [p for p in job.saved if p not in done]  # one run sheet takes several days
             log_error("could not save the forms of a job", e)
-        if sheet and sheet.path:
-            if job.runsheet_group is not None:
-                made_by_group.setdefault(job.runsheet_group, sheet.path)
-            if sheet.created and sheet.path not in started:
-                started.append(sheet.path)
+            if len([j for j in jobs if unit_of[id(j)] == unit]) > 1:  # the other days of its case wait for it
+                stopped[unit] = _held_note(job, e)
+                failed.add(id(job))
     for k, g in enumerate(trials):  # one agreement per attorney and one MOFR for all the days of a case
         if progress:
-            progress(len(jobs) + k, steps, f"Forms for {g[0].title()}")
+            progress(len(sheets) + len(jobs) + k, steps, f"Forms for {g[0].title()}")
+        if unit_of[id(g[0])] in stopped:
+            continue
         forms: list[tuple[CaseForm, list[Job]]] = []
         try:
             forms = case_forms(g, s, outputs)
@@ -1432,6 +1537,7 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             made = list(getattr(e, "made", []))
             problem = f"{type(e).__name__}: {e}"  # every day of it says so
             log_error("could not make the forms for several days of a case", e)
+            stopped[unit_of[id(g[0])]] = _held_note(None, e, "a minute agreement or the MOFR")
         for (_, covered), path in zip(forms, made):  # each form is listed under the days it covers
             for job in covered:
                 if path not in job.saved:
@@ -1443,7 +1549,9 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
     for k, g in enumerate(joint):  # one invoice for all the days of a case
         first = g[0]
         if progress:
-            progress(len(jobs) + len(trials) + k, steps, f"Invoice for {first.title()}")
+            progress(len(sheets) + len(jobs) + len(trials) + k, steps, f"Invoice for {first.title()}")
+        if unit_of[id(first)] in stopped:
+            continue
         keys = []  # the attorneys invoiced
         held = group_problem(g)
         if held:  # a day with nobody ticked: no invoice until it says who ordered it
@@ -1473,8 +1581,85 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             else:
                 job.invoiced = True
         done += made
+    for job in jobs:  # every day of a held case says why: they stay to be done again, together
+        why = stopped.get(unit_of[id(job)])
+        if why and id(job) not in failed:  # (the day it happened on says so itself)
+            job.error = "; ".join(x for x in (job.error, why) if x)
     log.info("saved %d form(s) for %d job(s)", len(done), len(jobs))
     return done
+
+
+# how a day's error starts when its case was held (see fill_jobs): "more", as its run sheet may have been written
+# before another day's file failed
+HELD = "Nothing more made for this case:"
+
+
+def _held_note(job: Job | None, e: Exception, what: str = "") -> str:
+    """Why a case was held, for each of its days: the file that couldn't be saved and why ("Jane Roe - Run
+    Sheet.xlsx is open in another program - close it in Excel and try again"). job: the day it happened on
+    (None: the case as a whole); what: the file, when the error doesn't name it."""
+    reason = str(e) if isinstance(e, PermissionError) and str(e) else f"{type(e).__name__}: {e}"
+    where = f" ({job.case.get('dates') or job.title()})" if job is not None else ""
+    return f"{HELD} {what or 'a file'}{where} couldn't be saved: {reason}"
+
+
+def sheet_units(jobs: list[Job], outputs, s: Settings | None = None) -> list[list[Job]]:
+    """The jobs whose takes go on one run sheet together, written in one go (fill_jobs): those the window asked
+    about together (Job.runsheet_group), else the days of one case (the same index number or case name), unless
+    Settings say to start a new run sheet each time (Settings.runsheet_existing "new": a day each). Only jobs
+    that can have a run sheet (Job.makeable)."""
+    each_new = s is not None and s.runsheet_existing == "new"
+    units: list[list[Job]] = []
+    for j in jobs:
+        if "runsheet" not in j.makeable(outputs):
+            continue
+        unit = next((u for u in units if (u[0].runsheet_group, j.runsheet_group) != (None, None)
+                     and u[0].runsheet_group == j.runsheet_group or
+                     u[0].runsheet_group is None and j.runsheet_group is None and not each_new and
+                     same_case(ident(u[0].case), ident(j.case))), None)
+        if unit is None:
+            units.append([j])
+        else:
+            unit.append(j)
+    return units
+
+
+def unit_sheet(unit: list[Job], s: Settings, started: list[Path]) -> RunSheetOpts:
+    """The takes of every day of a run sheet unit (sheet_units), in the order of the days, for one save; where
+    they go: as the window chose for the case (Job.runsheet_to), else a run sheet this batch started for the
+    case, else as Settings say."""
+    rows = [r for j in unit for r in j.runsheet_opts(s).rows]
+    rows.sort(key=lambda r: (r.day or date.max, r.start if r.start is not None else -1))
+    name_rows(rows)  # a reporter named on one day's title page is named on the other days too
+    sheet = RunSheetOpts(rows, unit[0].runsheet_to)
+    if sheet.target is None and s.runsheet_existing != "new":
+        sheet.target = _started_for(unit[0], started, s)
+    return sheet
+
+
+def unit_case(unit: list[Job]) -> CaseInfo:
+    """The case a run sheet unit's record names: the first day's, with every day's dates."""
+    if len(unit) == 1:
+        return unit[0].case
+    case = deepcopy(unit[0].case)
+    case.set("dates", dates_text(j.case.get("dates") for j in unit), case.fields["dates"].source)
+    return case
+
+
+def case_units(jobs: list[Job], groups: list[list[Job]]) -> dict[int, int]:
+    """id(job) -> the number of its case unit: jobs in any one of `groups` (a run sheet's days, a trial's forms,
+    a joint invoice) are one unit with every job they share a group with; the others are a unit each."""
+    unit = {id(j): n for n, j in enumerate(jobs)}
+    for g in groups:
+        ids = [id(j) for j in g if id(j) in unit]
+        if not ids:
+            continue
+        old = {unit[i] for i in ids}
+        new = min(old)
+        for k, v in unit.items():
+            if v in old:
+                unit[k] = new
+    return unit
 
 
 def _started_for(job: Job, started: list[Path], s: Settings) -> str | None:
@@ -1535,8 +1720,8 @@ def case_forms(group: list[Job], s: Settings, outputs) -> list[tuple[CaseForm, l
     field's number when typed); its invoices bill only their reporter's pages of them. One MOFR lists every
     day, its pages those ordered by anyone on each day, added up. The rest is the first day's case, as on the
     joint invoice (court, part, judge, case name, index, speed, rate), with No. of copies on every one of these
-    forms the ordering parties of the joint invoice (its Parties number: set on a day, else every attorney
-    ticked on any of the days; unless typed on the first day), the proceeding types of all the days covered
+    forms the ordering parties (the Parties number set on the earliest day that has one and isn't split under
+    Excerpts..., else every attorney ticked on any of the days; unless typed on the first day), the proceeding types of all the days covered
     and the latest estimated delivery date among them (every day's transcript is promised by then)."""
     want = [o for o in FORMS if o in outputs]
     if not want:
@@ -1549,9 +1734,9 @@ def case_forms(group: list[Job], s: Settings, outputs) -> list[tuple[CaseForm, l
     days: list[tuple[Job, str, dict[str, int]]] = [(j, d, got) for j in group for d, got in j.ordered_days()]
     base = deepcopy(group[0].case)
     base.attorneys = [deepcopy(a) for a in group_attorneys(group)]
-    # every form of the trial: the parties of the joint invoice (joint_invoice: the Parties number of the earliest
-    # day with one, else every attorney ticked on any of the days)
-    refresh_copies(base, s, next((j.parties for j in group if j.parties), 0))
+    # every form of the trial: the Parties number of the earliest day set by hand, else every attorney ticked on any
+    # of the days (a day split under Excerpts... has no say: its own count is only its own firms, see copies_parties)
+    refresh_copies(base, s, next((j.parties for j in group if j.parties and j.valid_portions() is None), 0))
 
     def covering(picked: list[int]) -> list[Job]:
         """The days (jobs) of these entries of `days`, each once, in order (a job of several days has several)."""

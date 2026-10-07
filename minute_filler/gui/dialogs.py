@@ -1799,7 +1799,8 @@ transcript</i>.</li>
 table has <b>one row per firm</b> (or city office, or a party without an attorney): every attorney of the firm
 on the title page is named in its row ("Alex B. Counsel, Dana Smith"), with the firm's address, so a firm is one
 party, with one minute agreement and one invoice. An e-mail from one of its attorneys, or the same firm on
-another day's transcript, joins its row.</li>
+another day's transcript, joins its row. Two rows that only may be one firm ("Smith Law" and "Smith Law Group")
+are asked about: <b>Same firm</b> or <b>Not the same</b>, and the answer is kept.</li>
 <li><b>Pick the rate sheet and the speeds</b> under Order. Its two parts say what is whose: the
 <i>invoice</i> offers every speed ticked, each at its own price; the <i>minute agreement form</i> names one
 speed at one rate per page. Settings → Invoice picks that speed (Expedited, else the slowest offered); choose

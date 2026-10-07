@@ -95,6 +95,7 @@ def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> i
     job had a problem, or 2 for an unknown output (main also returns 2 when OUTDIR or the files are missing)."""
     import json
     from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
+    from minute_filler.extract_regex import use_firm_answers
     from minute_filler.settings import OUTPUTS, Settings
 
     unknown = [o for o in outputs or [] if o not in OUTPUTS]
@@ -105,6 +106,7 @@ def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> i
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     s = Settings.load()
+    use_firm_answers(s.firm_answers)  # (rows the user said are one firm, or not, are read so)
     s.output_dir = str(out)
     s.output_dirs = {k: v for k, v in s.output_dirs.items() if k == "runsheet"}  # everything else into OUTDIR
     docs, errors = read_docs(expand_paths(paths), s)

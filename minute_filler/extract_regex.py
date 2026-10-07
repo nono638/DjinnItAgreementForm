@@ -1032,27 +1032,72 @@ def _name_words(n: str) -> list[str]:
     return [w for w in re.sub(r"[^a-z ]", " ", (n or "").lower()).split() if len(w) > 1 and w not in _HONORIFICS]
 
 
-def same_person(a: str, b: str) -> bool:
+def same_person(a: str, b: str, loose: bool = True) -> bool:
     """Two spellings of one attorney's name: the same first and last name ('John Q. Smith', 'JOHN SMITH'), or
-    the same last name when one gives only that ('Mr. Smith')."""
+    (loose) the same last name when one gives only that ('Mr. Smith': in one firm's row, the same attorney;
+    between two entries only maybe, see maybe_same_entry)."""
     wa, wb = _name_words(a), _name_words(b)
     if not wa or not wb:
         return False
     if len(wa) >= 2 and len(wb) >= 2:
         return (wa[0], wa[-1]) == (wb[0], wb[-1])
-    return wa[-1] == wb[-1]
+    return loose and wa[-1] == wb[-1]
 
 
 def same_firm(a: str, b: str) -> bool:
-    """Two spellings of one firm (firm_key): 'Example Law Group, P.C.' and 'EXAMPLE LAW GROUP', or one name
-    starting with the other ('Smith Law' and 'Smith Law Firm, PLLC')."""
+    """Two spellings of one firm (firm_key): 'Example Law Group, P.C.', 'EXAMPLE LAW GROUP' and 'Example Law
+    Group P.C.'. A name that only starts with the other ('Smith Law' and 'Smith Law Group') may be another
+    firm: near_firm, and the user is asked (maybe_same_entry)."""
     ka, kb = firm_key(a), firm_key(b)
-    if not ka or not kb:
+    return bool(ka) and ka == kb
+
+
+def near_firm(a: str, b: str) -> bool:
+    """One firm's name starts with the other's, two words at least ('Smith Law' and 'Smith Law Group, PLLC'):
+    maybe the same firm, maybe not (see maybe_same_entry)."""
+    ka, kb = firm_key(a).split(), firm_key(b).split()
+    if not ka or not kb or ka == kb:
         return False
-    if ka == kb:
-        return True
-    short, long_ = sorted((ka.split(), kb.split()), key=len)
+    short, long_ = sorted((ka, kb), key=len)
     return len(short) >= 2 and long_[:len(short)] == short
+
+
+# The user's answers about two entries that may be one firm or attorney (maybe_same_entry: asked when unsure):
+# {frozenset of their two Attorney.key()s: True (the same) or False (not)}. Set from Settings.firm_answers by
+# use_firm_answers when the settings are loaded or changed.
+_ANSWERS: dict[frozenset, bool] = {}
+
+
+def use_firm_answers(rows) -> None:
+    """Takes the user's answers (Settings.firm_answers: [[key, key, same], ...]) for same_entry and
+    maybe_same_entry; anything else in the list is left out. A new dict is put in place in one step: Generate all
+    reads the answers on another thread, which must never see them half filled."""
+    global _ANSWERS
+    answers: dict[frozenset, bool] = {}
+    for r in rows or []:
+        if isinstance(r, (list, tuple)) and len(r) == 3 and all(isinstance(k, str) and k for k in r[:2]) \
+                and isinstance(r[2], bool) and r[0] != r[1]:
+            answers[frozenset(r[:2])] = r[2]
+    _ANSWERS = answers
+
+
+def firm_answer(a: Attorney, b: Attorney) -> bool | None:
+    """What the user answered about a and b being one firm or attorney; None when not asked."""
+    ka, kb = a.key(), b.key()
+    return _ANSWERS.get(frozenset((ka, kb))) if ka and kb and ka != kb else None
+
+
+def maybe_same_entry(a: Attorney, b: Attorney) -> bool:
+    """a and b may be one firm or attorney, but it isn't sure, so the user is asked (batch.firm_questions): two
+    firms one of whose names starts with the other's ('Smith Law' and 'Smith Law Group'), or an entry naming an
+    attorney by the last name alone ('Mr. Smith') and one with an attorney of that last name ('Dana Smith' of
+    Smith Law). False when they are surely one (same_entry), surely not (two firms named otherwise), or the
+    user has answered."""
+    if a.key() == b.key() or firm_answer(a, b) is not None or same_entry(a, b):
+        return False
+    if a.firm and b.firm:
+        return near_firm(a.firm, b.firm)
+    return any(same_person(x, y) for x in a.names() for y in b.names())
 
 
 def _domain(email: str) -> str:
@@ -1075,12 +1120,17 @@ def _domain_spells_firm(email: str, firm: str) -> bool:
 
 
 def same_entry(a: Attorney, b: Attorney) -> bool:
-    """a and b are the same firm or person (see dedupe_attorneys)."""
+    """a and b are surely the same firm or person (see dedupe_attorneys), or the user said so (firm_answer).
+    Only maybe the same ('Smith Law' and 'Smith Law Group', 'Mr. Smith' and 'Dana Smith'): see
+    maybe_same_entry."""
+    answer = firm_answer(a, b)
+    if answer is not None:
+        return answer
     if a.email and b.email and a.email.lower() == b.email.lower():
         return True
     if a.firm and b.firm:
         return same_firm(a.firm, b.firm)
-    shared_name = any(same_person(x, y) for x in a.names() for y in b.names())
+    shared_name = any(same_person(x, y, loose=False) for x in a.names() for y in b.names())
     if a.firm or b.firm:  # one has a firm: the other may be one of its attorneys
         f, other = (a, b) if a.firm else (b, a)
         return shared_name or bool(other.email and not _PUBLIC_MAIL.search(other.email) and (

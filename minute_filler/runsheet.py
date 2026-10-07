@@ -382,6 +382,20 @@ def add_takes(case: CaseInfo, opts: RunSheetOpts, s: Settings, folders: list[Pat
         return path
 
 
+def is_locked(path: Path | str) -> bool:
+    """The file is there and another program holds it so that it can't be written (a run sheet open in Excel):
+    asked before Generate makes anything, so that nothing is made while the takes can't be added."""
+    if not Path(path).is_file():  # (not there, or a folder: Windows refuses to open a folder with PermissionError)
+        return False
+    try:
+        with open(path, "r+b"):
+            return False
+    except PermissionError:
+        return True
+    except OSError:  # (gone meanwhile: nothing holds it)
+        return False
+
+
 def _save(wb, path: Path) -> None:
     """Saves in one step: a run sheet open in Excel stays as it was (PermissionError). Dropbox or OneDrive may
     hold the file for a moment while they sync it, so a locked file is tried again a few times first."""

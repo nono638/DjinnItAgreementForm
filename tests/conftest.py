@@ -33,6 +33,16 @@ def no_ollama(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_firm_answers():
+    """Each test starts with no answers about rows that may be one firm (extract_regex keeps the user's for the
+    whole app: a window, or a test, setting them must not reach the next test)."""
+    from minute_filler.extract_regex import use_firm_answers
+    use_firm_answers([])
+    yield
+    use_firm_answers([])
+
+
+@pytest.fixture(autouse=True)
 def no_internet(monkeypatch):
     """Tests never ask GitHub for the latest version (the window's daily look): there is no newer one."""
     from minute_filler import update
