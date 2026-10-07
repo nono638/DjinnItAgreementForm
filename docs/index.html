@@ -64,7 +64,7 @@
 </header>
 
 <div class="wrap">
-  <img class="shot" src="app.png" alt="The app with a case filled in from a pasted e-mail: the case details, the speeds offered under Order, and the Outputs box">
+  <img class="shot" src="app.png" alt="The app with a case filled in from a pasted e-mail: the case details, the invoice's speeds and the minute agreement's one speed under Order, and the Outputs box">
 </div>
 
 <section>
@@ -80,7 +80,7 @@
     <ol class="steps">
       <li><b>Drop it in</b>A PDF (transcript, invoice), a photo, or paste the e-mail text or a screenshot with Ctrl+V.</li>
       <li><b>Check the details</b>Every field shows where it came from. Guesses are highlighted, and a list offers other candidates.</li>
-      <li><b>Tick who ordered, and the speeds</b>Tick the attorneys who ordered (No. of copies follows). Under Order, tick the speeds you offer, once: the invoice lists them all, each at its own price, and the agreement form names one speed at one rate, Expedited when you offer it. An e-mail asking for another speed? You're asked which. <b>Who pays what</b>, under the attorneys, shows each firm's invoice in short as you tick. Rates and the estimated delivery date follow your rate sheet.</li>
+      <li><b>Tick who ordered, and the speeds</b>Tick the firms who ordered: a firm is one row, naming all its attorneys on the title page, and gets one invoice and one agreement (No. of copies follows). Under Order, tick the speeds you offer, once: the invoice lists them all, each at its own price, and the agreement form names one speed at one rate, Expedited when you offer it, unless you pick another. An e-mail asking for another speed? It's pointed out, and Generate asks you which. <b>Who pays what</b>, under the attorneys, shows each firm's invoice in short as you tick. Rates and the estimated delivery date follow your rate sheet.</li>
       <li><b>Generate</b>Tick what to make in the Outputs box: minute agreement, invoice, MOFR, run sheet, each with its own options. You see every file, and the math, before anything is saved; then the PDFs are saved, one per attorney you tick, and the run sheet gets the day's takes. Ctrl+Enter does it from the keyboard.</li>
     </ol>
   </div>
@@ -90,7 +90,7 @@
   <div class="wrap two">
     <div>
       <h2>A hundred orders? Drop the whole folder.</h2>
-      <p>Batch mode reads any number of documents and sorts them into one job per case and date. A transcript and its invoice make one form, not two. Two days of the same case make two forms (or one, if you prefer), but each attorney gets <b>one invoice</b> for all the days they ordered. Tick the jobs you want and press <b>Generate all</b>: the preview shows every file and the math first, and nothing is saved until you say so. A ⚠ next to a job means something to check; hover over it to see what.</p>
+      <p>Batch mode reads any number of documents and sorts them into one job per case and date. A transcript and its invoice make one form, not two. Two days of the same case make two jobs, but <b>Generate all</b> gives each firm <b>one invoice</b> and one minute agreement for all the days it ordered, and the trial one MOFR (Settings &rarr; Options switches back to forms for each day). Tick the jobs you want and press <b>Generate all</b>: the preview shows every file and the math first, and nothing is saved until you say so. A ⚠ next to a job means something to check; hover over it to see what.</p>
     </div>
     <img class="shot" src="batch.png" alt="Batch mode: five jobs on the left, a trial day two reporters wrote, its speeds offered and page count, and the Outputs box with Run sheet ticked">
   </div>
@@ -121,9 +121,9 @@
   <div class="wrap two">
     <div>
       <h2>Excerpts: the whole case on one table</h2>
-      <p>One firm ordered the whole trial, another part of day 1, a third part of that and a stretch of day 2? <b>Excerpts…</b> (next to Parties) lists every day of the case on that invoice in one table. Each row is a run of pages, typed in the transcript's own page numbers (141-170), and the rows around it make room. Tick the firms that ordered each run. <b>Split run</b> cuts a run in two, and <b>Remove run</b> (or the Delete key) gives its pages back to the run above, so every page is still ordered once; <b>Remove this day's excerpts</b> and <b>Remove all excerpts</b> go back to whole days. As you type, it shows what each run costs each firm at every speed you offer (<b>Prices for:</b> hides a speed), what each group of firms ordering together pays, and each firm's invoice. Pages ordered together share the original and the index, and every firm pays for its own copy. A run nobody ticks is billed to nobody. The window stays open beside the app and follows what you change there. Sample shown uses made-up names.</p>
+      <p>One firm ordered the whole trial, another part of day 1, a third part of that and a stretch of day 2? <b>Excerpts…</b> (next to Parties) lists every day of the case on that invoice in one table. Each row is a run of pages, typed in the transcript's own page numbers (141-170), and the rows around it make room. Tick the firms that ordered each run. <b>Split run</b> cuts a run in two, and <b>Remove run</b> (or the Delete key, or a right-click) gives its pages to the run next to it; <b>Remove this day's excerpts</b> and <b>Remove all excerpts</b> go back to whole days. Each run shows its date and weekday, and each set of firms ordering together has its own colour. As you type, it shows what each run costs each firm at every speed you offer (<b>Prices for:</b> hides a speed), what each group of firms ordering together pays, and each firm's invoice. Pages ordered together share the original and the index, and every firm pays for its own copy. A run nobody ticks is billed to nobody. The window stays open beside the app and follows what you change there. Sample shown uses made-up names.</p>
     </div>
-    <img class="shot" src="excerpts.png" alt="The Excerpts table: two days of a case, a row per run of pages, a box per firm, and what each firm pays at Regular and Expedite">
+    <img class="shot" src="excerpts.png" alt="The Excerpts table: two days of a case with their dates and weekdays, a row per run of pages coloured by the firms ordering it, a box per firm, what each firm pays at Regular and Expedite, and the Remove buttons">
   </div>
 </section>
 
@@ -142,7 +142,7 @@
     <img class="shot" src="preview.png" alt="The preview: tabs coloured by kind of file (the math, two minute agreements, two invoices), the first agreement shown before it is saved, with Go back and Save">
     <div>
       <h2>See it before it's saved</h2>
-      <p>Click <b>Generate</b>, or <b>Generate all</b> for a whole batch, and the app first shows you each form and invoice as it will be saved, a tab for each file, the invoice with the number it will get. Each kind of file has its own tab colour, and the first tab, <b>The math</b>, shows how every amount is reached. <b>Side by side</b> shows every file at once; <b>Ctrl +</b> and <b>Ctrl &minus;</b> (or Ctrl and the mouse wheel) zoom. <b>Save</b> saves them. <b>Go back</b> saves nothing and takes no invoice number, so you can fix a field and try again. The run sheet, a spreadsheet, is saved with the rest but not shown. Rather skip it? <b>Don't show previews anymore</b> turns it off, and Settings turns it back on. Once the files are saved, <b>Print…</b> sends them to your printer. Sample shown uses made-up names.</p>
+      <p>Click <b>Generate</b>, or <b>Generate all</b> for a whole batch, and the app first shows you each form and invoice as it will be saved, a tab for each file, the invoice with the number it will get. Each kind of file has its own tab colour, and the first tab, <b>The math</b>, shows how every amount is reached. <b>Side by side</b> shows every file at once; <b>Ctrl +</b> and <b>Ctrl &minus;</b> (or Ctrl and the mouse wheel) zoom. Many files? Arrows at the end of the tabs, a <b>Files ▾</b> menu and <b>Ctrl+Tab</b> take you to any of them. <b>Save</b> saves them. <b>Go back</b> saves nothing and takes no invoice number, so you can fix a field and try again. The run sheet, a spreadsheet, is saved with the rest but not shown. Rather skip it? <b>Don't show previews anymore</b> turns it off, and Settings turns it back on. Once the files are saved, <b>Print…</b> sends them to your printer. Sample shown uses made-up names.</p>
     </div>
   </div>
 </section>
