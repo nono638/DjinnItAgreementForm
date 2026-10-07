@@ -417,13 +417,16 @@ class Settings:
     output_dirs: dict = field(default_factory=dict)  # a folder for one output (key of OUTPUTS); none = as above
     filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
     batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
+    # Generate all: the days of a case that share an invoice (invoice_joint) get one minute agreement per attorney
+    # (the days and pages it ordered) and one MOFR for all of them, instead of a set per day (batch.form_groups)
+    forms_per_case: bool = True
     outputs: list = field(default_factory=lambda: ["agreement"])  # ticked by default: keys of OUTPUTS
 
     # MOFR (Minute Order Form/Receipt)
     mofr_division: str = "civil"      # "civil" or "criminal" box
     mofr_filename_pattern: str = MOFR_FILENAME_PATTERN
 
-    # Invoices (made from transcripts only: they need the page count)
+    # Invoices (they need pages to bill: a transcript's, or a number typed in Est. number of pages)
     # the speeds ticked under "Speeds offered" in the Order card: the invoice lists them so the attorney can choose
     # (one alone: a single-speed invoice), and the agreement form names one of them (agreement_speed)
     invoice_speeds: list = field(default_factory=lambda: ["Regular", "Expedited"])

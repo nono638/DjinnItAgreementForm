@@ -1,8 +1,9 @@
 """The app's dialogs: Settings (with its invoice text editor), the "please clarify" questions before filling, the
-run sheet choice, a job's invoice Extras, granular detail and whose pages of a transcript of several reporters to
-bill, another reporter's invoice details (ReporterDialog), the Ollama setup help (with a model download), About
-and the How to use guide (GUIDE). The preview before saving and the first-run welcome are in preview.py; the
-Excerpts window (who ordered which pages) is gui/excerpts.py."""
+speed the agreement form names when an e-mail asks for another (SpeedDialog), the run sheet choice, a job's
+invoice Extras, granular detail and whose pages of a transcript of several reporters to bill, another reporter's
+invoice details (ReporterDialog), the Ollama setup help (with a model download), About and the How to use guide
+(GUIDE). The preview before saving and the first-run welcome are in preview.py; the Excerpts window (who ordered
+which pages) is gui/excerpts.py."""
 from __future__ import annotations
 
 import re
@@ -196,6 +197,15 @@ class SettingsDialog(QDialog):
         self.o_combine.setToolTip("Off: documents about the same case make one form per day of proceedings.")
         self.o_combine.setChecked(settings.batch_combine_dates)
         f.addRow("", self.o_combine)
+        self.o_per_case = QCheckBox("Minute agreements and MOFRs: one for the whole case (every day on its invoice)")
+        self.o_per_case.setToolTip(
+            "Generate all, when the days of a case share an invoice (Settings → Invoice → Days of one case):\n"
+            "one minute agreement per attorney, listing the days it ordered and every page it ordered on them,\n"
+            "whoever wrote them (its invoice bills only your pages of them), and one MOFR for all the days.\n"
+            "Off: an agreement per attorney and a MOFR for each day, as before.\n"
+            "\"Generate this job\" always makes the forms of the day shown alone.")
+        self.o_per_case.setChecked(settings.forms_per_case)
+        f.addRow("", self.o_per_case)
         self._folders(f, settings)
         self.o_pattern = QLineEdit(settings.filename_pattern)
         self.o_pattern.setToolTip("Placeholders:\n{case}  {index}  {attorney}\n"
@@ -251,7 +261,9 @@ class SettingsDialog(QDialog):
         # --- Invoice
         w = QWidget()
         f = _form(w)
-        intro = QLabel("Invoices are made from transcripts (they need the page count), priced from the rate sheet.")
+        intro = QLabel("Invoices bill a transcript's pages (or the pages typed in Est. number of pages), priced from "
+                       "the rate sheet. The invoice offers several speeds, each at its own price; the minute "
+                       "agreement form names one speed at one rate per page.")
         intro.setObjectName("muted")
         intro.setWordWrap(True)
         f.addRow(intro)
@@ -344,7 +356,9 @@ class SettingsDialog(QDialog):
         self.i_joint.addItem("An invoice for each day", False)
         self.i_joint.setCurrentIndex(0 if settings.invoice_joint else 1)
         self.i_joint.setToolTip("When several days of one case are generated together (Generate all).\n"
-                                "A single day selected and generated on its own is always billed alone.")
+                                "A single day selected and generated on its own is always billed alone.\n"
+                                "With a joint invoice, the minute agreements and the MOFR are made once for the\n"
+                                "whole case too, unless Settings → Options says otherwise.")
         f.addRow("Days of one case", self.i_joint)
         self.i_turn: dict[str, QLineEdit] = {}
         for name in SPEEDS:
@@ -539,15 +553,23 @@ class SettingsDialog(QDialog):
         refill_combo(self.d_sheet, [(s.name, s.name) for s in sheets or [current]], current.name)
 
     def _show_agreement_speed(self, _=None):
-        """The line under Agreement form speed: which speed the form gets with the speeds ticked now."""
+        """The line under Agreement form speed: which speed the form gets with the speeds ticked now (those a
+        rate sheet names otherwise, ticked in the Order card, have no box here but count too: Save keeps them)."""
         from copy import copy
+        from ..rates import speed_key
         trial = copy(self.s)
-        trial.invoice_speeds = [k for k, cb in self.i_speeds.items() if cb.isChecked()]
+        keep = [x for x in self.s.invoice_speeds if speed_key(x) not in {speed_key(n) for n in SPEEDS}]
+        trial.invoice_speeds = keep + [k for k, cb in self.i_speeds.items() if cb.isChecked()]
         trial.agreement_speed_first = self.i_first.currentData() or ""
         trial.agreement_speed_fallback = self.i_fallback.currentData() or "slowest"
         ticked = " + ".join(trial.invoice_speeds) or "no speed"
-        self.i_agreement_note.setText(f"With {ticked} ticked, the agreement form says {trial.agreement_speed()}. "
-                                      "A job's own choice (Order card) comes first.")
+        pick = trial.agreement_speed()
+        why = "" if speed_key(pick) == speed_key(trial.agreement_speed_first) else (
+            " (the fastest offered)" if trial.agreement_speed_fallback == "fastest" else
+            " (the slowest offered: the most turnaround days)")
+        self.i_agreement_note.setText(
+            f"With {ticked} ticked, every agreement form says {pick}{why}. A speed you choose for one job in the "
+            "Order card comes first; when an e-mail asks for another speed, you are asked which.")
 
     def _pick_sheet_dir(self):
         """Lets the user choose another rate sheets folder and reloads the sheet list from it."""
@@ -771,6 +793,7 @@ class SettingsDialog(QDialog):
         s.form_choice = self.o_form.currentData()
         s.include_instructions = self.o_instr.isChecked()
         s.batch_combine_dates = self.o_combine.isChecked()
+        s.forms_per_case = self.o_per_case.isChecked()
         s.output_dir, s.filename_pattern = self.o_dir.text().strip(), self.o_pattern.text().strip() or s.filename_pattern
         s.theme = self.o_theme.currentText()
         s.zoom = self.o_zoom.value() / 100
@@ -929,12 +952,14 @@ class InvoiceTextEditor(QWidget):
         self.text.setFocus()
 
     def _remove(self) -> None:
+        """Remove: the row selected goes (no asking: Cancel in Settings still brings it back)."""
         i = self.table.currentRow()
         if 0 <= i < len(self._rows):
             del self._rows[i]
             self._refresh(i)
 
     def _move(self, step: int) -> None:
+        """Up (step -1) and Down (1): the row selected swaps places with its neighbour, and stays selected."""
         i, j = self.table.currentRow(), self.table.currentRow() + step
         if 0 <= i < len(self._rows) and 0 <= j < len(self._rows):
             self._rows[i], self._rows[j] = self._rows[j], self._rows[i]
@@ -981,7 +1006,8 @@ class ClarifyDialog(QDialog):
 
         self.att_list = None
         if attorneys:
-            lbl = QLabel("Which attorney(s) ordered these minutes?  One form is made for each one checked.")
+            lbl = QLabel("Which attorney(s) ordered these minutes?  One form is made for each one checked "
+                         "(a firm is one, however many of its attorneys it names).")
             lbl.setWordWrap(True)
             lbl.setObjectName("section")
             lay.addWidget(lbl)
@@ -1013,6 +1039,46 @@ class ClarifyDialog(QDialog):
             return None
         return [self.att_list.item(i).data(Qt.UserRole) for i in range(self.att_list.count())
                 if self.att_list.item(i).checkState() == Qt.Checked]
+
+
+class SpeedDialog(QDialog):
+    """Asks which speed the minute agreement form names, for jobs whose e-mail (or letter, or pasted text) asks
+    for another speed than the form names now (batch.Job.speed_question): a row per job, 'Jane Roe v. Sam Poe,
+    9/28/2026: the e-mail mentions "daily copy"', and a box of the speeds offered. MainWindow._ask_speeds keeps
+    each answer as the user's choice for the job."""
+
+    def __init__(self, rows: list[tuple[str, list[tuple[str, str]], str]], parent=None):
+        """rows: (the question, the speeds offered as (label, name), the speed preselected) for each job."""
+        super().__init__(parent)
+        self.setWindowTitle("Which speed?")
+        self.setMinimumWidth(z(560))
+        lay = QVBoxLayout(self)
+        intro = QLabel("The minute agreement form names one speed. Please choose a speed for "
+                       + ("this job:" if len(rows) == 1 else "each of these jobs:"))
+        intro.setWordWrap(True)
+        intro.setObjectName("subtitle")
+        lay.addWidget(intro)
+        self.combos: list[QComboBox] = []
+        for question, speeds, chosen in rows:
+            lab = QLabel(question)
+            lab.setWordWrap(True)
+            lay.addWidget(lab)
+            cb = QComboBox()
+            for label, name in speeds:
+                cb.addItem(label, name)
+            cb.setCurrentIndex(max(0, cb.findData(chosen)))
+            self.combos.append(cb)
+            lay.addWidget(cb)
+        buttons = QDialogButtonBox()
+        buttons.addButton("Use these speeds" if len(rows) > 1 else "Use this speed", QDialogButtonBox.AcceptRole)
+        buttons.addButton("Go back", QDialogButtonBox.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def chosen(self) -> list[str]:
+        """The speed chosen for each row, in order."""
+        return [cb.currentData() or "" for cb in self.combos]
 
 
 DEFAULTS_TIP = "Your defaults for every invoice are in Settings → Invoice."
@@ -1689,12 +1755,19 @@ put together, one job per day.</li>
 options.</p>
 <ul>
 <li><b>Minute agreement</b>: the UCS Court Reporter Minute Agreement Form, one PDF for each ticked
-attorney.</li>
+attorney, with <b>the pages that attorney ordered</b>, whoever wrote them: firm A ordering a day of 150 pages
+and firm B an excerpt of 80 of them get agreements for 150 and 80 pages. (Your invoice bills only your own pages
+of them.) The days of a case made together with <b>Generate all</b> on one invoice get <b>one agreement per
+attorney for the whole case</b>: it lists only the days that attorney ordered, with all the pages it ordered on
+them (Settings → Options can go back to one per day).</li>
 <li><b>Invoice</b>: priced from your rate sheet and the transcript's pages, one for each ticked attorney.
-It needs a transcript. Several days of one case made together with <b>Generate all</b> get one joint invoice
-per attorney (unless Settings → Invoice says an invoice for each day), and an attorney who ordered an excerpt
-pays only for those pages (<b>Who ordered what</b> shows who pays for what).</li>
-<li><b>MOFR</b>: the Minute Order Form/Receipt, the reporter's parts filled in.</li>
+No transcript (only a caption or title page, or an e-mail)? Type the pages in <i>Est. number of pages</i> and
+the invoice bills them (a number read from an e-mail isn't billed until you type it). Several days of one case
+made together with <b>Generate all</b> get one joint invoice per attorney (unless Settings → Invoice says an
+invoice for each day), and an attorney who ordered an excerpt pays only for those pages (<b>Who pays what</b>
+and <b>Who ordered what</b> show who pays for what).</li>
+<li><b>MOFR</b>: the Minute Order Form/Receipt, the reporter's parts filled in, with the pages anyone ordered:
+one for the whole case when its days share an invoice (Generate all), listing every day.</li>
 <li><b>Run sheet</b>: an Excel sheet of a shared trial's takes (who wrote which pages), read from the
 initials at the foot of the pages. It is ticked by itself when two or more reporters wrote a case's transcripts
 (the initials, or the names on the title page), and unticked when one did; click it to choose yourself.</li>
@@ -1713,10 +1786,28 @@ value in a PDF viewer. Every file made is listed in
 <li><b>Add the order:</b> drop the documents on the drop zone (or click <b>Browse...</b>, or Ctrl+O).</li>
 <li><b>Check the fields.</b> Amber fields are guesses; a ▾ button lists the other candidates. The badge
 on each field says where its value came from (found in the document, counted from the transcript PDF, AI,
-your defaults, calculated or typed by you). <i>No. of copies</i> follows the firms ticked.</li>
-<li><b>Tick the attorneys who ordered.</b> A transcript lists everyone who appeared, not who ordered.</li>
-<li><b>Pick the rate sheet and the speeds</b> under Order: the invoice offers every speed ticked, and the
-agreement form names one of them (Settings → Invoice says which; change it for one job under Order).</li>
+your defaults, calculated or typed by you). <i>No. of copies</i> is the number of ordering parties (the
+firms ticked, or the invoice's <i>Parties</i> number when you set it).
+<i>Est. number of pages</i> is counted from the transcript PDF when there is one: every page, whoever wrote
+it. Each attorney's agreement shows the pages that attorney ordered, and on a transcript of several reporters
+your invoice bills only your own pages (the Invoice panel's <i>Billed</i> line says how many). A number you
+type in either stays; a typed page count is what your invoice bills, and the day's pages on every agreement
+(an excerpt counts its pages of it). Typing the transcript's own count (or your own pages of it) is no number of
+yours: to bill every page of a transcript of several reporters, choose <i>Whose pages…</i> → <i>The whole
+transcript</i>.</li>
+<li><b>Tick the attorneys who ordered.</b> A transcript lists everyone who appeared, not who ordered. The
+table has <b>one row per firm</b> (or city office, or a party without an attorney): every attorney of the firm
+on the title page is named in its row ("Alex B. Counsel, Dana Smith"), with the firm's address, so a firm is one
+party, with one minute agreement and one invoice. An e-mail from one of its attorneys, or the same firm on
+another day's transcript, joins its row.</li>
+<li><b>Pick the rate sheet and the speeds</b> under Order. Its two parts say what is whose: the
+<i>invoice</i> offers every speed ticked, each at its own price; the <i>minute agreement form</i> names one
+speed at one rate per page. Settings → Invoice picks that speed (Expedited, else the slowest offered); choose
+another for one job under Order (↺ goes back). When an e-mail asks for another speed ("please send a daily
+copy"), the Order card asks which, and so does Generate.</li>
+<li><b>Check Who pays what</b> (under the attorneys): each firm's invoice in short, its pages, how it ordered
+them (alone, or shared with other firms) and what it pays at each speed. It follows every tick at once; its
+link spells out the whole math.</li>
 <li><b>Tick the outputs</b> and click <b>Generate</b> (Ctrl+Enter), or <b>Generate all</b>
 (Ctrl+Shift+Enter) for every ticked job in the list on the left.</li>
 <li><b>Look at the preview</b> and click <b>Save</b>, or <b>Go back</b> to change something: nothing is saved
@@ -1736,10 +1827,16 @@ what. Right-click a document to move it to a job of its own.</li>
 <li>When one firm ordered the whole trial and others only some pages, open <b>Excerpts…</b> (Invoice panel):
 a table of every day of the case on that invoice, a row per run of pages typed in the transcript's own numbers (141-170) and a
 box per firm. It shows what each run costs, the pages by the firms ordering together and each firm's invoice,
-as you change it, and stays open beside the window. Check the <b>Who ordered what</b> card before
-generating.</li>
-<li>The preview's tabs have a colour for each kind of file; <b>Side by side</b> shows everything at once, and
-Ctrl + / Ctrl - zoom it.</li>
+as you change it, and stays open beside the window. <b>Remove run</b> (or the Delete key, or a right-click)
+gives a run's pages to the run next to it, so every page stays in a run; <b>Remove this day's
+excerpts</b> and <b>Remove all excerpts</b> go back to whole days. Check the <b>Who ordered what</b> card
+before generating.</li>
+<li>The preview's tabs have a colour for each kind of file; with many files, the arrows at the end of the tabs
+scroll them, <b>Files ▾</b> lists every file, and Ctrl+Tab / Ctrl+Shift+Tab go to the next one and back.
+<b>Side by side</b> shows everything at once (scroll across with the bar at the bottom, or Shift and the mouse
+wheel), and Ctrl + / Ctrl - zoom it.</li>
+<li>The <b>Who ordered what</b> card shows, for each day and attorney, the pages it ordered and who
+<i>Also ordered</i> them (those share the original and the index).</li>
 <li>Your own invoice text (shown always, or only when it applies) is in Settings → Invoice → <i>Invoice
 text</i>; <b>Preview…</b> shows a made-up invoice with it.</li>
 <li><b>The math</b> shows how each amount is reached, stretch by stretch of pages and firm by firm: in the
@@ -1773,6 +1870,7 @@ and <b>File → Import settings</b> reads it there.</li>
 <tr><td><b>Ctrl+R</b></td><td>Records</td></tr>
 <tr><td><b>Ctrl+Z</b></td><td>In Records: undo the last change</td></tr>
 <tr><td><b>Ctrl + / Ctrl − / Ctrl 0</b></td><td>Zoom in, out, back to 100%</td></tr>
+<tr><td><b>Ctrl+Tab / Ctrl+Shift+Tab</b></td><td>In the preview: the next file, the one before</td></tr>
 </table>
 
 <h3>More help</h3>

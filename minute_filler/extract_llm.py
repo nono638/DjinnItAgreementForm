@@ -11,10 +11,11 @@ from __future__ import annotations
 import json
 import re
 
-from .extract_regex import (COURTS, DELIVERY_WORDS, PHONE_RE, PLACEHOLDER_RE, RegexExtractor, find_dates, fmt_phone,
-                            mentions_reporter, norm_index, normalize_caption, smart_title, tidy_name, title_pages)
+from .extract_regex import (COURTS, DELIVERY_WORDS, PHONE_RE, PLACEHOLDER_RE, RegexExtractor, dedupe_attorneys,
+                            find_dates, fmt_phone, mentions_reporter, norm_index, normalize_caption, smart_title,
+                            tidy_name, title_pages)
 from .ingest import Ingested
-from .models import Attorney, Extraction, PROC_TYPES, SRC_AI
+from .models import Attorney, Extraction, PROC_TYPES, SRC_AI, join_names, split_names
 from .settings import Settings
 
 MAX_CHARS = 6000  # the input text is cut here, to keep the question short for a small local model
@@ -61,7 +62,9 @@ Rules:
 - The court reporter {reporter} is NOT an attorney; do not list them.
 - proceeding_dates are the dates of the court proceedings (not the date an e-mail was sent), formatted M/D/YYYY.
   Today is {today}; resolve relative dates like "last Tuesday" against it.
-- Attorneys: people or law firms representing parties. Mark is_requester true for whoever is ordering the minutes.
+- Attorneys: law firms, government offices or people representing parties: ONE entry per firm or office, with
+  all of its attorneys in "name", separated by commas ("Jane Doe, John Roe"), and its street address in
+  "address". Mark is_requester true for whoever is ordering the minutes.
 - Skip entries like "Unrepresented" or "No one appeared".
 
 Answer with ONLY a JSON object shaped exactly like this template:
@@ -252,8 +255,9 @@ class OllamaExtractor:
                 ex.add_proc(t, 0.55)
         # Only trust delivery/copies when the text actually talks about them.
         dv = d.get("delivery")
-        if isinstance(dv, str) and dv in DELIVERY_WORDS and re.search(DELIVERY_WORDS[dv], src_lower):
-            ex.add("delivery", dv, SRC_AI, 0.45)
+        said = re.search(DELIVERY_WORDS[dv], src_lower) if isinstance(dv, str) and dv in DELIVERY_WORDS else None
+        if said:  # (the words go with it: the window quotes them when it asks which speed the job is)
+            ex.add("delivery", dv, SRC_AI, 0.45, note=said.group(0))
         if tidy(d.get("copies")).isdigit() and "cop" in src_lower:
             ex.add("copies", tidy(d["copies"]), SRC_AI, 0.45)
 
@@ -280,8 +284,11 @@ class OllamaExtractor:
             m = re.match(r"^(.*),\s*([^,]+,\s*(?:[A-Z]{2}|New York|New Jersey)\.?\s+\d{5}.*)$", addr)
             if m:  # "123 Main St, Suite 4, New York, NY 10001" -> street / city line
                 addr = f"{m.group(1)}\n{m.group(2)}"
+            # the names written as the rules write them: 'Dana Smith, Esq. and Sam Poe' -> 'Dana Smith, Sam Poe'
             ex.attorneys.append(Attorney(
-                name=re.sub(r",?\s*Esq\.?$", "", name), firm=firm, address=addr, phone=phone,
+                name=join_names(split_names(name)), firm=firm, address=addr, phone=phone,
                 email=mail, party=tidy(a.get("party")),
                 source=SRC_AI, checked=bool(a.get("is_requester"))))
+        # one entry per firm, as the rules give them (a model may list a firm's attorneys one by one)
+        ex.attorneys = dedupe_attorneys(ex.attorneys, self.s.profile)
         return ex

@@ -34,6 +34,7 @@ are kept, and the last FORCED_KEPT made by hand or before a restore) and can be 
 from __future__ import annotations
 
 import csv
+import os
 import html
 import json
 import random
@@ -426,7 +427,11 @@ class Ledger:
                         (inv.invoice_no, year, values["seq"], inv.reporter))])
 
     def mark_paid(self, invoice_no: str, speed: str, amount, paid_date: str | None = None) -> None:
-        """Paid at this speed. amount: '$63.00' or 63; paid_date: ISO ('2026-09-30'), today when not given."""
+        """Paid at this speed. amount: '$63.00' or 63; paid_date: ISO ('2026-09-30'), today when not given.
+        ValueError when the amount is blank or not an amount (see rates.parse_amount; nothing is changed then),
+        as set_amounts: a blank one would be recorded as $0.00 paid."""
+        if parse_amount(str(amount)) is None:
+            raise ValueError(f"the amount paid is not an amount: {amount!r}")
         self._set_status(invoice_no, "paid", speed, str(money(amount)), paid_date or date.today().isoformat())
 
     def mark_unpaid(self, invoice_no: str) -> None:
@@ -672,7 +677,8 @@ class Ledger:
 
     # ------------------------------------------------------------------ exports
     def mirror(self) -> None:
-        """Keeps the CSV copies in the records folder current; a file open in Excel is skipped (and logged)."""
+        """Keeps the CSV copies in the records folder current; a file open in Excel is skipped (and logged),
+        the other is still written."""
         if self.mirror_dir is None:
             return
         try:
@@ -682,18 +688,31 @@ class Ledger:
             log_error("could not update the CSV copies of the records", e)
 
     def export_csv(self, folder: Path) -> list[Path]:
-        """Writes invoices.csv and activity.csv (every row not in the trash) into folder; returns their paths."""
+        """Writes invoices.csv and activity.csv (every row not in the trash) into folder; returns their paths.
+        Each is written to a temporary file first and then put in place, so a copy is never left half written;
+        one that can't be (open in Excel) doesn't stop the other, and the first such error is raised after."""
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
-        out = []
+        out, problem = [], None
         for name, cols, rows in (("invoices.csv", INVOICE_COLUMNS, [invoice_row(i) for i in self.invoices()]),
                                  ("activity.csv", ACTIVITY_COLUMNS, [activity_row(a) for a in self.activity()])):
             p = folder / name
-            with open(p, "w", newline="", encoding="utf-8-sig") as f:  # the BOM makes Excel read it as UTF-8
-                w = csv.writer(f)
-                w.writerow(cols)
-                w.writerows(rows)
-            out.append(p)
+            tmp = p.with_name(f".{name}.{os.getpid()}.tmp")
+            try:
+                with open(tmp, "w", newline="", encoding="utf-8-sig") as f:  # the BOM: Excel reads it as UTF-8
+                    w = csv.writer(f)
+                    w.writerow(cols)
+                    w.writerows(rows)
+                os.replace(tmp, p)
+                out.append(p)
+            except OSError as e:
+                problem = problem or e
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if problem is not None:
+            raise problem
         return out
 
     def export_xlsx(self, path: Path, invoices: list[Invoice] | None = None) -> Path:

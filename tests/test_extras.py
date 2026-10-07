@@ -909,7 +909,8 @@ def test_a_past_job_whose_documents_are_gone_still_comes_back(window, tmp_path, 
     assert job.case.get("agreement_date") != "1/2/2020" and job.case.get("judge") == ""
     assert job.case.proc_types == {"Trial"} and job.proc_touched
     assert [(a.name, a.checked) for a in job.case.attorneys] == [("Alex B. Counsel", True)]
-    assert job.parties == 2 and job.portions == [(5, ["alex b counsel"]), (12, ["alex b counsel"])]
+    # (the record's rows name Alex by the key of version 2.0: now the firm's, see batch.one_row_per_firm)
+    assert job.parties == 2 and job.portions == [(5, ["counsel and counsel"]), (12, ["counsel and counsel"])]
     assert job.invoice_index is None and job.page_basis == {"x.pdf": "*"}
     assert "no longer where it was" in window.statusBar().currentMessage()
     monkeypatch.setattr(qt.QMessageBox, "information", lambda *a, **k: None)

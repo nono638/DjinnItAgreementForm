@@ -4,10 +4,12 @@ PreviewDialog shows the files Generate is about to make as pictures of their pag
 user says so (MainWindow.fill makes them in a temporary folder first, with a records database of its own, so
 no invoice number is taken). With invoices among the files, its first tab is "The math" (math_view): how each
 amount is reached, shown before anything is saved. Each kind of file has a colour of its own (KIND_COLORS, told
-by file_kind from the mark in the PDF) on its tab (ColorTabBar); "Side by side" shows every file at once; the
-preview has its own zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl and the mouse wheel). Its "Don't show previews anymore"
-turns the preview off (Settings -> Options turns it back on). Generate all shows one too, for every file of the
-batch.
+by file_kind from the mark in the PDF) on its tab (ColorTabBar); with many files the tabs scroll (arrows at the
+end of the bar), "Files ▾" lists every file to go to it, and Ctrl+Tab / Ctrl+Shift+Tab (Ctrl+PgDn / Ctrl+PgUp)
+go to the next one and back; "Side by side" shows every file at once, scrolled across with the bar along the
+bottom, Shift and the wheel (or the wheel alone when there is nothing to scroll down); the preview has its own
+zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl and the mouse wheel). Its "Don't show previews anymore" turns the preview
+off (Settings -> Options turns it back on). Generate all shows one too, for every file of the batch.
 
 print_files sends PDFs to a printer through Qt's own print box: each page is drawn as a picture (300 dpi),
 so it prints the same whatever PDF program the computer has (Edge, the default one, can't be asked to print a
@@ -16,7 +18,8 @@ else made to fit. Other files (the Excel run sheet) are handed to their own prog
 
 MathDialog spells out the math of the invoices Generate just made, when previews are off (invoice_math.explain):
 a glance and OK. It can also copy the text or save it as a PDF, and its "Don't show this anymore" turns it off
-(Settings -> Options turns it back on).
+(Settings -> Options turns it back on). The main window's "Who pays what" opens it too (live=True), on the
+invoices as they would be made now, with no numbers yet.
 
 WelcomeDialog asks a new user the few things the forms can't do without.
 """
@@ -26,11 +29,11 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QAbstractScrollArea, QPushButton, QScrollArea, QStackedWidget, QTabBar, QTabWidget, QTextBrowser, QVBoxLayout,
-    QWidget,
+    QAbstractScrollArea, QMenu, QPushButton, QScrollArea, QStackedWidget, QTabBar, QTabWidget, QTextBrowser,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..log import error as log_error
@@ -127,10 +130,11 @@ class ColorTabBar(QTabBar):
 
 class PreviewDialog(QDialog):
     """The files about to be saved, a tab each, their pages as pictures; each kind of file (agreement, invoice,
-    MOFR, the math) has a colour of its own (KIND_COLORS). "Side by side" shows every file at once, next to each
-    other and smaller; Ctrl + / Ctrl - / Ctrl 0 (or Ctrl and the mouse wheel) zoom either view. accept() = save
-    them. Clicking "Don't show previews anymore" sets Settings.preview_before_saving off at once (and saves the
-    settings); the box stays open for the answer about these files."""
+    MOFR, the math) has a colour of its own (KIND_COLORS). "Files ▾" and Ctrl+Tab go from file to file (go_to).
+    "Side by side" shows every file at once, next to each other and smaller; Ctrl + / Ctrl - / Ctrl 0 (or Ctrl
+    and the mouse wheel) zoom either view. accept() = save them. Clicking "Don't show previews anymore" sets
+    Settings.preview_before_saving off at once (and saves the settings); the box stays open for the answer about
+    these files."""
 
     def __init__(self, files: list[Path], s: Settings, parent=None, note: str = "", math: list | None = None):
         """files: the files to show (only PDFs get pictures); note: a line under the heading (e.g. that the run
@@ -155,6 +159,16 @@ class PreviewDialog(QDialog):
         self.side.setAutoDefault(False)
         self.side.setToolTip("Every file at once, next to each other (smaller): Ctrl + and Ctrl - zoom")
         self.side.toggled.connect(self._side_by_side)
+        # every file in a list, to go to one (with many files the tabs don't all fit across)
+        self.files_btn = QToolButton()
+        self.files_btn.setText("Files ▾")
+        self.files_btn.setObjectName("quick")
+        self.files_btn.setPopupMode(QToolButton.InstantPopup)
+        self.files_btn.setToolTip("Go to a file (Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+PgDn and Ctrl+PgUp, go to "
+                                  "the next and the one before)")
+        self.files_menu = QMenu(self.files_btn)
+        self.files_btn.setMenu(self.files_menu)
+        top.addWidget(self.files_btn)
         top.addWidget(self.side)
         lay.addLayout(top)
         if note:
@@ -164,6 +178,11 @@ class PreviewDialog(QDialog):
             lay.addWidget(more)
         self.tabs = QTabWidget()
         self.tabs.setTabBar(ColorTabBar())
+        # with many files the tabs scroll, with arrows at the end of the bar (Windows' style would rather squeeze
+        # them, and with the style sheet they ran off the edge instead)
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(Qt.ElideNone)
+        self.tabs.tabBar().setExpanding(False)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.tabs)
         lay.addWidget(self.stack, 1)
@@ -172,6 +191,8 @@ class PreviewDialog(QDialog):
         # the pages' pictures, to draw again at each zoom: (label, image, width at zoom 1, side by side)
         self.pics: list[tuple[QLabel, QImage, int, bool]] = []
         self.texts: list[QTextBrowser] = []  # the math, zoomed with the pages
+        self.side_titles: list[QLabel] = []  # side by side: the heading of each column, in the tabs' order
+        self.side_scroll: QScrollArea | None = None
         # as big as a letter page at this zoom, but never more than the screen has room for; the pages are
         # drawn to fit its width, so only up and down is scrolled
         screen = self.screen() or (parent.screen() if parent is not None else None)
@@ -212,8 +233,9 @@ class PreviewDialog(QDialog):
             kind = file_kind(f)
             shown.append((name, kind, images, Path(f).name))
             short = name if len(name) <= 34 else name[:33].rstrip() + "…"
-            self._add_tab(scroll, short.replace("&", "&&"), kind, Path(f).name)  # (a lone & is a shortcut mark)
+            self._add_tab(scroll, short.replace("&", "&&"), kind, Path(f).name, name)  # (a lone & is a shortcut mark)
         self.stack.addWidget(self._side_view(shown, math))
+        self.files_btn.setVisible(self.tabs.count() > 1)
 
         row = QHBoxLayout()
         self.off = QPushButton("Don't show previews anymore")
@@ -240,15 +262,39 @@ class PreviewDialog(QDialog):
         lay.addLayout(row)
         for keys, step in (("Ctrl++", 1), ("Ctrl+=", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):
             QShortcut(QKeySequence(keys), self, activated=lambda s=step: self.zoom_step(s))
+        for keys, step in (("Ctrl+Tab", 1), ("Ctrl+PgDown", 1), ("Ctrl+Shift+Tab", -1), ("Ctrl+Backtab", -1),
+                           ("Ctrl+PgUp", -1)):
+            QShortcut(QKeySequence(keys), self, activated=lambda s=step: self.next_file(s))
         self._draw()
         self.resize(w, h)
 
-    def _add_tab(self, widget: QWidget, text: str, kind: str, tip: str) -> None:
-        """A tab in the colour of its kind of file (KIND_COLORS), its kind said in its tooltip."""
+    def _add_tab(self, widget: QWidget, text: str, kind: str, tip: str, line: str = "") -> None:
+        """A tab in the colour of its kind of file (KIND_COLORS), its kind said in its tooltip; and its line in
+        the Files menu (line: the whole file name; default the tab's text), with a square of that colour."""
         i = self.tabs.addTab(widget, text)
         self.tabs.tabBar().setTabData(i, KIND_COLORS[kind])
         self.tabs.setTabToolTip(i, f"{KIND_NAMES[kind]}: {tip}")
         self._zoom_with_wheel(widget)
+        swatch = QPixmap(z(12), z(12))
+        swatch.fill(QColor(KIND_COLORS[kind]))
+        action = self.files_menu.addAction(QIcon(swatch), line.replace("&", "&&") or text)  # (&&: a lone &)
+        action.setToolTip(f"{KIND_NAMES[kind]}: {tip}")
+        action.triggered.connect(lambda _=False, n=i: self.go_to(n))
+
+    def go_to(self, i: int) -> None:
+        """Shows file number i (the tabs' order, the math first): its tab, or side by side its column."""
+        if not 0 <= i < self.tabs.count():
+            return
+        self.tabs.setCurrentIndex(i)
+        if self.side.isChecked() and i < len(self.side_titles):  # (its heading at the left edge)
+            self.side_scroll.horizontalScrollBar().setValue(self.side_titles[i].x() - z(8))
+
+    def next_file(self, step: int) -> None:
+        """Ctrl+Tab / Ctrl+PgDn (step 1) and Ctrl+Shift+Tab / Ctrl+PgUp (-1): the next file, or the one before,
+        round from the last to the first."""
+        n = self.tabs.count()
+        if n:
+            self.go_to((self.tabs.currentIndex() + step) % n)
 
     def _side_view(self, shown: list, math: list | None) -> QWidget:
         """Side by side: a column per file (the math first), each headed by its name in its colour, its pages
@@ -267,6 +313,7 @@ class PreviewDialog(QDialog):
             title.setStyleSheet(f"color: white; background: {KIND_COLORS[kind]}; border-radius: 4px; "
                                 "padding: 3px 8px; font-weight: 600;")
             col.addWidget(title)
+            self.side_titles.append(title)
             cols.addLayout(col)
             return col
 
@@ -290,6 +337,10 @@ class PreviewDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidget(box)
         scroll.setWidgetResizable(True)
+        # across as well as down: a bar along the bottom, Shift and the wheel, or the wheel alone when there is
+        # nothing to scroll down (see eventFilter)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.side_scroll = scroll
         self._zoom_with_wheel(scroll)
         return scroll
 
@@ -307,6 +358,15 @@ class PreviewDialog(QDialog):
         if e.type() == QEvent.Wheel and e.modifiers() & Qt.ControlModifier:
             self.zoom_step(1 if e.angleDelta().y() > 0 else -1)
             return True
+        side = self.side_scroll
+        if e.type() == QEvent.Wheel and side is not None and obj is side.viewport():
+            # side by side, the columns run off to the right: Shift and the wheel scroll across, and so does the
+            # wheel alone when there is nothing to scroll down (a tilt of the wheel, or a touchpad, already does)
+            across, down = side.horizontalScrollBar(), side.verticalScrollBar()
+            delta = e.angleDelta().y() or e.angleDelta().x()
+            if delta and not e.angleDelta().x() and (e.modifiers() & Qt.ShiftModifier or down.maximum() == 0):
+                across.setValue(across.value() - round(delta / 120 * max(across.singleStep() * 3, z(120))))
+                return True
         return super().eventFilter(obj, e)
 
     def zoom_step(self, step: int) -> None:
@@ -382,10 +442,12 @@ def math_view(made: list, heading: str) -> QWidget:
 class MathDialog(QDialog):
     """How the amounts of the invoices just made were reached, line by line. OK closes it; Copy all puts it on
     the clipboard as text; Save as PDF... saves it (starting in `folder`, the invoices' folder); "Don't show
-    this anymore" sets Settings.show_math off at once (and saves the settings)."""
+    this anymore" sets Settings.show_math off at once (and saves the settings). `live`: the invoices not made
+    yet, as the main window's "Who pays what" shows them (no numbers yet, and nothing to turn off)."""
 
-    def __init__(self, made: list, s: Settings, parent=None, folder: Path | None = None):
-        """made: (FirmInvoice, invoice number) for each invoice made (deliver.generate's `math`)."""
+    def __init__(self, made: list, s: Settings, parent=None, folder: Path | None = None, live: bool = False):
+        """made: (FirmInvoice, invoice number) for each invoice made (deliver.generate's `math`; the number ""
+        when `live`)."""
         from ..invoice_math import explain
         super().__init__(parent)
         self.s, self.made, self.folder = s, made, folder
@@ -394,8 +456,12 @@ class MathDialog(QDialog):
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         lay = QVBoxLayout(self)
         shown = all(f.opts.detail for f, _ in made)  # (granular detail ticked: the invoice shows it too)
-        head = QLabel("How the amounts on " + ("this invoice" if len(made) == 1 else "these invoices")
-                      + " were reached." + ("" if shown else " The invoice itself shows only the amounts."))
+        if live:
+            head = QLabel("How the amounts of " + ("this invoice" if len(made) == 1 else "these invoices")
+                          + " are reached, as things stand now (nothing is made until you Generate).")
+        else:
+            head = QLabel("How the amounts on " + ("this invoice" if len(made) == 1 else "these invoices")
+                          + " were reached." + ("" if shown else " The invoice itself shows only the amounts."))
         head.setWordWrap(True)
         lay.addWidget(head)
         self.text = QTextBrowser()
@@ -427,6 +493,7 @@ class MathDialog(QDialog):
         for b in (copy, save, ok):
             row.addWidget(b)
         lay.addLayout(row)
+        self.off.setVisible(not live)
         self.resize(z(620), z(520))
 
     def _copy(self) -> None:
@@ -436,7 +503,7 @@ class MathDialog(QDialog):
 
     def default_name(self) -> str:
         """'Invoice 2026-0012 - the math.pdf' ('Invoices 2026-0012 to 2026-0013 - ...' for several)."""
-        numbers = [n for _, n in self.made]
+        numbers = [n for _, n in self.made if n]  # (none yet: the live math of the main window)
         if len(numbers) == 1:
             name = f"Invoice {numbers[0]}"
         else:

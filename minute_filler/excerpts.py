@@ -4,7 +4,8 @@ Each day of the case (a job, see batch.invoice_groups) is cut into runs of pages
 ordered it: the whole day by everyone ticked (the default), or excerpts - firm A the whole trial, firm B a
 stretch of day 1, firm C part of B's stretch and another of day 2. A run is typed in the page numbers printed
 on the transcript ("141-170"; its place in the day when they aren't known) and the runs around it make room
-(carve). A run nobody ordered is billed to nobody. What is set is kept on each day as Job.portions (rows of
+(carve). A run removed gives its pages to the run above it (remove), and a day can be one run again
+(whole_day). A run nobody ordered is billed to nobody. What is set is kept on each day as Job.portions (rows of
 (last page, firms)) and the attorneys ticked on it, so the invoices (invoice.firm_invoices) bill it as before:
 pages ordered by several firms are shared between them (the original, the index and the judge's index), each
 firm pays its own copy.
@@ -18,7 +19,7 @@ import re
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
-from .batch import Job, joint_invoice
+from .batch import Job, joint_invoice, same_entries
 from .invoice import ORDERED_BY_NOBODY, firm_invoices
 from .invoice_calc import Share, index_days, offered, quote_shares
 from .models import Attorney
@@ -27,8 +28,9 @@ from .settings import Settings
 
 @dataclass
 class Day:
-    """One day of the case: its job, its date, the pages Excerpts splits (Job.portion_pages) and the number
-    printed on each of them (Job.printed_pages; [] or None where not known)."""
+    """One day of the case: its job, its date, the pages Excerpts splits (Job.portion_pages; a job of several
+    days: all its billed pages, Job.invoice_pages) and the number printed on each of them (Job.printed_pages:
+    [] when not known, None for a page whose number isn't)."""
     job: Job
     label: str
     pages: int
@@ -110,7 +112,11 @@ def case_days(group: list[Job]) -> list[Day]:
 
 
 def firms_of(group: list[Job]) -> list[Attorney]:
-    """The table's columns: every attorney of the case's days who can be billed (ticked or not), each once."""
+    """The table's columns: every attorney of the case's days who can be billed (ticked or not), each once. The
+    same firm on two days is one column: batch.same_entries runs first, as the prices and invoices see the
+    firms (else a firm spelled two ways was two columns, and a tick stored its key twice)."""
+    if len(group) > 1:
+        same_entries(group)
     out, seen = [], set()
     for job in group:
         for a in job.case.attorneys:
@@ -159,16 +165,59 @@ def carve(runs: list[Run], i: int, a: int, b: int) -> list[Run]:
     return out
 
 
-def store(day: Day, runs: list[Run], firms: list[Attorney]) -> None:
+def remove(runs: list[Run], i: int) -> list[Run]:
+    """The day's runs without run i, every page still in one run (Remove run). Its pages go to the run above it,
+    or to the run below for the day's first run: "21-30" of "1-20 Alex, 21-30 Alex + Dana, 31-40 Sam" joins
+    "1-20 Alex". When that run was ordered by nobody and the run on the other side by a firm, they go to the
+    other side instead (a run removed isn't left to nobody when a firm can have it). The run that grew is then
+    joined with the runs touching it ordered by the same firms: "1-20 Alex, 21-30 Alex + Dana, 31-40 Alex"
+    without "21-30" is "1-40 Alex". Runs of the same firms elsewhere in the day stay apart. ValueError when
+    run i is the day's only run."""
+    day = runs[i].day
+    if len(runs) < 2:
+        raise ValueError(f"{day.label} is one run: nothing to remove. Untick its firms to bill it to nobody.")
+    out = [Run(day, r.start, r.end, list(r.keys)) for r in runs]
+    gone = out.pop(i)
+    above = i - 1 if i > 0 else None
+    below = i if i < len(out) else None  # (the run below is at i once run i is out)
+    j, other = (above, below) if above is not None else (below, None)
+    if not out[j].keys and other is not None and out[other].keys:
+        j = other
+    grown = out[j]
+    grown.start, grown.end = min(grown.start, gone.start), max(grown.end, gone.end)
+    same = set(grown.keys)
+    lo = hi = j
+    while lo > 0 and set(out[lo - 1].keys) == same:
+        lo -= 1
+    while hi + 1 < len(out) and set(out[hi + 1].keys) == same:
+        hi += 1
+    return out[:lo] + [Run(day, out[lo].start, out[hi].end, list(grown.keys))] + out[hi + 1:]
+
+
+def whole_day(day: Day, runs: list[Run], ticked: list[str], firms: list[Attorney] | None = None) -> list[Run]:
+    """The day as one run of all its pages (Remove this day's excerpts), ordered by every firm that ordered any
+    of its runs: "1-20 Alex, 21-40 Alex + Dana" is "1-40 Alex + Dana". When no run was ordered by anyone, by
+    the firms ticked on the day (ticked: Job.ticked_keys). firms: the table's columns (firms_of), to put the
+    firms in their order, as runs_of does."""
+    keys = list(dict.fromkeys(k for r in runs for k in r.keys)) or list(dict.fromkeys(ticked))
+    if firms:
+        order = {a.key(): n for n, a in enumerate(firms)}
+        keys.sort(key=lambda k: order.get(k, len(order)))
+    return [Run(day, 1, day.pages, keys)]
+
+
+def store(day: Day, runs: list[Run], firms: list[Attorney], s: Settings | None = None) -> None:
     """Keeps a day's runs on its job: Job.portions (None when the whole day was ordered by one set of firms; a
     day that can't be split keeps none), and the attorneys ticked on it are those who ordered any of its pages
     (an attorney of another day is added to it, ticked). A Parties number below the firms that now order the
-    whole day is cleared. The attorney table is then the user's (Job.att_touched)."""
+    whole day is cleared. The attorney table is then the user's (Job.att_touched). With the settings `s`, the
+    day's No. of copies follows the parties now ordering (Job.refresh_copies; the window passes them)."""
     job = day.job
     used = list(dict.fromkeys(k for r in runs for k in r.keys))
     if day.splittable:
         whole = len(runs) == 1 and runs[0].keys
-        job.portions = None if whole else [(r.end, list(r.keys) or [ORDERED_BY_NOBODY]) for r in runs]
+        job.portions = None if whole else [(r.end, list(dict.fromkeys(r.keys)) or [ORDERED_BY_NOBODY])
+                                           for r in runs]
         if whole and job.parties and job.parties < len(used):
             job.parties = 0
     have = {a.key() for a in job.case.attorneys}
@@ -181,6 +230,8 @@ def store(day: Day, runs: list[Run], firms: list[Attorney]) -> None:
             if other is not None:
                 job.case.attorneys.append(replace(other, checked=True))
     job.att_touched = True
+    if s is not None:
+        job.refresh_copies(s)  # No. of copies follows the parties ordering now
 
 
 def billed_in(day: Day, run: Run) -> int:

@@ -1,10 +1,11 @@
 """A transcript written by several reporters (their initials alternate at the foot of the pages) is billed for
 the user's own pages only: Pat Reporter ("pr") bills the pages with "pr", not Dana Smith's ("ds"). A transcript
 whose pages are all someone else's, or that begins with pages nobody's initials are on, gets no invoice until
-Whose pages... says whose pages to bill; a typed Pages field and a transcript without initials are billed as
-they are. Excerpts (who ordered which pages) count the billed pages of the stretch each firm ordered. Also an
-excerpt cut out of a day (excerpts.carve), Enter in the Excerpts table, the Whose pages window and the Invoice
-panel. All names are made up."""
+Whose pages... says whose pages to bill; a Pages field typed with another number than the count, and a
+transcript without initials, are billed as they are. Excerpts (who ordered which pages) count the billed pages of
+the stretch each firm ordered, and a firm on a joint invoice names the reporters of its own days. Also initials
+corrected while Generate all runs, an excerpt cut out of a day (excerpts.carve), Enter in the Excerpts table, the
+Whose pages window and the Invoice panel. All names are made up."""
 import os
 
 import pytest
@@ -56,7 +57,8 @@ def test_only_my_pages_are_billed(tmp_path, s):
     job = job_with(tmp_path, s, [PR, PR, PR, DS, DS, DS, DS, PR, PR, DS])
     assert job.own == (PR,) and job.transcript_pages() == 10
     assert job.invoice_pages() == 5 and not job.ownership_problem()
-    assert job.case.get("est_pages") == "5" and "10" in job.case.fields["est_pages"].alternatives
+    # the field shows every page (each agreement counts its attorney's, whoever wrote them); the invoice bills 5
+    assert job.case.get("est_pages") == "10" and "5" not in job.case.fields["est_pages"].alternatives
     assert [d.key() for d in job.shared_transcripts()] == [job.docs[0].key()]
     job.case.attorneys = [alex()]
     fill_jobs([job], s, outputs=["invoice"])
@@ -166,12 +168,14 @@ def test_initials_corrected_while_the_batch_runs_bill_the_day_again(tmp_path, s)
 def test_an_excerpt_span_without_printed_numbers_in_order(tmp_path, s):
     job = job_with(tmp_path, s, [""] * 10, attorneys=[alex(), dana()])
     A, B = alex().key(), dana().key()
-    job.portions = [(5, [A, B]), (10, [A])]
-    # Pages typed in: no printed numbers are known, so the stretch is named by its place in the day
-    job.case.fields["est_pages"] = FieldState("10", SRC_USER, 1.0, [])
+    job.portions = [(5, [A, B]), (12, [A])]
+    # Pages typed in (12, not the transcript's 10: 10 typed in would still be the count): no printed numbers are
+    # known, so the stretch is named by its place in the day
+    job.case.fields["est_pages"] = FieldState("12", SRC_USER, 1.0, [])
     assert job.printed_pages() == []
-    assert [p.span for p in job.invoice_orders()[0].portions] == ["pages 1–5", "pages 6–10"]
+    assert [p.span for p in job.invoice_orders()[0].portions] == ["pages 1–5", "pages 6–12"]
     # a second volume that numbers its pages from 1 again: the stretch over the join runs backwards
+    job.portions = [(5, [A, B]), (10, [A])]
     job.case.fields["est_pages"] = FieldState("", "", 0.0, [])
     job.printed_pages = lambda: [101, 102, 103, 104, 105, 106, 107, 1, 2, 3]
     assert [p.span for p in job.invoice_orders()[0].portions] == ["pp. 101–105", "pages 6–10"]

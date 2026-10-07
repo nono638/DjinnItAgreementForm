@@ -1,9 +1,9 @@
-"""Excerpts (who ordered which pages): each attorney's invoice bills only the days it is ticked on and, of a day
+"""Excerpts (who ordered which pages): each firm's invoice bills only the days it is ticked on and, of a day
 split in the Excerpts window (Job.portions), only the pages it ordered. Pages ordered together share the original,
 the judge's index and (by default) the index; each firm pays its own copies. Also the index setting, the Parties
 number (and one below the firms ticked), portions kept to be checked when the pages or the attorneys change, the
-same attorney entered twice, a run stopped part way, the files counted for Generate all and the records of each
-firm. All names and numbers are made up; prices are from the bundled "Sample Rates" sheet (Regular: original
+rows following a firm renamed or filled in by a merge, the same attorney entered twice, a run stopped part way,
+the files counted for Generate all and the records of each firm. All names and numbers are made up; prices are from the bundled "Sample Rates" sheet (Regular: original
 $4.30, copy, e-mailed copy and index $1.00 a page; Expedite: $5.40 and $1.10)."""
 import json
 from decimal import Decimal
@@ -259,8 +259,9 @@ def test_a_firms_detail_says_which_pages_are_shared(tmp_path, s):
 # ------------------------------------------------------------------ found in the sweep of who ordered which pages
 
 def test_rows_naming_an_attorney_no_longer_ticked_bill_nobody_until_checked(tmp_path, s):
-    """Dana is unticked (or renamed) after the day was split: the rows are kept, the day needs checking, and
-    Generate all makes no invoice for it, rather than billing Dana's pages to Alex."""
+    """Dana is unticked (or her firm renamed) after the day was split: the rows are kept, the day needs checking,
+    and Generate all makes no invoice for it, rather than billing Dana's pages to Alex. Another name in the firm's
+    row is the same firm, and the rows still name it."""
     job, = read_days(tmp_path, s, {"June 3, 2026": 30})
     job.case.attorneys = [alex(), dana()]
     job.portions = [(10, [A]), (30, [A, B])]
@@ -277,24 +278,30 @@ def test_rows_naming_an_attorney_no_longer_ticked_bill_nobody_until_checked(tmp_
     job.portions = [(10, [A]), (30, [A, B])]
 
     job.case.attorneys[1].checked = True
-    job.case.attorneys[1].name = "Dana M. Smith"  # renamed: the rows still say "dana smith"
+    job.case.attorneys[1].name = "Dana M. Smith, Robin Smith"  # the firm's row names more: the same firm, key
+    assert job.portions_problem() == "" and job.case.attorneys[1].key() == B
+    job.case.attorneys[1].firm = "Smith & Lane Law"  # the firm renamed: the rows still say "smith law"
     assert job.portions_problem() == "it names an attorney no longer ticked"
-    job.rename_in_portions(B, job.case.attorneys[1].key())  # as the window does when the name is edited
-    assert job.valid_portions() == [(10, [A]), (30, [A, "dana m smith"])]
+    job.rename_in_portions(B, job.case.attorneys[1].key())  # as the window does when the firm is edited
+    assert job.valid_portions() == [(10, [A]), (30, [A, "smith and lane law"])]
     assert files_to_make([job], ["invoice"], s) == 2
 
 
 def test_a_name_filled_in_by_a_merge_renames_the_attorney_in_the_rows(tmp_path, s):
     """An attorney typed with the firm only gets its name from a document read later (dedupe_attorneys): the
-    Excerpts... rows follow the attorney."""
+    entry keeps its key (the firm's), so the Excerpts... rows still name it; an attorney typed with the name only
+    gets the firm from a document, and the rows follow the new key (the firm's)."""
     job, = read_days(tmp_path, s, {"June 3, 2026": 30})
     firm_only = Attorney(firm="Counsel & Counsel", email="ab@counsel.example", checked=True)
-    job.case.attorneys = [firm_only, dana()]
+    name_only = Attorney(name="Dana Smith", checked=True)
+    job.case.attorneys = [firm_only, name_only]
     job.att_touched = True
-    job.portions = [(10, ["counsel & counsel"]), (30, ["counsel & counsel", B])]
-    job.docs[0].regex.attorneys = [Attorney(name="Alex B. Counsel", email="ab@counsel.example")]
+    job.portions = [(10, [firm_only.key()]), (30, [firm_only.key(), "dana smith"])]
+    job.docs[0].regex.attorneys = [Attorney(name="Alex B. Counsel", email="ab@counsel.example"),
+                                   Attorney(name="Dana Smith", firm="Smith Law")]
     remerge(job, s)
-    assert job.case.attorneys[0].name == "Alex B. Counsel"
+    assert [(a.name, a.firm) for a in job.case.attorneys] == [("Alex B. Counsel", "Counsel & Counsel"),
+                                                              ("Dana Smith", "Smith Law")]
     assert job.portions == [(10, [A]), (30, [A, B])] and job.valid_portions()
 
 

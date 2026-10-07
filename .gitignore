@@ -5,7 +5,7 @@ samples_internal/
 QUESTIONS TO ASK.md
 
 # Original full-size artwork (resized copies live in minute_filler/assets)
-SillyImages/
+sillyImages/
 
 # Python / tooling
 .venv/

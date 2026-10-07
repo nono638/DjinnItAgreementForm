@@ -19,9 +19,9 @@ To also check the extracted values, add an entry to samples_internal/expected.js
 - "fields": exact best value per field (see models.FIELD_KEYS)
 - "fields_startswith": the best value must start with this text
 - "proc_types": proceeding types that must be detected
-- "attorneys": the exact set of attorneys found (name, or firm when there is no name),
-  leaving out "Unrepresented" / "No one appeared" entries
-- "attorney_fields": values of one attorney (named as in "attorneys") that must match exactly
+- "attorneys": the exact set of attorneys found (each attorney a firm's entry names, or the firm when it names
+  none), leaving out "Unrepresented" / "No one appeared" entries
+- "attorney_fields": values of the entry naming one attorney (named as in "attorneys") that must match exactly
 - "_profile": your own details, so they are never mistaken for an attorney
 """
 import json
@@ -85,9 +85,9 @@ def test_private_sample(path, tmp_path):
     for ptype in exp.get("proc_types", []):
         assert ex.proc_types.get(ptype, 0) >= 0.6, ptype
     real = [a for a in ex.attorneys if not a.is_placeholder()]
-    if "attorneys" in exp:
-        assert {a.name or a.firm for a in real} == set(exp["attorneys"])
+    if "attorneys" in exp:  # (a firm's entry names all its attorneys: each one is listed)
+        assert {n for a in real for n in (a.names() or [a.firm])} == set(exp["attorneys"])
     for who, attrs in exp.get("attorney_fields", {}).items():
-        a = next(a for a in real if (a.name or a.firm) == who)
+        a = next(a for a in real if who in a.names() or (not a.name and a.firm == who))
         for k, v in attrs.items():
             assert getattr(a, k) == v, f"{who}.{k}"

@@ -104,8 +104,8 @@ def test_damaged_settings_fall_back_to_defaults(content, tmp_path):
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "cp1252"])
 def test_text_files_in_any_usual_encoding(encoding, tmp_path):
     p = tmp_path / "mail.txt"
-    p.write_bytes("José Muñoz v. Müller, Index No. 712345/2024".encode(encoding))
-    assert ingest_file(p).text == "José Muñoz v. Müller, Index No. 712345/2024"
+    p.write_bytes("José Ñandú v. Müller, Index No. 712345/2024".encode(encoding))
+    assert ingest_file(p).text == "José Ñandú v. Müller, Index No. 712345/2024"
 
 
 @pytest.mark.parametrize("name, content", [("a.pdf", b""), ("b.pdf", b"not a pdf"), ("c.docx", b"PK nope"),

@@ -45,8 +45,9 @@ def pool(extractions: list[Extraction]) -> dict[str, list[Candidate]]:
 
 def merge(extractions: list[Extraction], s: Settings, previous: CaseInfo | None = None) -> CaseInfo:
     """One CaseInfo from the extractions of all of a job's documents: for each field the best candidate,
-    with up to eight likely values offered as alternatives; the likely proceeding types ticked; the attorneys merged;
-    blanks filled from Settings (apply_defaults). Values the user typed into `previous` are kept."""
+    with up to eight likely values offered as alternatives; the likely proceeding types ticked; the attorneys
+    merged, one entry per firm (placeholders unticked, a lone real entry ticked); blanks filled from Settings
+    (apply_defaults). Values the user typed into `previous` are kept."""
     case = CaseInfo()
     cands = pool(extractions)
 
@@ -67,7 +68,8 @@ def merge(extractions: list[Extraction], s: Settings, previous: CaseInfo | None 
             ptypes[t] = min(0.99, max(ptypes.get(t, 0), c) + (0.1 if t in ptypes else 0))
     case.proc_types = {t for t, c in ptypes.items() if c >= CHECK_THRESHOLD}
 
-    # Attorneys: regex first (more exact), AI fills gaps / adds missing people. Copies, because merging
+    # Attorneys: regex first (more exact), AI fills gaps / adds missing people; one entry per firm (an e-mail
+    # from one of its attorneys, or the firm on another day's title page, joins its row). Copies, because merging
     # fills in and ticks entries: a document's own findings must stay as they were read, or a tick or an
     # e-mail address taken from another document would stay behind after that document is removed.
     atts = [replace(a) for ex in extractions for a in ex.attorneys]
@@ -99,8 +101,8 @@ def merge(extractions: list[Extraction], s: Settings, previous: CaseInfo | None 
 def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]] | None = None) -> None:
     """Fills blank fields from Settings: court, county, the rate from the rate sheet, the delivery date (when
     Settings.fill_delivery_date) and today's agreement date (when Settings.agreement_today). The speed and the
-    copies are set even when not blank (refresh_speed, refresh_copies): a speed not offered is replaced, and the
-    firms ticked decide the copies. With the pooled candidates `cands`, the page count can also come from an
+    copies are set even when not blank (refresh_speed, refresh_copies): the speed is the user's choice, else
+    the Settings rule's, and the parties ticked decide the copies. With the pooled candidates `cands`, the page count can also come from an
     invoice's total."""
     cands = cands or {}
     f = case.fields
@@ -136,7 +138,7 @@ def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]
 
 
 def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
-    """Estimated delivery = today + turnaround for the chosen delivery type, moved off a weekend (unless the
+    """Estimated delivery = today + the turnaround days of the chosen speed, moved off a weekend (unless the
     user typed one; nothing when the speed's turnaround isn't known)."""
     f = case.fields["delivery_date"]
     if f.source == SRC_USER and f.value:
@@ -149,30 +151,45 @@ def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
 
 
 def refresh_speed(case: CaseInfo, s: Settings) -> bool:
-    """The agreement form names one of the speeds offered (ticked under Speeds offered, Settings.offered_speeds):
-    the speed the user chose for the job or one found in its documents, when it is one of them (or "Other",
-    when the user chose it); else the one Settings picks (Settings.agreement_speed). A speed found in a document
-    is put in the rate sheet's spelling ("Expedited" -> "Expedite"). True when it changed."""
+    """The agreement form names one speed: the one the user chose for the job (in the Order card, or when
+    asked about a speed a document mentions: batch.Job.speed_question), while it is still among the speeds
+    offered (or "Other"); else always the one Settings picks (Settings.agreement_speed: by default "Expedited,
+    else the slowest offered"). A speed found in a document doesn't change it: an e-mail's "at your regular rate" is
+    no choice of the user's (the window asks instead). True when it changed."""
     f = case.fields["delivery"]
-    if f.value and (s.speed_offered(f.value) or (f.source == SRC_USER and f.value == "Other")):
-        if f.source != SRC_USER:
-            f.value = s.delivery_name(f.value)
+    if f.source == SRC_USER and f.value and (f.value == "Other" or s.speed_offered(f.value)):
         return False
     pick = s.agreement_speed()
+    if f.source == SRC_DEFAULT and f.value == pick:
+        return False
     case.fields["delivery"] = FieldState(pick, SRC_DEFAULT, 0.7, [pick]) if pick else FieldState()
     return f.value != pick
 
 
-def refresh_copies(case: CaseInfo, s: Settings) -> None:
-    """No. of copies = how many firms ordered (CaseInfo.ordering_firms), unless the user typed a number; with
-    nobody ticked, a number read from a document, else the default from Settings. A number read from a
-    document gives way to the firms ticked."""
+def apply_speed_rule(case: CaseInfo, s: Settings) -> bool:
+    """The agreement form's speed as refresh_speed says, and when it changed, its rate per page (unless typed)
+    and the delivery date (unless typed; when Settings.fill_delivery_date) follow it. True when it changed.
+    Called wherever what decides it changes: the speeds ticked, the rate sheet, the settings, a job shown."""
+    if not refresh_speed(case, s):
+        return False
+    refresh_rate(case, s)
+    if s.fill_delivery_date:
+        refresh_delivery_date(case, s)
+    return True
+
+
+def refresh_copies(case: CaseInfo, s: Settings, parties: int = 0) -> None:
+    """No. of copies = the number of ordering parties, as the invoice counts them: `parties` when the Parties
+    number of the invoice was set (batch.Job.parties; batch.Job.refresh_copies passes it), else the attorneys
+    ticked who get an invoice (CaseInfo.ordering_parties: a firm is one party, however many attorneys its row
+    names). A number the user typed wins; with nobody ticked, a number read from a document stays, else the
+    default from Settings. A number read from a document gives way to the parties once someone is ticked."""
     f = case.fields["copies"]
     if f.source == SRC_USER and f.value:
         return
-    firms = case.ordering_firms()
-    if firms:
-        case.fields["copies"] = FieldState(str(firms), SRC_DERIVED, 0.9, [str(firms)])
+    n = parties or case.ordering_parties()
+    if n:
+        case.fields["copies"] = FieldState(str(n), SRC_DERIVED, 0.9, [str(n)])
     elif f.value and f.source not in (SRC_DEFAULT, SRC_DERIVED):
         return  # read from a document: kept until someone is ticked
     elif s.default_copies:

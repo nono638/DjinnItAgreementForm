@@ -1,5 +1,5 @@
-"""Fixtures for every test: settings and records kept in a temporary folder, no real Ollama, and an off-screen
-Qt application and main window for the GUI tests."""
+"""Fixtures for every test: settings and records kept in a temporary folder, no real Ollama, no look on GitHub for
+a newer version, and an off-screen Qt application and main window for the GUI tests."""
 import os
 
 import pytest
@@ -44,23 +44,26 @@ def qt(monkeypatch):
     """PySide6's QtWidgets with a QApplication, drawn off screen (the test is skipped without PySide6). The
     preview before saving is answered "Save" at once (a box waiting for a click would stop the test); a test of
     the preview itself sets PreviewDialog.exec as it needs. "The math" after an invoice is made is closed at once
-    too (a test of it sets MathDialog.exec)."""
+    too (a test of it sets MathDialog.exec), and so is the first-run welcome: a window made without a name whose
+    startup ran during the clean-up once waited for a click for good (a test of it sets WelcomeDialog.exec)."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     fonts = os.path.join(os.environ.get("WINDIR", ""), "Fonts")
     if os.path.isdir(fonts):  # the real fonts, so text is measured as on screen (see the layout tests)
         os.environ.setdefault("QT_QPA_FONTDIR", fonts)
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from minute_filler.gui.preview import MathDialog, PreviewDialog
+    from minute_filler.gui.preview import MathDialog, PreviewDialog, WelcomeDialog
     monkeypatch.setattr(PreviewDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
     monkeypatch.setattr(MathDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
+    monkeypatch.setattr(WelcomeDialog, "exec", lambda self: QtWidgets.QDialog.Rejected)
     return QtWidgets
 
 
 @pytest.fixture
 def make_window(qt):
     """make_window(settings) -> a MainWindow, closed again after the test. The preview before saving is off
-    unless preview=True: Generate then makes the files once, as the tests of everything else expect."""
+    unless preview=True: Generate then makes the files once, as the tests of everything else expect. The yin-yang
+    shows the "ready" picture as soon as a read ends (DropZone.linger_ms 0); a test of the swirl sets it again."""
     from minute_filler.gui.main_window import MainWindow
     made = []
     app = qt.QApplication.instance()
@@ -69,6 +72,7 @@ def make_window(qt):
     def make(s, preview=False):
         s.preview_before_saving = preview
         win = MainWindow(s, qt.QApplication.instance())
+        win.drop.linger_ms = 0
         made.append(win)
         return win
 

@@ -17,10 +17,19 @@ also tick other reporters, whose pages are billed on invoices in their name
 pages are someone else's, or that begins with pages nobody's initials are on,
 gets no invoice until the user says whose pages to bill (Job.ownership_problem).
 
+A minute agreement, though, counts every page its attorney ordered, whoever wrote it (Job.ordered_pages: the
+whole day, or the attorney's runs of an excerpt): firm A ordering a day of 150 pages and firm B 80 of them get
+agreements for 150 and 80 pages, while each reporter's invoices bill only that reporter's pages of them (the
+pages B didn't order to A alone, those both ordered split between them). The MOFR counts the pages anyone
+ordered. The Est. number of pages field shows every page of the transcripts (a number typed in there is the
+user's: their invoice bills it, and the agreements count the day as that many pages).
+
 fill_jobs makes the outputs of every job (Generate all). A day once invoiced
 (Job.invoiced) is not billed again until a new document is added to it; when a run stops part way, the
 attorneys already invoiced (Job.invoiced_keys) are not billed again by the next one. A day whose Excerpts...
-rows no longer fit it (Job.portions_problem) gets no invoice until they are checked.
+rows no longer fit it (Job.portions_problem) gets no invoice until they are checked. The days of a case on one
+invoice also get one minute agreement per attorney and one MOFR for all of them (form_groups, case_forms),
+unless Settings.forms_per_case is off.
 """
 from __future__ import annotations
 
@@ -31,16 +40,18 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from .extract_regex import RegexExtractor, dedupe_attorneys, find_dates, norm_index
-from .deliver import NO_INVOICE, generate, ledger_for
-from .fill import is_generated, short_caption
+from .extract_regex import (RegexExtractor, dedupe_attorneys, find_dates, merge_entry, norm_index, same_entry,
+                            same_firm)
+from .deliver import NO_INVOICE, CaseForm, generate, ledger_for, make_forms
+from .fill import agreement_orderers, is_generated, short_caption
 from .invoice import (ORDERED_BY_NOBODY, DayOrder, InvoiceOpts, Portion, day_reporters, invoice_count,
                       reporters_text)
 from .ingest import IMAGE_EXT, Ingested, ingest_file
 from .log import error as log_error, log
 from .merge import merge, refresh_copies, refresh_delivery_date, refresh_rate
-from .models import (Attorney, CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_PDF, SRC_REGEX, SRC_USER,
-                     to_int)
+from .models import (Attorney, Candidate, CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_DERIVED, SRC_PDF,
+                     SRC_REGEX, SRC_USER, to_int)
+from .rates import speed_key
 from .runsheet import NO_RUNSHEET, RunSheetOpts, matches, name_rows, read_info, rows_from, transcript_pages
 from .takes import my_initials, page_owners
 from .settings import OUTPUTS, Settings
@@ -245,18 +256,56 @@ class Job:
 
     def problems(self) -> list[str]:
         """What to check before the forms are made: "Index Number is missing", "no attorney is ticked"."""
-        out =[FIELD_LABELS[k] + " is missing" for k in self.missing()]
+        out = [FIELD_LABELS[k] + " is missing" for k in self.missing()]
         if self.no_attorney_chosen():
             out.append("no attorney is ticked")
         return out
+
+    def asked_speed(self) -> tuple[str, str, Doc | None]:
+        """A speed one of the job's e-mails (or texts) asks for, as (speed, the words found, the document):
+        ("Daily", "daily copy", <the e-mail>); ("", "", None) when none does. Transcripts and invoices order
+        nothing: "regular" in testimony, or an old invoice's list of speeds, ask for no speed. The likeliest
+        when several are named."""
+        best: tuple[Candidate, Doc] | None = None
+        for d in self.docs:
+            if d.regex.doc_kind not in ("email", "text"):
+                continue
+            for ex in d.extractions():
+                for c in ex.fields.get("delivery", []):
+                    if c.value and (best is None or c.confidence > best[0].confidence):
+                        best = (c, d)
+        if best is None:
+            return "", "", None
+        c, d = best
+        return c.value, c.note or c.value.lower(), d
+
+    def speed_question(self) -> str:
+        """What to ask the user about this job's speed ("" when nothing): a document asks for another speed
+        than the agreement form names (the Settings rule's), and the user hasn't chosen one for the job:
+        'the e-mail mentions "daily copy"'. Choosing any speed (merge.refresh_speed keeps it) answers it."""
+        f = self.case.fields["delivery"]
+        if f.source == SRC_USER:
+            return ""
+        speed, words, doc = self.asked_speed()
+        if not speed or speed_key(speed) == speed_key(f.value):
+            return ""
+        if doc is not None and doc.regex.doc_kind == "email":
+            what = "the e-mail"
+        elif doc is not None and not doc.ing.name.startswith("Pasted text"):
+            what = doc.ing.name  # (a letter or note saved as a file: "Order.docx")
+        else:
+            what = "the pasted text"
+        return f'{what} mentions "{words}"'
 
     def name_key(self) -> tuple:
         """The case as file names show it: jobs with the same key (days of one case) get dated file names."""
         return short_caption(self.case.get("case_name")).lower(), self.case.get("index_no")
 
     def form_count(self) -> int:
-        """One agreement per ticked attorney, at least one (invoices: see CaseInfo.invoice_orderers)."""
-        return max(1, sum(1 for a in self.case.attorneys if a.checked))
+        """How many minute agreements generate() makes for this day: one per ticked entry (each Attorney.key()
+        once) that ordered pages of it, or one with a blank attorney block when nobody is ticked
+        (fill.agreement_orderers; invoices: see CaseInfo.invoice_orderers)."""
+        return len(agreement_orderers(self.case, self.ordered_pages()))
 
     def transcripts(self) -> list[Doc]:
         """The transcript PDFs among the job's documents (a photo of a transcript has no pages to count)."""
@@ -264,7 +313,7 @@ class Job:
 
     def transcript_pages(self) -> int:
         """Pages of the transcript PDFs among the inputs, without the word index printed after them; 0 when
-        there is none (then no invoice or run sheet can be made)."""
+        there is none (then no run sheet can be made, nor an invoice unless the pages are typed in)."""
         return sum(transcript_pages(d.ing) for d in self.transcripts())
 
     def runsheet_opts(self, s: Settings) -> RunSheetOpts:
@@ -286,8 +335,21 @@ class Job:
 
     def pages_typed(self) -> bool:
         """The Pages field was typed in: it is what the user's own invoice bills, whoever wrote the pages
-        (another reporter's invoices bill their own pages: see billed_by)."""
-        return self.case.fields["est_pages"].source == SRC_USER
+        (another reporter's invoices bill their own pages: see billed_by). The transcripts' own page count typed
+        in again is no number of the user's: as one, it would bill the other reporters' pages on the user's
+        invoice (billing the whole transcript is Whose pages... -> The whole transcript)."""
+        fs = self.case.fields["est_pages"]
+        return fs.source == SRC_USER and not self.is_the_count(fs.value)
+
+    def is_the_count(self, value: str) -> bool:
+        """A Pages value typed in that is no number of the user's (see pages_typed): blank or no number (a field
+        cleared), the transcripts' own count, or the pages the invoice bills anyway (own_pages); "1,200" is
+        1200. _all_pages turns such a value back into the count. ("0" is the user's: no invoice for the day.)"""
+        n = to_int(value, -1)
+        if n < 0:
+            return True
+        whole = self.transcript_pages()
+        return bool(whole) and n in (whole, self.own_pages() or whole)
 
     def basis_of(self, doc: Doc) -> list[str]:
         """Whose pages of a transcript are billed (see page_basis): ["me"], ["me", "ds"], ["ds"], ["*"]..."""
@@ -320,11 +382,12 @@ class Job:
                 basis[d.key()] = mine[0] if mine else NOBODY
             else:
                 basis[d.key()] = reporter if reporter in chosen else NOBODY
-        job = replace(self, page_basis=basis)
+        # (its own case: same_entries, run on the copies by joint_invoice, fills a firm into a row and renames the
+        # copy's Excerpts... rows; on rows shared with the job, the job's own rows would no longer match them)
+        job = replace(self, page_basis=basis, case=deepcopy(self.case))
         if reporter != "me" and self.pages_typed():
             # A Pages number typed in is the user's own count: another reporter's invoices bill their own pages
             # of the transcripts (else each set billed the typed number, the pages twice over)
-            job.case = deepcopy(self.case)
             job.case.fields["est_pages"] = FieldState()
         return job
 
@@ -408,14 +471,13 @@ class Job:
         return f"Whose pages… needs choosing ({why})" if why else ""
 
     def invoice_pages(self) -> int:
-        """The pages to bill: the Pages field when typed in, else the billed pages of the transcripts (own_pages:
-        all of them when one reporter wrote them, else the user's own unless Whose pages... says otherwise);
-        0 = no transcript, or none of its pages is billed (then ownership_problem says why)."""
-        pages = self.transcript_pages()
-        if not pages:
-            return 0
+        """The pages to bill: the Pages field when typed in (with a transcript or without one: a caption page
+        and "40" typed are enough for an invoice), else the billed pages of the transcripts (own_pages: all of
+        them when one reporter wrote them, else the user's own unless Whose pages... says otherwise). 0 = no
+        transcript and no pages typed (a number read from an e-mail is no count to bill), or none of the
+        transcript's pages is billed (then ownership_problem says why)."""
         if self.pages_typed():
-            return to_int(self.case.get("est_pages"), pages)
+            return max(0, to_int(self.case.get("est_pages"), self.transcript_pages()))
         # worked out afresh, not read from the Pages field: Whose pages... may have changed since it was filled
         return self.own_pages()
 
@@ -455,7 +517,8 @@ class Job:
     def invoice_days(self) -> list[tuple[str, int]]:
         """(date, pages) of each day billed, earliest first: a line per day of the transcripts (volumes of one
         day added up), or one line with the job's dates and all the pages when there is one day, the Pages
-        field was typed in, or a transcript has no date (its day isn't known). Empty without a transcript."""
+        field was typed in, or a transcript has no date (its day isn't known). Empty without pages to bill (no
+        transcript and no pages typed)."""
         pages = self.invoice_pages()
         if not pages:
             return []
@@ -478,10 +541,69 @@ class Job:
             by_day[self._day_of(d)] = by_day.get(self._day_of(d), 0) + transcript_pages(d.ing)
         return [n for _, n in sorted(by_day.items())]
 
+    def ordered_days(self) -> list[tuple[str, dict[str, int]]]:
+        """The pages each attorney ordered on each day of the job, as its minute agreement counts them: every
+        page of the stretches it ordered, whoever wrote them (its invoice bills only the billed pages among them,
+        see invoice_orders), without the word index. (date, {Attorney.key(): pages, "": the pages anyone
+        ordered}) per day, earliest first, the days as invoice_days lists them. A day cut into runs under
+        Excerpts... (valid_portions) counts the runs each attorney ordered (a run nobody ordered: nobody's, not
+        in ""); else every ticked attorney ordered the whole day. With nobody ticked, "" is the whole day (the
+        agreement with a blank attorney block). A Pages number typed in (pages_typed) is the day's pages, with a
+        transcript or without one: the whole day is that number, an excerpt its runs of it. [] with neither a
+        transcript nor pages typed, or with the Pages field typed as 0 (the forms then show the Pages field as
+        it is)."""
+        whole = self.transcript_pages()
+        if not whole and not self.pages_typed():
+            return []
+        keys = self.ticked_keys()
+        if self.pages_typed():
+            n = to_int(self.case.get("est_pages"), whole)
+            days = [(self.case.get("dates"), n)] if n > 0 else []
+        else:
+            by_day: dict[date | None, int] = {}
+            for d in self.transcripts():
+                by_day[self._day_of(d)] = by_day.get(self._day_of(d), 0) + transcript_pages(d.ing)
+            days = ([(self.case.get("dates"), whole)] if len(by_day) < 2 or None in by_day else
+                    [(f"{d.month}/{d.day}/{d.year}", n) for d, n in sorted(by_day.items())])
+        if len(days) != 1:  # (several days on one form: every day is ordered whole, as invoice_orders bills it)
+            return [(day, {**{k: n for k in keys}, "": n}) for day, n in days]
+        day, n = days[0]
+        rows = self.valid_portions()
+        if not rows or rows[-1][0] != n:
+            rows = [(n, keys)]
+        got: dict[str, int] = {k: 0 for k in keys}
+        got[""], start = 0, 0
+        for last, ks in rows:
+            real = [k for k in dict.fromkeys(ks) if k != ORDERED_BY_NOBODY]
+            for k in real:
+                got[k] = got.get(k, 0) + last - start
+            got[""] += (last - start) if real else 0
+            start = last
+        if not keys:
+            got[""] = n
+        return [(day, got)]
+
+    def ordered_pages(self) -> dict[str, int]:
+        """The pages each attorney ordered on the job's days together, whoever wrote them (ordered_days):
+        {Attorney.key(): pages, "": the pages anyone ordered}, what each minute agreement and the MOFR count
+        (deliver.generate). Empty with neither a transcript nor pages typed, or with the Pages field typed as
+        0."""
+        out: dict[str, int] = {}
+        for _, got in self.ordered_days():
+            for k, n in got.items():
+                out[k] = out.get(k, 0) + n
+        return out
+
     def ticked_keys(self) -> list[str]:
         """The Attorney.key() of each attorney ticked on this day who gets an invoice, each once (see
         CaseInfo.invoice_orderers): who can order its pages."""
         return [a.key() for a in self.case.invoice_orderers() if a is not None]
+
+    def refresh_copies(self, s: Settings) -> None:
+        """No. of copies of this day's forms follows its ordering parties, as its invoice counts them (the
+        Parties number when set, else the attorneys ticked: merge.refresh_copies), unless the user typed a
+        number. Called wherever the attorneys ticked, or the Parties number, change."""
+        refresh_copies(self.case, s, self.parties)
 
     def invoice_opts(self) -> InvoiceOpts:
         """The invoice's pages (of each day), ordering parties (the ticked attorneys unless set), who ordered
@@ -533,7 +655,8 @@ class Job:
     def portions_unavailable(self) -> str:
         """Why the pages of this job can't be split between attorneys (Excerpts...), or "" when they can: it
         needs pages to bill (a job of several days is in the Excerpts window too, ordered whole)."""
-        return "" if self.invoice_days() else "There are no transcript pages to bill yet."
+        return "" if self.invoice_days() else ("There are no transcript pages to bill yet (without a transcript, "
+                                               "type the pages in Est. number of pages).")
 
     def portions_fit_pages(self) -> bool:
         """Job.portions (when there are any) are rows that end in order, the last on the day's pages (all of
@@ -575,8 +698,14 @@ class Job:
 
     def rename_in_portions(self, old: str, new: str) -> None:
         """An attorney's name (or firm) was changed, from Attorney.key() `old` to `new`: the Excerpts... rows
-        follow it (a name cleared drops it from them)."""
-        if self.portions is None or not old or old == new:
+        follow it (a name cleared drops it from them), and so do the attorneys a stopped run invoiced already
+        (invoiced_keys: "key", or "key@ds" for another reporter's invoice), or a retry would bill them again."""
+        if not old or old == new:
+            return
+        if self.invoiced_keys and new:
+            self.invoiced_keys = list(dict.fromkeys(
+                new + k[len(old):] if k == old or k.startswith(old + "@") else k for k in self.invoiced_keys))
+        if self.portions is None:
             return
         self.portions = [(last, list(dict.fromkeys(new if k == old else k for k in keys if k != old or new)))
                          for last, keys in self.portions]
@@ -611,21 +740,21 @@ class Job:
     def order_lines(self, attorneys: list[Attorney] | None = None) -> list[OrderLine]:
         """Who orders what, spelled out for the window's "Who ordered what" card: a line per day and attorney,
         with the stretches of pages it ordered (whole day or an excerpt), who shares each of them, and how many
-        billed pages that is (see day_mask). attorneys: also give a line ("orders nothing") to these when they are not
-        ticked on the day (the other days' attorneys of a joint invoice). While the invoice is held (invoice_hold)
-        each line is a note saying why. [] without pages to bill."""
+        billed pages that is (see day_mask). attorneys: also give a line ("orders nothing") to these when they
+        are not ticked on the day (the other days' attorneys of a joint invoice). While the invoice is held
+        (invoice_hold) each line is a note saying why. [] without pages to bill."""
         days = self.invoice_days()
         if not days and not self.ownership_problem():
             return []
         held = self.invoice_hold()  # (the wording the Invoice panel and Generate all use)
         ticked = [a for a in self.case.invoice_orderers() if a is not None]
         keys = [a.key() for a in ticked]
-        names = {a.key(): a.name or a.firm for a in ticked}
+        names = {a.key(): a.label() for a in ticked}
         others = [a for a in attorneys or [] if a.key() not in names]
 
         def nothing(day: str) -> list[OrderLine]:
             """The lines of the attorneys of the other days who aren't ticked on this one."""
-            return [OrderLine(day, a.key(), a.name or a.firm, note="not ticked on this day: orders nothing")
+            return [OrderLine(day, a.key(), a.label(), note="not ticked on this day: orders nothing")
                     for a in others]
 
         out: list[OrderLine] = []
@@ -672,9 +801,12 @@ class Job:
         return out + nothing(day)
 
     def output_problems(self, outputs) -> list[str]:
-        """What stops the chosen outputs: missing fields for the agreement or MOFR, no transcript for an
-        invoice or run sheet, or Excerpts... rows to check for the invoice."""
+        """What stops the chosen outputs: missing fields for the agreement or MOFR, or a speed to choose for
+        them (speed_question), no pages to bill for an invoice (no transcript and no pages typed), no transcript
+        for a run sheet, or Excerpts... rows to check for the invoice."""
         out = self.problems() if {"agreement", "mofr"} & set(outputs) else []
+        if {"agreement", "mofr"} & set(outputs) and self.speed_question():  # (the speed they name)
+            out.append(f"{self.speed_question()}: choose the speed (Order card)")
         if "invoice" in outputs and self.invoice_hold():
             out.append(self.invoice_hold())
         elif "invoice" in outputs and not self.invoice_pages():
@@ -696,9 +828,10 @@ class Job:
 
     def makeable(self, outputs) -> list[str]:
         """The outputs this job can have: all of them, less the run sheet when there is no transcript and the
-        invoice when there are no pages to bill (no transcript, or the Pages field says 0). An invoice held until
-        Whose pages... says whose pages to bill is kept: it is held, with the reason (see invoice_hold). No run
-        sheet either for a case one reporter wrote, when the window ticked the box for others (runsheet_unneeded)."""
+        invoice when there are no pages to bill (no transcript and no pages typed, or the Pages field says 0).
+        An invoice held until Whose pages... says whose pages to bill is kept: it is held, with the reason (see
+        invoice_hold). No run sheet either for a case one reporter wrote, when the window ticked the box for
+        others (runsheet_unneeded)."""
         return [o for o in outputs if not (o == "runsheet" and (not self.transcript_pages() or self.runsheet_unneeded))
                 and not (o == "invoice" and not self.invoice_pages() and not self.ownership_problem())]
 
@@ -707,13 +840,18 @@ class Job:
         reporter wrote (runsheet_unneeded). Nothing to tell the user about."""
         return output == "runsheet" and self.runsheet_unneeded and bool(self.transcript_pages())
 
-    def left_out_reason(self) -> str:
-        """Why makeable() left something out: no transcript, or (with one, only the invoice) no pages to bill."""
-        return "the Pages field says 0" if self.transcript_pages() else "no transcript PDF among the inputs"
+    def left_out_reason(self, output: str = "invoice") -> str:
+        """Why makeable() left an output out: the run sheet, no transcript; the invoice, no pages to bill (the
+        Pages field says 0, or there is no transcript and no pages were typed)."""
+        if output == "runsheet" and not self.transcript_pages():
+            return "no transcript PDF among the inputs"
+        if self.transcript_pages() or self.pages_typed():
+            return "the Pages field says 0"
+        return "no transcript PDF, and no pages typed in Est. number of pages"
 
     def file_count(self, outputs) -> int:
         """How many agreements and MOFRs generate() makes for this job (files_to_make counts the invoices and
-        run sheets, which the days of a case share)."""
+        run sheets, which the days of a case share, and the forms made once for several days: case_forms)."""
         per = {"agreement": self.form_count(), "mofr": 1}
         return sum(per.get(o, 0) for o in outputs)
 
@@ -823,8 +961,42 @@ def job_from_origin(origin: dict, s: Settings) -> Job:
             setattr(job, name, {k: v for k, v in value.items() if isinstance(k, str) and (
                 isinstance(v, str) or name == "page_basis" and isinstance(v, list)
                 and all(isinstance(x, str) for x in v))})
+    one_row_per_firm(job)
     job.own = tuple(sorted(my_initials(s.profile.name, s.profile.initials)))
     return job
+
+
+def one_row_per_firm(job: Job) -> None:
+    """Brings a job of a record made by version 2.0 or earlier up to date: then every attorney had a row of
+    their own, keyed by the name (Attorney.legacy_keys). Now a firm is one row naming all its attorneys, keyed
+    by the firm: the rows of one firm (same_firm) are merged into the first (merge_entry: ticked when any was),
+    and the Excerpts... rows (Job.portions) that name an attorney by an old key name the row it is now in (the
+    attorneys of a firm in one run become the firm, once). Rows of different firms, and keys that are still
+    current, are left alone."""
+    rows: list[Attorney] = []
+    homes: list[tuple[set[str], Attorney]] = []  # each row's old keys, and the row it is in now
+    for a in job.case.attorneys:
+        old = {a.key(), *a.legacy_keys()}  # (before merging: the merged name loses "Esq.", "Mr. Jones"...)
+        twin = next((b for b in rows if a.firm and b.firm and same_firm(a.firm, b.firm)), None)
+        if twin is None:
+            rows.append(a)
+        else:
+            merge_entry(twin, a)
+        homes.append((old, twin or a))
+    job.case.attorneys = rows
+    if not job.portions:
+        return
+    current = {a.key() for a in rows}
+
+    def now(k: str) -> str:
+        """An Excerpts... key as it reads now: the key of the row its attorney was merged into, else of the row
+        one of whose attorneys it names; a key no row knows stays as it is."""
+        if k in current or k == ORDERED_BY_NOBODY:
+            return k
+        return next((home.key() for old, home in homes if k in old),
+                    next((a.key() for a in rows if k in a.legacy_keys()), k))
+
+    job.portions = [(last, list(dict.fromkeys(now(k) for k in keys))) for last, keys in job.portions]
 
 
 def make_doc(ing: Ingested, regex: Extraction, s: Settings, path: str = "") -> Doc:
@@ -872,21 +1044,28 @@ def remerge(job: Job, s: Settings) -> None:
         new.proc_types = prev.proc_types
     if job.att_touched:
         known = prev.attorneys
-        keys = [(a, a.key()) for a in known]
-        ticks = [(a, a.checked) for a in known]
+        keys = [(a, a.key(), a.checked) for a in known]
         new.attorneys = dedupe_attorneys(known + list(new.attorneys), s.profile)
-        for a in new.attorneys[len(known):]:
-            a.checked = False
-        for a, ticked in ticks:  # an attorney the user unticked stays unticked, though a document read again
-            a.checked = ticked   # ticks its sender (dedupe_attorneys keeps a tick from either copy)
-        for a, k in keys:  # a name filled in from a duplicate: Excerpts... follows the attorney
-            if any(a is b for b in new.attorneys) and a.key() != k and k not in {b.key() for b in new.attorneys}:
-                job.rename_in_portions(k, a.key())
+
+        def home_of(a: Attorney) -> Attorney | None:
+            """The row a row of the user's table is in now: itself, or the row it was merged into."""
+            return a if any(a is b for b in new.attorneys) else \
+                next((b for b in new.attorneys if same_entry(a, b)), None)
+
+        homes = [(home_of(a), k, ticked) for a, k, ticked in keys]
+        for b in new.attorneys:  # a row is ticked as the user left it: when two of the user's rows became one
+            mine = [t for h, _, t in homes if h is b]  # (a firm), ticked when either was; a row only the
+            b.checked = any(mine)                      # documents bring is not (though it ticks its sender)
+        current = {b.key() for b in new.attorneys}
+        # a firm filled in from a duplicate, or a row merged into its firm's: the Excerpts... rows follow its key
+        for home, k, _ in homes:
+            if k not in current and home is not None and home.key() != k:
+                job.rename_in_portions(k, home.key())
     if job.batch:
         _all_dates(new, job)
     job.own = tuple(sorted(my_initials(s.profile.name, s.profile.initials)))
     _all_pages(new, job)
-    refresh_copies(new, s)  # the attorneys ticked may be the user's, restored above
+    refresh_copies(new, s, job.parties)  # the attorneys ticked may be the user's, restored above
     refresh_rate(new, s)  # a speed chosen by the user was restored after the defaults were applied
     if s.fill_delivery_date:
         refresh_delivery_date(new, s)
@@ -899,6 +1078,20 @@ def _date_key(d: str) -> tuple:
     return y, m, day
 
 
+def dates_text(texts) -> str:
+    """Days as a form of several days lists them: '9/28/2026, 9/30/2026, 10/1/2026', each once, earliest first.
+    texts: the dates, or texts holding them ("9/28/2026, 9/30/2026"); one in which no date is found is kept as
+    it is, after the others."""
+    found, other = [], []
+    for t in texts:
+        days = [d for _, _, d in find_dates(t or "")]
+        if days:
+            found += days
+        elif t and t.strip():
+            other.append(t.strip())
+    return ", ".join(sorted(dict.fromkeys(found), key=_date_key) + list(dict.fromkeys(other)))
+
+
 def _all_dates(case: CaseInfo, job: Job) -> None:
     """When the grouped documents name different days, the form lists all of them (to review)."""
     fs = case.fields["dates"]
@@ -907,27 +1100,32 @@ def _all_dates(case: CaseInfo, job: Job) -> None:
     have = {d for _, _, d in find_dates(fs.value)}
     every = have.union(*(d.ident.dates for d in job.docs))
     if every - have:
-        value = ", ".join(sorted(every, key=_date_key))
+        value = dates_text(every)
         case.fields["dates"] = FieldState(value, fs.source or SRC_REGEX, 0.55,
                                           [value] + [a for a in fs.alternatives if a != value])
 
 
 def _all_pages(case: CaseInfo, job: Job) -> None:
-    """Several transcripts in one job (the days of a trial, volumes): their pages are added up. A transcript of
-    several reporters counts the user's own pages (see Job.billed_mask); the whole count stays a suggestion."""
-    fs = case.fields["est_pages"]
-    if fs.source == SRC_USER:
-        return
+    """A job with transcript PDFs takes its Est. number of pages from them (SRC_PDF, the "PDF" badge), never
+    from a number in a document's words: every page of the transcripts of the job (days, volumes) added up,
+    whoever wrote them, without the word index. Each attorney's minute agreement then shows the pages that
+    attorney ordered (Job.ordered_pages) and the invoice bills the user's own pages of them (Job.invoice_pages;
+    the Invoice panel's Billed row shows how many), so the user's own count is not offered in the ▾ list:
+    picked, it would be a number typed in, the day's count on every agreement. A number the user typed stays
+    (it is then what the user's invoice bills, and the day's pages on the agreements: Job.pages_typed),
+    unless it is the pages the invoice bills anyway (Job.own_pages) or the count itself: then it is the count
+    again (the user's own pages billed). Such a "typed" count came from a record of an older version opened again while one of its
+    documents had moved, from the suggestion then shown picked from the menu, or from the count typed again."""
     counts = [transcript_pages(d.ing) for d in job.transcripts()]
-    own = job.own_pages() if counts else 0
-    if own and own != sum(counts):
-        value, whole = str(own), str(sum(counts))
-        case.fields["est_pages"] = FieldState(value, SRC_PDF, 0.9, [value, whole] + [
-            a for a in fs.alternatives if a not in (value, whole)])
-    elif len(counts) > 1:
-        total = str(sum(counts))
-        case.fields["est_pages"] = FieldState(total, SRC_PDF, 0.9,
-                                              [total] + [a for a in fs.alternatives if a != total])
+    if not counts:
+        return
+    fs = case.fields["est_pages"]
+    value = str(sum(counts))
+    own = str(job.own_pages() or sum(counts))
+    if fs.source == SRC_USER and not job.is_the_count(fs.value):
+        return  # typed by the user: theirs, and what their invoice bills (Job.pages_typed)
+    case.fields["est_pages"] = FieldState(value, SRC_PDF, 0.95, list(dict.fromkeys(
+        [value] + [a for a in fs.alternatives if a and a != own])))
 
 
 def group(docs: list[Doc], s: Settings, jobs: list[Job] | None = None) -> list[Job]:
@@ -1058,7 +1256,8 @@ def _first_day(job: Job) -> tuple:
 def invoice_groups(jobs: list[Job], s: Settings) -> list[list[Job]]:
     """The jobs that share an invoice, earliest day first. With Settings.invoice_joint, every day of one case
     (the same index number, or a matching caption); otherwise each job alone. Jobs with no pages to bill (no
-    transcript, or the Pages field says 0) have no invoice and are left out."""
+    transcript and no pages typed, or the Pages field says 0: Job.invoice_pages) have no invoice and are left
+    out."""
     billable = [j for j in jobs if j.invoice_pages()]
     if not s.invoice_joint:
         return [[j] for j in billable]
@@ -1075,9 +1274,30 @@ def invoice_groups(jobs: list[Job], s: Settings) -> list[list[Job]]:
     return groups
 
 
+def same_entries(group: list[Job]) -> None:
+    """The same firm or attorney on several days of a case is one entry, with one Attorney.key() on every day
+    (the days' invoices, agreements and Excerpts... rows name it by its key): a row of one day that is another
+    day's firm written without it ('Dana Smith' when a day's title page says 'Dana Smith' of 'Smith Law'), or
+    with its name spelled otherwise ('Smith Law' and 'Smith Law Firm, PLLC'), gets that firm, spelled as on the
+    first day that has it (with its address when the row has none), and its Excerpts... rows follow the new key."""
+    rows = [(j, a) for j in group for a in j.case.attorneys if not a.is_placeholder() and a.key()]
+    for i, (j, a) in enumerate(rows):
+        at, home = next(((n, b) for n, (k, b) in enumerate(rows) if k is not j and b.firm and b.key() != a.key()
+                         and same_entry(a, b)), (None, None))
+        if home is None or (a.firm and at > i):
+            continue  # (a firm spelled two ways keeps the spelling of the first day that has it)
+        old = a.key()
+        a.firm, a.address = home.firm, a.address or home.address
+        if a.key() != old:
+            j.rename_in_portions(old, a.key())
+
+
 def group_attorneys(group: list[Job]) -> list[Attorney]:
     """The attorneys ticked on any day of the group who get an invoice, each once (see
-    CaseInfo.invoice_orderers: no placeholders or blank rows)."""
+    CaseInfo.invoice_orderers: no placeholders or blank rows; the same firm on two days is one, see
+    same_entries)."""
+    if len(group) > 1:
+        same_entries(group)
     out, seen = [], set()
     for job in group:
         for a in job.case.invoice_orderers():
@@ -1096,6 +1316,7 @@ def joint_invoice(group: list[Job]) -> tuple[CaseInfo, InvoiceOpts]:
     first = group[0]
     if len(group) == 1:
         return first.case, first.invoice_opts()
+    same_entries(group)  # (before the days' orders are read: their keys may change)
     case = deepcopy(first.case)
     days = [d for job in group for d in job.invoice_days()]
     case.set("dates", ", ".join(day for day, _ in days if day), case.fields["dates"].source)
@@ -1107,6 +1328,7 @@ def joint_invoice(group: list[Job]) -> tuple[CaseInfo, InvoiceOpts]:
     opts.reporters = reporters_text(day_reporters(opts.orders))
 
     def own(name: str):
+        """The job choice `name` of the earliest day that has one (None: none has, as Settings say)."""
         return next((getattr(j, name) for j in group if getattr(j, name) is not None), None)
 
     opts.email, opts.index, opts.show = own("invoice_email"), own("invoice_index"), own("invoice_show")
@@ -1122,14 +1344,18 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
               batch: list[Job] | None = None, outputs: list[str] | None = None, ledger=None,
               math: list | None = None) -> list[Path]:
     """Makes the outputs (default: Settings.outputs) of every job; problems are recorded in job.error
-    instead of stopping the batch. A job without a transcript gets no invoice or run sheet (noted in job.error).
+    instead of stopping the batch. A job without a transcript gets no run sheet, nor an invoice unless its pages
+    were typed in (noted in job.error).
     A job already invoiced (Job.invoiced) is not billed again, nor an attorney a stopped run invoiced already
     (Job.invoiced_keys). A job whose invoice is held (Job.invoice_hold: Excerpts... rows to check, or whose
     pages to bill) gets no invoice, nor the days of a case with a day nobody is ticked on (group_problem): their
     errors say so. Each reporter Whose pages... bills gets their own invoices (joint_invoice_sets). `batch` is the
     whole batch when only some of its jobs are filled: jobs for several days of one case get the date in their
     file names. ledger: the records to number and enter the invoices in (default: the user's; the preview's
-    own copy, see Ledger.preview_copy); math: gets (FirmInvoice, number) of each invoice made (see generate)."""
+    own copy, see Ledger.preview_copy); math: gets (FirmInvoice, number) of each invoice made (see generate).
+    The days of a case that share an invoice get their agreements and MOFR once for all of them (form_groups,
+    case_forms; made after the days' own files, each listed under the days it covers): a day that is not among
+    `jobs` is not on them."""
     outputs = list(s.outputs if outputs is None else outputs)
     ledger = ledger or ledger_for(s)
     names = [j.name_key() for j in batch or jobs]
@@ -1137,7 +1363,10 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
     to_bill = [j for j in jobs if not j.invoiced and id(j) not in unchecked]
     joint = [g for g in invoice_groups(to_bill, s) if len(g) > 1] if "invoice" in outputs else []
     in_joint = {id(j) for g in joint for j in g}  # these days are billed together, after the loop
-    steps = len(jobs) + len(joint)
+    # the days whose agreements and MOFR are made once for all of them (form_groups), after the loop too
+    trials = form_groups(jobs, s) if set(FORMS) & set(outputs) else []
+    in_trial = {id(j) for g in trials for j in g}
+    steps = len(jobs) + len(trials) + len(joint)
     done: list[Path] = []
     started: list[Path] = []  # run sheets started by this batch: the other days of the trial go on them too
     made_by_group: dict[int, Path] = {}  # the run sheet of each case the window asked about (Job.runsheet_group)
@@ -1152,6 +1381,9 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             unchecked_here = id(job) in unchecked and "invoice" in want and not billed_elsewhere
             if billed_elsewhere or unchecked_here:
                 want = [o for o in want if o != "invoice"]
+            if id(job) in in_trial:  # its agreements and MOFR cover the other days of the case too
+                want = [o for o in want if o not in FORMS]
+            job.refresh_copies(s)  # (the parties as they are now, whatever changed the ticks)
             sheet = job.runsheet_opts(s) if "runsheet" in want else None
             if sheet and job.runsheet_group in made_by_group:
                 sheet.target = str(made_by_group[job.runsheet_group])
@@ -1159,11 +1391,16 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
                 sheet.target = _started_for(job, started, s)
             job.saved = generate(job.case, s, out_dir_for(job, s), want, job.invoice_sets(), ledger,
                                  dated=names.count(job.name_key()) > 1, runsheet=sheet,
-                                 folders=input_folders(job), invoiced=keys, origin=job_origin(job), math=math)
+                                 folders=input_folders(job), invoiced=keys, origin=job_origin(job), math=math,
+                                 ordered=job.ordered_pages())
             job.invoiced |= "invoice" in want
-            left_out = [OUTPUTS[o].lower() for o in outputs if o not in want and not job.unneeded(o)
-                        and not (o == "invoice" and (billed_elsewhere or unchecked_here))]
-            problems = [f"no {' or '.join(left_out)}: {job.left_out_reason()}"] if left_out else []
+            left_out = [o for o in outputs if o not in want and not job.unneeded(o)
+                        and not (o == "invoice" and (billed_elsewhere or unchecked_here))
+                        and not (o in FORMS and id(job) in in_trial)]
+            why: dict[str, list[str]] = {}  # the outputs left out by reason ("no invoice or run sheet: ...")
+            for o in left_out:
+                why.setdefault(job.left_out_reason(o), []).append(OUTPUTS[o].lower())
+            problems = [f"no {' or '.join(kinds)}: {reason}" for reason, kinds in why.items()]
             if unchecked_here and job.portions_problem():
                 problems.append(f"{NOT_INVOICED} check Excerpts… for {job.case.get('dates') or job.title()}")
             elif unchecked_here:
@@ -1182,10 +1419,31 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
                 made_by_group.setdefault(job.runsheet_group, sheet.path)
             if sheet.created and sheet.path not in started:
                 started.append(sheet.path)
+    for k, g in enumerate(trials):  # one agreement per attorney and one MOFR for all the days of a case
+        if progress:
+            progress(len(jobs) + k, steps, f"Forms for {g[0].title()}")
+        forms: list[tuple[CaseForm, list[Job]]] = []
+        try:
+            forms = case_forms(g, s, outputs)
+            made = make_forms([f for f, _ in forms], s, out_dir_for(g[0], s), ledger,
+                              origin={"sources": [d.path for j in g for d in j.docs if d.path], "joint": True})
+            problem = ""
+        except Exception as e:
+            made = list(getattr(e, "made", []))
+            problem = f"{type(e).__name__}: {e}"  # every day of it says so
+            log_error("could not make the forms for several days of a case", e)
+        for (_, covered), path in zip(forms, made):  # each form is listed under the days it covers
+            for job in covered:
+                if path not in job.saved:
+                    job.saved.append(path)
+        if problem:
+            for job in g:
+                job.error = "; ".join(x for x in (job.error, problem) if x)
+        done += [p for p in made if p not in done]
     for k, g in enumerate(joint):  # one invoice for all the days of a case
         first = g[0]
         if progress:
-            progress(len(jobs) + k, steps, f"Invoice for {first.title()}")
+            progress(len(jobs) + len(trials) + k, steps, f"Invoice for {first.title()}")
         keys = []  # the attorneys invoiced
         held = group_problem(g)
         if held:  # a day with nobody ticked: no invoice until it says who ordered it
@@ -1244,15 +1502,119 @@ def group_problem(group: list[Job]) -> str:
     return f"nobody is ticked on {days}: tick who ordered {'that day' if len(empty) == 1 else 'those days'}"
 
 
+FORMS = ("agreement", "mofr")  # the outputs form_groups makes once for several days
+
+
+def form_groups(jobs: list[Job], s: Settings) -> list[list[Job]]:
+    """The days whose minute agreements and MOFR fill_jobs makes once for all of them (case_forms) instead of a
+    set per day: with Settings.forms_per_case and the joint invoice (Settings.invoice_joint), the days of a case
+    that share an invoice (invoice_groups: those with pages to bill), less a day whose invoice is held
+    (Excerpts... to check, or whose pages to bill: what its attorneys ordered isn't known yet) and a case with a
+    day nobody is ticked on (group_problem: it gets no joint invoice either). Days already invoiced count, as
+    every run makes the forms of its days again. Each group has two days or more; the other days keep a set of
+    forms of their own."""
+    if not (s.forms_per_case and s.invoice_joint):
+        return []
+    days = [j for j in jobs if not j.invoice_hold()]
+    return [g for g in invoice_groups(days, s) if len(g) > 1 and not group_problem(g)]
+
+
+def _latest(jobs: list[Job], key: str) -> FieldState | None:
+    """The field `key` of the job whose date in it is the latest (None when no job has a date there)."""
+    dated = [(_date_key(found[0][2]), i) for i, j in enumerate(jobs) if (found := find_dates(j.case.get(key)))]
+    return deepcopy(jobs[max(dated)[1]].case.fields[key]) if dated else None
+
+
+def case_forms(group: list[Job], s: Settings, outputs) -> list[tuple[CaseForm, list[Job]]]:
+    """The minute agreements and the MOFR of a group of days (form_groups), with the days each covers (it is
+    listed under them, see fill_jobs), as `outputs` asks for them. One agreement per attorney ticked on any of
+    the days who ordered pages (CaseInfo.invoice_orderers: the same attorney entered twice gets one; with nobody
+    ticked on any day, one with a blank attorney block): it lists only the days that attorney ordered something
+    on (with Excerpts..., a run of pages), earliest first, and its Est. number of pages is the pages it ordered
+    on them, every page whoever wrote it (Job.ordered_days: the whole day, or its runs of an excerpt; the Pages
+    field's number when typed); its invoices bill only their reporter's pages of them. One MOFR lists every
+    day, its pages those ordered by anyone on each day, added up. The rest is the first day's case, as on the
+    joint invoice (court, part, judge, case name, index, speed, rate), with No. of copies on every one of these
+    forms the ordering parties of the joint invoice (its Parties number: set on a day, else every attorney
+    ticked on any of the days; unless typed on the first day), the proceeding types of all the days covered
+    and the latest estimated delivery date among them (every day's transcript is promised by then)."""
+    want = [o for o in FORMS if o in outputs]
+    if not want:
+        return []
+    if len(group) > 1:
+        same_entries(group)  # (before the days' orders are read: their keys may change)
+    reporters = [r for j in group for r in j.bill_reporters()]
+    who = "me" if "me" in reporters else reporters[0]  # (another reporter's pages only: theirs, as generate does)
+    # each day of the group with the pages each attorney ordered on it (every page, whoever wrote it)
+    days: list[tuple[Job, str, dict[str, int]]] = [(j, d, got) for j in group for d, got in j.ordered_days()]
+    base = deepcopy(group[0].case)
+    base.attorneys = [deepcopy(a) for a in group_attorneys(group)]
+    # every form of the trial: the parties of the joint invoice (joint_invoice: the Parties number of the earliest
+    # day with one, else every attorney ticked on any of the days)
+    refresh_copies(base, s, next((j.parties for j in group if j.parties), 0))
+
+    def covering(picked: list[int]) -> list[Job]:
+        """The days (jobs) of these entries of `days`, each once, in order (a job of several days has several)."""
+        out: list[Job] = []
+        for i in picked:
+            if not any(days[i][0] is j for j in out):
+                out.append(days[i][0])
+        return out
+
+    def form_case(jobs: list[Job], dates: str, pages: int) -> CaseInfo:
+        """The case as a form of these days shows it: `base` with their dates and pages, their proceeding types
+        (and Other text) together, and the latest delivery date among them."""
+        case = deepcopy(base)
+        case.set("dates", dates or base.get("dates"), base.fields["dates"].source)
+        case.set("est_pages", str(pages), SRC_DERIVED)
+        case.proc_types = set().union(*(j.case.proc_types for j in jobs))
+        other = [j.case.get("proc_other").strip() for j in jobs if j.case.get("proc_other").strip()]
+        if other:
+            case.set("proc_other", ", ".join(dict.fromkeys(other)), base.fields["proc_other"].source)
+        latest = _latest(jobs, "delivery_date")
+        if latest is not None:
+            case.fields["delivery_date"] = latest
+        return case
+
+    def mine(jobs: list[Job]) -> int:
+        """The pages of these days the user's invoices bill (another reporter's, when the user bills none), for
+        the records."""
+        return sum(j.billed_by(who).invoice_pages() for j in jobs)
+
+    out: list[tuple[CaseForm, list[Job]]] = []
+    if "agreement" in want:
+        orderers = base.invoice_orderers()
+        for atty in orderers:
+            k = "" if atty is None else atty.key()
+            picked = [i for i, (_, _, got) in enumerate(days) if got.get(k, 0) > 0]
+            if not picked:
+                continue  # ordered no pages on any of the days: no agreement (nor invoice)
+            pages = sum(days[i][2][k] for i in picked)
+            jobs = covering(picked)
+            form = CaseForm("agreement", form_case(jobs, dates_text(days[i][1] for i in picked), pages), atty,
+                            pages, mine(jobs), sum(j.transcript_pages() for j in jobs))
+            out.append((form, jobs))
+    if "mofr" in want:
+        pages = sum(got.get("", 0) for _, _, got in days)
+        case = form_case(group, dates_text(j.case.get("dates") for j in group), pages)
+        out.append((CaseForm("mofr", case, None, pages, mine(group), sum(j.transcript_pages() for j in group)),
+                    list(group)))
+    return out
+
+
 def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
     """How many files fill_jobs will make for these jobs: the days of one case share a run sheet, and (as
     Settings.invoice_joint says) the invoices, one for each attorney ticked on any of its days who ordered
     pages and was not invoiced yet (and the set of each other reporter Whose pages... bills, see
     joint_invoice_sets). Days already invoiced (Job.invoiced), and days whose invoice is held
     (Excerpts... rows to check, or Whose pages... to choose: Job.invoice_hold), get none. With
-    Settings.invoice_detailed_copy an invoice without the granular detail counts twice (its detailed copy)."""
+    Settings.invoice_detailed_copy an invoice without the granular detail counts twice (its detailed copy). The
+    days whose agreements and MOFR are made once for all of them (form_groups) count those of case_forms."""
     s = s or Settings()
-    count = sum(j.file_count(outputs) for j in jobs)
+    trials = form_groups(jobs, s) if set(FORMS) & set(outputs) else []
+    in_trial = {id(j) for g in trials for j in g}
+    count = sum(j.file_count([o for o in outputs if not (o in FORMS and id(j) in in_trial)]) for j in jobs)
+    count += sum(len(case_forms(g, s, outputs)) for g in trials)
     if "invoice" in outputs:
         groups = invoice_groups([j for j in jobs if not j.invoiced and not j.invoice_hold()], s)
         for g in groups:

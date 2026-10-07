@@ -42,6 +42,9 @@ QLabel#kpiValue { font-size: 17pt; font-weight: 700; }
 QLabel#kpiValue[tone="ok"] { color: {ok}; }
 QLabel#kpiValue[tone="warn"] { color: {review}; }
 QLabel#problem { color: {review}; font-weight: 600; }
+QLabel#subhead { font-weight: 700; color: {card_title}; padding-top: 6px; padding-bottom: 2px; border-bottom: 1px solid {border}; }
+QLabel#speedAsk { background: {warn_bg}; color: {warn}; border-radius: 6px; padding: 4px 8px; font-weight: 600; }
+QLabel#payTable { background: {drop_bg}; border: 1px solid {border}; border-radius: 8px; padding: 6px 10px; }
 
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
   background: {input}; border: 1px solid {input_border}; border-radius: 6px; padding: 5px 8px;
@@ -50,6 +53,7 @@ QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid {accent}; }
 QLineEdit[review="true"], QPlainTextEdit[review="true"] { border: 1px solid {review}; background: {review_bg}; }
 QLineEdit[missing="true"], QPlainTextEdit[missing="true"] { border: 1px dashed {review}; }
+QComboBox[ask="true"] { border: 1px solid {review}; background: {review_bg}; }
 QComboBox::drop-down { border: none; width: 22px; }
 QSpinBox { padding-right: 4px; }
 QSpinBox::up-button, QSpinBox::down-button { width: 0; border: none; }
@@ -116,6 +120,13 @@ QProgressBar::chunk { background: {accent}; border-radius: 2px; }
 QScrollBar:vertical { background: transparent; width: 10px; }
 QScrollBar::handle:vertical { background: {input_border}; border-radius: 5px; min-height: 30px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: transparent; height: 10px; }
+QScrollBar::handle:horizontal { background: {input_border}; border-radius: 5px; min-width: 30px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QTabBar::scroller { width: 52px; }
+QTabBar QToolButton { background: {card}; border: 1px solid {border}; border-radius: 4px; padding: 0; margin: 2px 1px; }
+QTabBar QToolButton:hover { background: {sel}; border: 1px solid {accent}; }
+QTabBar QToolButton:disabled { background: {bg}; }
 QMenuBar { background: {bg}; padding: 2px 10px; }
 QMenuBar::item { padding: 4px 10px; border-radius: 4px; background: transparent; }
 QMenuBar::item:selected { background: {hover}; }

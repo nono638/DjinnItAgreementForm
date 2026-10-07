@@ -1,12 +1,13 @@
 """Drives the main window (off screen): several documents become a batch of jobs; outputs that need a
 transcript; the Outputs box (each output's options, parties, Extras... and Customize...) and the Order card's
-Speeds offered; the days of a case on one invoice, billed once by Generate all; Excerpts... (which attorney
-ordered which pages) and the prices of each attorney: its rows following a renamed attorney, kept to be checked
-when an attorney is unticked or the pages are typed again, and the days it shows (those of the invoice);
-a document added while Generate all runs, and Generate tried again after a problem; the granular
-detail box of each day; File -> Lock finished PDFs; the Invoice panel in a small window; the big yin-yang picture
-when the window first shows; the Records window (paid, amounts changed, only amounts taken); and background work
-that ends while the user is busy in the window."""
+Speeds offered; the days of a case on one invoice, billed once by Generate all; Excerpts... (which firm ordered
+which pages) and the prices of each: its rows following a renamed firm (an attorney's name fixed is the same
+firm), kept to be checked when an attorney is unticked or the pages are typed again, and the days it shows (those
+of the invoice); a document added or an attorney ticked while Generate all runs, and Generate tried again after a
+problem; the granular detail box of each day; File -> Lock finished PDFs; the Invoice panel in a small window;
+the big yin-yang picture when the window first shows; the Records window (paid, amounts changed, only amounts
+taken); a preview whose records can't be opened; and background work that ends while the user is busy in the
+window."""
 import os
 import time
 
@@ -424,7 +425,7 @@ def smith(checked=True):
     return Attorney(name="Dana Smith", firm="Smith Law", checked=checked)
 
 
-A, B = "alex b counsel", "dana smith"
+A, B = counsel().key(), smith().key()  # by the firm: "counsel and counsel", "smith law"
 
 
 def one_day_two_attorneys(window, tmp_path, pages=30):
@@ -440,11 +441,11 @@ def one_day_two_attorneys(window, tmp_path, pages=30):
 def test_who_ordered_splits_the_day_and_the_prices_show_each_attorney(window, tmp_path, monkeypatch):
     one_day_two_attorneys(window, tmp_path)
     assert window.inv_who.isEnabled() and window.inv_parties.isEnabled()
-    assert window.inv_info.text() == "30 pp. · Regular $124.50 · Expedite $147.00 each"  # 30 x (4.30 / 2 + 2)
+    assert window.inv_info.text() == "30 pp. · Regular $124.50 · Expedite (form) $147.00 each"  # 30 x (4.30 / 2 + 2)
     split(window, monkeypatch, [(10, [A]), (30, [A, B])])
     # Alex: (10 + 20 / 2) x 4.30 + 30 + 30 = 146.00; Dana: 10 x 4.30 + 20 + 20 = 83.00
-    assert window.inv_info.text().splitlines() == ["30 pp.", "Alex B. Counsel: Regular $146.00 · Expedite $174.00",
-                                                   "Dana Smith: Regular $83.00 · Expedite $98.00"]
+    assert window.inv_info.text().splitlines() == ["30 pp.", "Alex B. Counsel: Regular $146.00 · Expedite (form) $174.00",
+                                                   "Dana Smith: Regular $83.00 · Expedite (form) $98.00"]
     assert not window.inv_parties.isEnabled() and window.inv_who.text().startswith("✓")
     split(window, monkeypatch, [(30, [A, B])])  # everyone ordered every page: no rows kept
     assert window.cur.portions is None and window.inv_parties.isEnabled()
@@ -470,8 +471,8 @@ def test_the_days_of_a_case_bill_each_attorney_for_its_own_days(window, tmp_path
     window._refresh_outputs()
     # Alex: 30 x (4.30 + 4 x 1.00) = 249.00, then (30 x 4.30) + 60 + 60 + 30 + 30 = 309.00; Dana: 309.00
     assert window.inv_info.text().splitlines() == ["Generate all: one invoice for 2 days (90 pp.)",
-                                                   "Alex B. Counsel: Regular $558.00 · Expedite $654.00",
-                                                   "Dana Smith: Regular $309.00 · Expedite $360.00"]
+                                                   "Alex B. Counsel: Regular $558.00 · Expedite (form) $654.00",
+                                                   "Dana Smith: Regular $309.00 · Expedite (form) $360.00"]
     assert window.inv_who.isEnabled()  # Excerpts… shows both days, whoever is ticked on the day shown
 
 
@@ -508,7 +509,7 @@ def test_records_window_changes_amounts(window, tmp_path, monkeypatch):
 
 
 def test_each_attorneys_prices_fit_in_a_small_window(window, tmp_path):
-    """Four speeds, a line for each attorney: the Invoice panel's text is not cut off at the smallest size."""
+    """Four speeds, lines for each firm: the Invoice panel's text is not cut off at the smallest size."""
     if not os.environ.get("QT_QPA_FONTDIR"):
         pytest.skip("needs the real fonts to measure the text (see conftest.qt)")
     window.output_boxes["invoice"].setChecked(True)
@@ -522,7 +523,7 @@ def test_each_attorneys_prices_fit_in_a_small_window(window, tmp_path):
     for _ in range(10):
         QtWidgets.QApplication.processEvents()
     label = window.inv_info
-    assert label.text().count("\n") == 4  # what Generate all does, then two lines for each attorney
+    assert label.text().count("\n") == 4  # what Generate all does, then two lines for each firm
     assert label.width() >= label.sizeHint().width() and label.height() >= label.sizeHint().height()
     window.close()
 
@@ -556,12 +557,15 @@ def test_who_ordered_follows_a_rename_and_needs_checking_when_an_attorney_is_unt
     from minute_filler.deliver import ledger_for
     one_day_two_attorneys(window, tmp_path)
     split(window, monkeypatch, [(10, [A]), (30, [A, B])])
-    window.att.item(1, 1).setText("Dana M. Smith")  # a typo fixed in the attorney table
-    assert window.cur.portions == [(10, [A]), (30, [A, "dana m smith"])]
+    window.att.item(1, 1).setText("Dana M. Smith")  # a typo fixed in the attorney table: the same firm, key
+    assert window.cur.portions == [(10, [A]), (30, [A, B])]
+    assert "Dana M. Smith: Regular $83.00" in window.inv_info.text()
+    window.att.item(1, 2).setText("Smith Law Group")  # the firm's name changed: the rows follow it
+    assert window.cur.portions == [(10, [A]), (30, [A, "smith law group"])]
     assert "Dana M. Smith: Regular $83.00" in window.inv_info.text()
 
     window.att.item(1, 0).setCheckState(QtCore.Qt.Unchecked)  # Dana unticked: her pages are not Alex's
-    assert window.cur.portions == [(10, [A]), (30, [A, "dana m smith"])]
+    assert window.cur.portions == [(10, [A]), (30, [A, "smith law group"])]
     assert window.inv_info.text() == "⚠ Excerpts… needs checking (it names an attorney no longer ticked)"
     assert window.inv_who.isEnabled() and window.inv_who.text().startswith("⚠")
     window.output_boxes["agreement"].setChecked(False)
@@ -704,3 +708,33 @@ def test_the_amounts_dialog_takes_amounts_only(window):
     dlg.boxes["Regular"].setText("$1,250.00")
     dlg.accept()
     assert dlg.result() == QtWidgets.QDialog.Accepted and dlg.values() == {"Regular": "1250.00"}
+
+
+def test_an_attorney_ticked_while_generate_all_runs_is_billed_by_the_next_run():
+    """Ticked while the batch worked on a copy: the day was marked invoiced, so Generate all never billed the new
+    attorney (and Generate billed the first one again)."""
+    from copy import deepcopy
+    from dataclasses import replace
+    from minute_filler.batch import Job
+    from minute_filler.gui.main_window import _billed_by_copy, _billing_changed, _pages_changed
+    from minute_filler.models import Attorney
+    job = Job()
+    job.case.attorneys = [Attorney(name="Dana Smith", firm="Smith Law", checked=True)]
+    copy = replace(job, case=deepcopy(job.case))
+    job.case.attorneys.append(Attorney(name="Sam Poe", firm="Poe Law", checked=True))
+    assert _billing_changed(job, copy) and not _pages_changed(job, copy)
+    assert _billed_by_copy(copy) == ["smith law"]
+
+
+def test_a_preview_whose_records_cant_be_opened_leaves_the_window_usable(window, monkeypatch):
+    """The preview's copy of the records failed after the window was marked busy: Generate, Generate all and New
+    job were refused until the app was started again."""
+    from minute_filler.gui import main_window
+
+    class Broken:
+        def preview_copy(self, _folder):
+            raise OSError("the records can't be opened")
+    monkeypatch.setattr(main_window, "ledger_for", lambda _s: Broken())
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.No)
+    window._preview_batch([], {}, ["agreement"], lambda _shown: None)
+    assert not window.filling and window.work == 0

@@ -29,8 +29,8 @@ def test_transcript_cover_page():
     assert best(ex, "case_name") == ("Jane Roe v. X.Y. Holding Corporation and Acme Widget Metal & Glass Corp.")
     assert ex.proc_types.get("Trial", 0) >= 0.6
     assert best(ex, "est_pages") == "30"
-    names = {a.name for a in ex.attorneys}
-    assert names == {"Samuel R. Advocate", "Dana White", "Alex B. Counsel"}  # not the reporter
+    names = {a.name for a in ex.attorneys}  # one entry per firm, naming all its attorneys
+    assert names == {"Samuel R. Advocate, Dana White", "Alex B. Counsel"}  # not the reporter
     counsel = next(a for a in ex.attorneys if a.name == "Alex B. Counsel")
     assert counsel.firm == "Counsel & Counsel"
     assert counsel.party == "Defendants"

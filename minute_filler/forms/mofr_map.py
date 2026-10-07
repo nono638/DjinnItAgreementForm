@@ -2,7 +2,7 @@
 
 The form's fields are named "Text Field0".."Text Field35" and "Check Box0".."Check Box12"; each is
 mapped here by the label it sits on. Only the reporter's parts are filled: the header, Section I
-and the page count in Section III. The judge, counsel, clerk and auditor fill the rest.
+and the page count and speed boxes in Section III. The judge, counsel, clerk and auditor fill the rest.
 """
 
 TEXT = {

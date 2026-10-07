@@ -1,8 +1,9 @@
 """The app was DjinnItAgreementForm before 2.0: the first start under the new name carries the old settings
 folder over (settings, rate sheets, records, signature) and renames the folders under Documents named after it,
 and what the old version made (its PDFs, run sheets and settings files) is still recognised. Also the yin-yang
-that took the djinn's place: it swirls only while the app works. All names are made up; every folder is a
-temporary one (conftest.isolated_appdata)."""
+that took the djinn's place: it swirls while the app works and while it waits for documents, goes on a while
+after a quick read before the "ready" picture, and swirls once when the still picture is clicked. All names are
+made up; every folder is a temporary one (conftest.isolated_appdata)."""
 import json
 import os
 from pathlib import Path
@@ -196,15 +197,73 @@ def test_the_yin_yang_swirls_while_working_and_stops_when_done(make_window, qt):
     assert drop.movie.state() == QMovie.Running
 
 
-def test_the_yin_yang_is_still_while_the_app_waits(make_window, qt):
-    """At idle (nothing dropped yet) it swirled for ever, and said "Working on it…"."""
+def test_the_yin_yang_swirls_while_the_app_waits(make_window, qt):
+    """It swirls while waiting for documents too (it is the user's favourite), without saying "Working on it…"."""
     from PySide6.QtGui import QMovie
     from helpers import pat_settings
     s = pat_settings()
     s.use_ai, s.welcomed, s.show_yin = False, True, True
     win = make_window(s)
     win._set_status("Drop a document to begin", "")
-    assert win.drop.movie.state() == QMovie.NotRunning and win.drop.mood[0] == "idle"
+    assert win.drop.movie.state() == QMovie.Running and win.drop.mood[0] == "idle"
     assert not win.drop.yin.pixmap().isNull() and "Working" not in win.drop.yin.toolTip()
     win._set_status("Reading…", "busy")
-    assert win.drop.movie.state() == QMovie.Running
+    assert win.drop.movie.state() == QMovie.Running and win.drop.mood[0] == "working"
+
+
+def test_a_quick_read_swirls_a_while_before_the_ready_picture(make_window, qt):
+    """A document read in a blink showed the swirl for a blink: it goes on for linger_ms; a problem shows at
+    once, and so does anything asked for meanwhile."""
+    import time
+    from PySide6.QtGui import QMovie
+    from PySide6.QtWidgets import QApplication
+    from helpers import pat_settings
+    s = pat_settings()
+    s.use_ai, s.welcomed = False, True
+    drop = make_window(s).drop
+    drop.linger_ms = 300
+    drop.set_mood("working")
+    drop.set_mood("done")
+    assert drop.mood[0] == "working" and drop.movie.state() == QMovie.Running  # still swirling
+    end = time.monotonic() + 3
+    while drop.mood[0] != "done" and time.monotonic() < end:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert drop.mood[0] == "done" and drop.movie.state() == QMovie.NotRunning
+    drop.set_mood("working")
+    drop.set_mood("stumped")  # a problem: at once
+    assert drop.mood[0] == "stumped"
+    drop.set_mood("working")
+    drop.set_mood("done")
+    drop.set_mood("working")  # another document before the swirl ended: no "ready" picture in between
+    QApplication.processEvents()
+    time.sleep(0.4)
+    QApplication.processEvents()
+    assert drop.mood[0] == "working"
+
+
+def test_a_click_on_the_still_yin_yang_swirls_it_for_a_turn(make_window, qt):
+    """Just for fun: a click on the ready (or stumped) picture swirls it once, then that picture is back."""
+    import time
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QMovie
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from helpers import pat_settings
+    s = pat_settings()
+    s.use_ai, s.welcomed = False, True
+    drop = make_window(s).drop
+    drop.linger_ms = 300
+    drop.set_mood("stumped")
+    QTest.mouseClick(drop.yin, Qt.LeftButton, pos=drop.yin.rect().center())
+    assert drop.mood[0] == "working" and drop.movie.state() == QMovie.Running and drop.wanted == "stumped"
+    end = time.monotonic() + 3
+    while drop.mood[0] != "stumped" and time.monotonic() < end:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert drop.mood[0] == "stumped" and drop.movie.state() == QMovie.NotRunning
+    QTest.mouseClick(drop.yin, Qt.LeftButton, pos=QPoint(1, 1))  # beside the picture: nothing
+    assert drop.mood[0] == "stumped"
+    drop.set_mood("idle")  # already swirling: a click changes nothing
+    QTest.mouseClick(drop.yin, Qt.LeftButton, pos=drop.yin.rect().center())
+    assert drop.mood[0] == "idle" and drop.wanted == "idle"

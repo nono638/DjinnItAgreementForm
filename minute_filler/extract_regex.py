@@ -3,7 +3,9 @@
 Every finding is a Candidate with a confidence in [0, 1]; merge.py picks the
 winner and keeps the rest as alternatives for the user to choose from.
 The transcript layout helpers here (strip_line_numbers, title_page_count) are
-also used by runsheet.py.
+also used by runsheet.py and batch.py. A title page's APPEARANCES are read by
+appearances.py; the rules for telling two entries are one firm or person
+(dedupe_attorneys, same_entry, merge_entry) are also used by merge.py and batch.py.
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ import re
 from datetime import date, timedelta
 
 from .ingest import Ingested
-from .models import Attorney, Extraction, SRC_PDF, SRC_REGEX
+from .models import Attorney, Extraction, SRC_PDF, SRC_REGEX, firm_key, join_names
 from .settings import Profile
 from .takes import body_pages
 
@@ -213,17 +215,46 @@ _COUNSEL = re.compile(r"(?im)\besq\b|\battorneys?\s+for\b|^\s*(?:\d{1,2}\s+)?by\
 
 def strip_line_numbers(text: str) -> tuple[str, bool]:
     """Removes the line numbers some transcripts print in front of the text of each line ("17    SMITH LAW
-    GROUP"), so that the rules see the text alone. Returns (text, True) when the lines were numbered that
-    way; text whose numbers stand on lines of their own, or that has none, comes back unchanged."""
+    GROUP"; with a single space, as OCR reads a page: _strip_ocr_line_numbers), so that the rules see the
+    text alone. Returns (text, True) when the lines were numbered that way; text whose numbers stand on lines
+    of their own, or that has none, comes back unchanged with False."""
     lines = text.split("\n")
     hits = [(i, m) for i, l in enumerate(lines) if (m := _LINE_NO.match(l))]
     nums = [int(m.group(1)) for _, m in hits]
     counted = any(nums[k:k + 5] == [1, 2, 3, 4, 5] for k in range(len(nums)))
     if not counted or not any(m.end() < len(lines[i]) for i, m in hits):
-        return text, False
+        return _strip_ocr_line_numbers(lines)
     for i, m in hits:
         lines[i] = lines[i][m.end():]
     return "\n".join(lines), True
+
+
+# A line number followed by one space, as text recognition (OCR) reads a numbered page: "9 COUNSEL & COUNSEL"
+_OCR_LINE_NO = re.compile(r"^[ \t]{0,4}(\d{1,2})(?:[ \t]+(?=\S)|[ \t]*$)")
+
+
+def _strip_ocr_line_numbers(lines: list[str]) -> tuple[str, bool]:
+    """strip_line_numbers for numbers followed by a single space ("9 COUNSEL & COUNSEL, LLP"). A street number
+    looks the same ("12 Court Street"), so a number is only taken for the line's when the page counts 1, 2, 3,
+    4, 5 that way and the number goes on from the last one taken (by 1 to 4, from 1 on each page, up to 28)."""
+    hits = [(i, int(m.group(1)), m) for i, l in enumerate(lines) if (m := _OCR_LINE_NO.match(l))]
+    nums = [n for _, n, _ in hits]
+    if not any(nums[k:k + 5] == [1, 2, 3, 4, 5] for k in range(len(nums))):
+        return "\n".join(lines), False
+    out, last, taken = list(lines), 0, 0
+    page_starts = {i for i, l in enumerate(lines) if "\f" in l}
+    hit_at = {i: (n, m) for i, n, m in hits}
+    for i, l in enumerate(lines):
+        if i in page_starts:
+            last = 0
+        if i in hit_at:
+            n, m = hit_at[i]
+            if 0 < n - last <= 4 and n <= 28:
+                out[i] = l[m.end():]
+                last, taken = n, taken + (m.end() < len(l))
+    if taken < 5:  # (numbers on lines of their own, or no numbering: nothing to remove)
+        return "\n".join(lines), False
+    return "\n".join(out), True
 
 
 def title_page_count(text: str) -> int:
@@ -282,12 +313,13 @@ def norm_index(num, yr) -> str | None:
 
 
 # Words that show a delivery speed was asked for. The rules read the stricter phrases in _order_terms; the AI's
-# answer is only kept when one of these is in the text.
+# answer is only kept when one of these is in the text, as a whole word ("irregular" and "abnormal" ask for no
+# speed).
 DELIVERY_WORDS = {
-    "Regular": r"regular|standard|normal",
-    "Expedited": r"expedit|rush|asap|urgent",
-    "Daily": r"daily|overnight|next[- ]day",
-    "Immediate": r"immediate|same[- ]day|hourly",
+    "Regular": r"\b(?:regular|standard|normal)\b",
+    "Expedited": r"\b(?:expedit\w*|rush|asap|urgent)\b",
+    "Daily": r"\b(?:daily|overnight|next[- ]day)\b",
+    "Immediate": r"\b(?:immediate\w*|same[- ]day|hourly)\b",
 }
 
 
@@ -698,20 +730,22 @@ class RegexExtractor:
     # ----- delivery, copies, rate
     def _order_terms(self, text: str, ex: Extraction) -> None:
         """What was ordered, from the wording of an e-mail: delivery speed (expedited, daily, immediate,
-        regular), number of copies ('original and 2 copies') and a rate per page.
+        regular), number of copies ('original and 2 copies') and a rate per page. Each speed found keeps
+        the words that asked for it as its note ('daily copy').
 
         On an invoice it reads the totals it lists per speed ('Regular Rate: $94.50', 'Expedited Rate: ...');
         merge.apply_defaults works the page count out from them.
         """
         if self.kind in ("email", "text") and not self.is_invoice:
-            if re.search(r"(?i)\b(expedit\w*|rush)\b", text):
-                ex.add("delivery", "Expedited", SRC_REGEX, 0.8)
-            if re.search(r"(?i)\b(daily\s+(copy|delivery|transcript)|overnight|next[- ]day)\b", text):
-                ex.add("delivery", "Daily", SRC_REGEX, 0.75)
-            if re.search(r"(?i)\b(immediate(ly)?\s+(copy|delivery|transcript)|same[- ]day|hourly)\b", text):
-                ex.add("delivery", "Immediate", SRC_REGEX, 0.75)
-            if re.search(r"(?i)\b(regular|standard|normal)\s+(delivery|turnaround|rate|copy)\b", text):
-                ex.add("delivery", "Regular", SRC_REGEX, 0.7)
+            # (the words found go with the speed: the window quotes them when it asks which speed the job is)
+            for speed, pattern, conf in (
+                    ("Expedited", r"(?i)\b(expedit\w*|rush)\b", 0.8),
+                    ("Daily", r"(?i)\b(daily\s+(copy|delivery|transcript)|overnight|next[- ]day)\b", 0.75),
+                    ("Immediate", r"(?i)\b(immediate(ly)?\s+(copy|delivery|transcript)|same[- ]day|hourly)\b", 0.75),
+                    ("Regular", r"(?i)\b(regular|standard|normal)\s+(delivery|turnaround|rate|copy)\b", 0.7)):
+                m = re.search(pattern, text)
+                if m:
+                    ex.add("delivery", speed, SRC_REGEX, conf, note=" ".join(m.group(0).split()))
             nums = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "a": 1, "an": 1}
             m = re.search(r"(?i)\boriginal\s+(?:and|&|\+)\s+(\d+|one|two|three|four|five|a)\s+cop", text)
             if m:
@@ -750,20 +784,38 @@ class RegexExtractor:
 
     # ----- attorneys
     def _attorneys(self, text: str) -> list[Attorney]:
-        """Attorneys and firms found in the text, as Attorney entries.
+        """Attorneys and firms found in the text, as Attorney entries: one per firm (its attorneys named
+        together), one per attorney without a firm.
 
-        In a transcript only the title page(s) are read (from APPEARANCES down, if it has that heading).
-        Lines of dialogue ('MR. POE: ...') are dropped everywhere. Then two passes. First, an invoice's
-        'To: Firm, attn: e-mail' line and an e-mail's 'From:' line become ticked entries (the orderer, the
-        sender). Then the text is cut into blocks at blank lines and headings such as APPEARANCES; in each
-        block names come from 'Name, Esq.' or
-        'BY:', the firm from FIRM_RE, and address, phone, fax, e-mail and role ('Attorney for the
+        A transcript's title page(s), or any text with an APPEARANCES heading, is read first by
+        appearances.parse_appearances. For a transcript that is all, when it finds anyone. An e-mail with a
+        title page pasted in keeps those entries, and the rules below read only what stands above the
+        heading, so that its sender is still found.
+
+        The rules below are for e-mails, invoices and other papers, and for a title page parse_appearances
+        can't read (then only the title page(s) are read, from APPEARANCES down). Lines of dialogue ('MR.
+        POE: ...') are dropped. Then two passes. First, an invoice's 'To: Firm, attn: e-mail' line and an
+        e-mail's 'From:' line become ticked entries (the orderer, the sender). Then the text is cut into
+        blocks at blank lines and headings such as APPEARANCES; in each block names come from 'Name, Esq.'
+        or 'BY:', the firm from FIRM_RE, and address, phone, fax, e-mail and role ('Attorney for the
         Plaintiff') from the other lines. Placeholders such as 'Unrepresented' become unticked entries.
-        The reporter's own block, e-mail and phone are skipped, and duplicates are merged by
-        dedupe_attorneys. Block entries are not ticked, because a transcript lists everyone who
-        appeared, not who ordered.
+        Block entries are not ticked, because a transcript lists everyone who appeared, not who ordered.
+        The reporter's own block, e-mail and phone are skipped, and entries of one firm or person are
+        merged by dedupe_attorneys.
         """
         found: list[Attorney] = []
+        listed: list[Attorney] = []
+        heading = re.search(r"(?im)^\s*A\s*P\s*P\s*E\s*A\s*R\s*A\s*N\s*C\s*E\s*S\b", text)
+        if self.is_transcript or heading:
+            # a title page: its APPEARANCES, one entry per firm (appearances.py); the rules below are for
+            # e-mails, invoices and other papers, and for a title page that parse_appearances can't read
+            from .appearances import parse_appearances
+            title = "\f".join(text.split("\f")[:title_page_count(text)])
+            listed = parse_appearances(title, self.tc, self.profile)
+            if listed and self.is_transcript:
+                return dedupe_attorneys(listed, self.profile)
+            if listed:  # an e-mail with a title page pasted in: its sender (who orders) is read from what
+                text = text[:heading.start()]  # stands above it, as in any e-mail
         if self.is_transcript:  # appearances are on the title page(s); the body is dialogue
             text = title_pages(text)
             m = re.search(r"(?im)^\s*A\s*P\s*P\s*E\s*A\s*R\s*A\s*N\s*C\s*E\s*S\b", text)
@@ -912,44 +964,126 @@ class RegexExtractor:
             if client_s and len(client_s) < 80 and not ADDRESS_RE.search(client_s):
                 party_s = f"{party_s} ({client_s})" if party_s else client_s
             address = "\n".join(self.tc(a) if upper or caps_names else a for a in addr[:3])
-            for n in names or [""]:
+            # a firm's attorneys share one entry (one party); attorneys without a firm are one each
+            for n in [join_names(list(dict.fromkeys(names)))] if firm_s else names or [""]:
                 found.append(Attorney(name=n, firm=firm_s, address=address, phone=phone, fax=fax, email=email_,
                                       party=party_s, source=SRC_REGEX, checked=False))
-        return dedupe_attorneys(found, self.profile)
+        return dedupe_attorneys(found + listed, self.profile)
 
 
 def dedupe_attorneys(atts: list[Attorney], profile: Profile | None = None) -> list[Attorney]:
-    """Merges entries that are the same person or firm and drops the reporter's own entry.
+    """Merges entries that are the same firm or person, so that every firm is one entry (one row, one party),
+    and drops the reporter's own entry.
 
-    Entries match on the same e-mail, the same name, the same firm when neither has a name, or the
-    same e-mail domain when a name or firm is missing on one of them. Blank fields of the first are
-    filled from the duplicate, and the merged entry stays ticked if either one was.
+    Entries match (same_entry) on the same e-mail; two entries with firms on the same firm (same_firm: also
+    'Counsel & Counsel, LLP' and 'COUNSEL & COUNSEL'), whoever they name; an entry without a firm joins one
+    with a firm when it names one of its attorneys, writes from its e-mail domain, or from a domain that
+    spells the firm's name (a public service such as gmail.com says nothing about a firm); two entries without a firm on a shared name, or the same e-mail domain when one
+    has no name. The first of two matching entries is kept: the attorneys of the other are added to its names
+    (a fuller spelling of a name replaces 'Mr. Counsel'), its blank fields are filled in, and it stays ticked
+    if either one was. Matching goes on until no two entries left match (A matching C only once B joined it).
     """
     out: list[Attorney] = []
     for a in atts:
         if is_reporter(profile, a.name, a.email):
             continue
-        match = None
-        for b in out:
-            same_email = a.email and b.email and a.email.lower() == b.email.lower()
-            same_name = a.name and b.name and _name_key(a.name) == _name_key(b.name)
-            same_firm_only = not a.name and not b.name and a.firm and a.firm.lower() == b.firm.lower()
-            email_domain_firm = (not a.name or not b.name) and a.email and b.email and \
-                a.email.split("@")[-1].lower() == b.email.split("@")[-1].lower() and (not a.firm or not b.firm)
-            if same_email or same_name or same_firm_only or email_domain_firm:
-                match = b
-                break
+        match = next((b for b in out if same_entry(a, b)), None)
         if match is None:
             out.append(a)
-            continue
-        for f in ("name", "firm", "address", "phone", "fax", "email", "party"):
-            if not getattr(match, f) and getattr(a, f):
-                setattr(match, f, getattr(a, f))
-        match.checked = match.checked or a.checked
+        else:
+            merge_entry(match, a)
+    merged = True
+    while merged:  # an entry filled in by a merge may now match another one
+        merged = False
+        for i, j in ((i, j) for i in range(len(out)) for j in range(i + 1, len(out))):
+            if same_entry(out[i], out[j]):
+                merge_entry(out[i], out.pop(j))
+                merged = True
+                break
     return out
 
 
-def _name_key(n: str) -> str:
-    """'first last' in lowercase, without punctuation or one-letter initials, so 'John Q. Smith' matches 'John Smith'."""
-    words = [w for w in re.sub(r"[^a-z ]", "", n.lower()).split() if len(w) > 1]
-    return f"{words[0]} {words[-1]}" if len(words) >= 2 else " ".join(words)
+def merge_entry(match: Attorney, a: Attorney) -> None:
+    """Merges entry `a` into `match` (see dedupe_attorneys): a's attorneys are added to match's names, match's
+    blank fields are filled from a, and match is ticked when either was."""
+    names = match.names()
+    for n in a.names():
+        twin = next((i for i, m in enumerate(names) if same_person(n, m)), None)
+        if twin is None:
+            names.append(n)
+        elif len(_name_words(n)) > len(_name_words(names[twin])):  # "John Jones" for "Mr. Jones"
+            names[twin] = n
+    if names != match.names():
+        match.name = join_names(names)
+    for f in ("name", "firm", "address", "phone", "fax", "email", "party"):
+        if not getattr(match, f) and getattr(a, f):
+            setattr(match, f, getattr(a, f))
+    match.checked = match.checked or a.checked
+
+
+# E-mail services anyone can use: their domain says nothing about a firm
+_PUBLIC_MAIL = re.compile(r"(?i)@(?:gmail|googlemail|yahoo|ymail|aol|hotmail|outlook|live|msn|icloud|me|mac|"
+                          r"verizon|optonline|optimum|att|comcast|earthlink|protonmail|proton|mail|gmx)\.")
+_HONORIFICS = {"mr", "ms", "mrs", "miss", "dr", "hon", "esq", "jr", "sr", "ii", "iii", "iv", "md"}
+
+
+def _name_words(n: str) -> list[str]:
+    """A name's words in lowercase, without punctuation, one-letter initials or titles (Mr., Esq., Jr.)."""
+    return [w for w in re.sub(r"[^a-z ]", " ", (n or "").lower()).split() if len(w) > 1 and w not in _HONORIFICS]
+
+
+def same_person(a: str, b: str) -> bool:
+    """Two spellings of one attorney's name: the same first and last name ('John Q. Smith', 'JOHN SMITH'), or
+    the same last name when one gives only that ('Mr. Smith')."""
+    wa, wb = _name_words(a), _name_words(b)
+    if not wa or not wb:
+        return False
+    if len(wa) >= 2 and len(wb) >= 2:
+        return (wa[0], wa[-1]) == (wb[0], wb[-1])
+    return wa[-1] == wb[-1]
+
+
+def same_firm(a: str, b: str) -> bool:
+    """Two spellings of one firm (firm_key): 'Example Law Group, P.C.' and 'EXAMPLE LAW GROUP', or one name
+    starting with the other ('Smith Law' and 'Smith Law Firm, PLLC')."""
+    ka, kb = firm_key(a), firm_key(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    short, long_ = sorted((ka.split(), kb.split()), key=len)
+    return len(short) >= 2 and long_[:len(short)] == short
+
+
+def _domain(email: str) -> str:
+    return email.rsplit("@", 1)[-1].lower() if "@" in (email or "") else ""
+
+
+def _domain_spells_firm(email: str, firm: str) -> bool:
+    """The e-mail's domain spells the firm's name: 'pc@counselcounsel.example' for 'Counsel & Counsel, LLP'
+    ('counselandcounsel' or 'counselcounsel'), 'x@smithlaw.example' for 'Smith Law Group'."""
+    if not email or _PUBLIC_MAIL.search(email):
+        return False
+    label = _domain(email).split(".")[0]
+    words = firm_key(firm).split()
+    if len(label) < 4 or not words:
+        return False
+    for compact in ("".join(words), "".join(w for w in words if w != "and")):
+        if compact.startswith(label) or (len(compact) >= 6 and label.startswith(compact)):
+            return True
+    return len(words[0]) >= 4 and len(words) >= 2 and label.startswith(words[0] + words[1][:3])
+
+
+def same_entry(a: Attorney, b: Attorney) -> bool:
+    """a and b are the same firm or person (see dedupe_attorneys)."""
+    if a.email and b.email and a.email.lower() == b.email.lower():
+        return True
+    if a.firm and b.firm:
+        return same_firm(a.firm, b.firm)
+    shared_name = any(same_person(x, y) for x in a.names() for y in b.names())
+    if a.firm or b.firm:  # one has a firm: the other may be one of its attorneys
+        f, other = (a, b) if a.firm else (b, a)
+        return shared_name or bool(other.email and not _PUBLIC_MAIL.search(other.email) and (
+            _domain(other.email) == _domain(f.email) or _domain_spells_firm(other.email, f.firm)))
+    return shared_name or bool((not a.name or not b.name) and a.email and b.email and
+                               not _PUBLIC_MAIL.search(a.email) and _domain(a.email) == _domain(b.email))

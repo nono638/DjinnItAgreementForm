@@ -669,9 +669,11 @@ class RecordsWindow(QDialog):
 
     # ------------------------------------------------------------ columns
     def _table_of(self, which: str) -> QTableWidget:
+        """The table of "invoices" or "activity" (everything made)."""
         return self.inv_table if which == "invoices" else self.act_table
 
     def _in_trash(self, which: str) -> bool:
+        """Whether that table's Trash button is on (it lists what was deleted)."""
         return (self.i_trash if which == "invoices" else self.a_trash).isChecked()
 
     def columns(self, which: str) -> list[str]:

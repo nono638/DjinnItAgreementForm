@@ -1,6 +1,7 @@
 """Fills the UCS Minute Order Form/Receipt (MOFR) - the reporter's parts only (see forms/mofr_map.py).
 
-One MOFR per job: unlike the minute agreement it is not addressed to an attorney.
+One MOFR per job, or one for the days of a case together (batch.case_forms): unlike the minute agreement it is
+not addressed to an attorney. Its page count is the pages anyone ordered (deliver.generate).
 """
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ def mofr_path() -> Path:
 
 
 def build_values(case: CaseInfo, s: Settings, pages: str = "") -> dict[str, str | bool]:
-    """The MOFR's values: field key (see mofr_map) -> text or checkmark. pages: the transcript's page count,
-    when known (else the estimated pages)."""
+    """The MOFR's values: field key (see mofr_map) -> text or checkmark. pages: the page count to write, when
+    known (the pages anyone ordered, see fill_mofr); "" = the case's Est. number of pages."""
     g = case.get
     civil = s.mofr_division != "criminal"
     title = " ".join(g("case_name").split())
@@ -52,8 +53,10 @@ def build_values(case: CaseInfo, s: Settings, pages: str = "") -> dict[str, str 
 
 
 def fill_mofr(case: CaseInfo, s: Settings, out_dir: Path, dated: bool = False, pages: str = "") -> Path:
-    """Writes one filled MOFR into out_dir and returns its path. pages: the transcript's page count,
-    when known (else the estimated pages). dated: add the date of the minutes to the file name."""
+    """Writes one filled MOFR into out_dir and returns its path. pages: the pages anyone ordered, whoever
+    wrote them (deliver.generate; for several days, batch.case_forms), when known; "" = the case's Est. number
+    of pages. dated: add the date of the minutes to the file name (first and last day for several days, see
+    fill.output_name)."""
     v = build_values(case, s, pages)
     doc = pymupdf.open(mofr_path())
     page = doc[0]

@@ -56,6 +56,21 @@ def open_url(url: str) -> None:
     QDesktopServices.openUrl(QUrl(url))
 
 
+class QuietCombo(QComboBox):
+    """A combo box the mouse wheel doesn't change until it is clicked: scrolling the window over it scrolls the
+    window. (A wheel over the Order card's speed once changed it, and made that speed the job's own choice.)"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)  # (no focus from the wheel)
+
+    def wheelEvent(self, e) -> None:
+        if self.hasFocus():
+            super().wheelEvent(e)
+        else:
+            e.ignore()  # the scroll area behind it takes the wheel
+
+
 def refill_combo(combo: QComboBox, items, keep=None, tips=None) -> None:
     """Replaces a combo box's (label, data) items without firing change signals, then selects the item whose
     data is `keep` (else the first). tips: a tooltip per item, or None."""

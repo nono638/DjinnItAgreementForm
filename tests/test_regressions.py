@@ -455,3 +455,155 @@ def test_a_run_sheet_one_reporters_case_doesnt_need_isnt_reported_missing(tmp_pa
     assert job.makeable(["agreement", "runsheet"]) == ["agreement"] and job.unneeded("runsheet")
     fill_jobs([job], s, batch=[job], outputs=["agreement", "runsheet"])
     assert job.saved and job.error == ""
+
+
+# ------------------------------------------------------------------ the 2.1 sweep
+
+def test_a_firm_ticked_again_without_a_run_gets_no_agreement(s, tmp_path):
+    """Excerpts... gave Sam's firm no run, and the user ticked it again in the attorney table: Generate made it a
+    minute agreement saying 0 pages (Generate all, for the days of a case together, made none)."""
+    path = transcript_pdf(tmp_path / "Roe.pdf", 30)
+    docs, _ = read_docs([str(path)], s)
+    job, = group(docs, s)
+    alex = Attorney(name="Alex B. Counsel", firm="Counsel & Counsel", checked=True)
+    sam = Attorney(name="Sam Advocate", firm="Advocate LLP", checked=True)
+    job.case.attorneys, job.att_touched = [alex, sam], True
+    job.portions = [(10, [alex.key()]), (30, ["-"])]
+    assert job.portions_problem() == "" and job.form_count() == 1
+    saved = fill_jobs([job], s, outputs=["agreement"])
+    assert len(saved) == 1 and "Advocate" not in saved[0].name
+
+
+def test_two_rows_of_the_users_table_merged_into_one_firm_keep_the_tick(s):
+    """A document said Dana Smith is of Counsel & Counsel: her row (unticked) and the firm's (ticked) became one,
+    unticked, so the firm got no agreement or invoice; and a new document's ticked sender stayed ticked."""
+    from minute_filler.batch import Doc
+    from minute_filler.ingest import ingest_text
+    from minute_filler.models import Extraction
+
+    def after(rows, found):
+        job = Job()
+        job.docs = [Doc(ingest_text("hello", "x.txt"), Extraction(attorneys=found, doc_kind="email"))]
+        job.case.attorneys, job.att_touched = rows, True
+        remerge(job, s)
+        return {a.firm: a.checked for a in job.case.attorneys}
+
+    firm = "Counsel & Counsel, LLP"
+    got = after([Attorney(name="Dana Smith", checked=False), Attorney(name="Alex B. Counsel", firm=firm)],
+                [Attorney(name="Dana Smith", firm=firm, checked=False)])
+    assert got == {firm: True}
+    got = after([Attorney(name="Dana Smith", checked=True), Attorney(name="Alex B. Counsel", firm=firm, checked=False)],
+                [Attorney(name="Dana Smith", firm=firm, checked=False),
+                 Attorney(name="Sam Poe", firm="Poe Law PLLC", checked=True)])
+    assert got == {firm: True, "Poe Law PLLC": False}
+
+
+def test_an_old_record_naming_attorneys_with_esq_opens_with_its_excerpts_on_the_firm():
+    """A 2.0 record keyed its Excerpts... rows by each attorney's name ('dana smith esq'): merged into one firm row,
+    the name lost its "Esq." and the rows kept the old keys, so the reopened day's invoice was held."""
+    from minute_filler.batch import one_row_per_firm
+    job = Job()
+    job.case.attorneys = [Attorney(name="Dana Smith, Esq.", firm="Counsel & Counsel, LLP"),
+                          Attorney(name="Alex B. Counsel, Esq.", firm="Counsel & Counsel, LLP"),
+                          Attorney(name="Mr. Advocate")]
+    job.portions = [(10, ["dana smith esq"]), (30, ["alex b counsel esq", "mr advocate"])]
+    one_row_per_firm(job)
+    assert job.portions == [(10, ["counsel and counsel"]), (30, ["counsel and counsel", "mr advocate"])]
+    assert job.portions_problem() in ("", "it is for one day, and this job no longer is")  # (no pages here)
+
+
+def test_accented_firm_names_are_one_firm_and_other_scripts_have_a_key():
+    from minute_filler.models import firm_key
+    assert firm_key("Ñandú & Pingüino, LLP") == firm_key("NANDU AND PINGUINO LLP") == "nandu and pinguino"
+    assert Attorney(firm="法律事务所").key() == "法律事务所"  # (it was "": no invoice, not counted as a party)
+
+
+def test_a_firm_renamed_after_a_stopped_run_is_not_billed_twice():
+    job = Job()
+    job.invoiced_keys = ["smith law", "smith law@ds", "other"]
+    job.rename_in_portions("smith law", "smith law group")
+    assert job.invoiced_keys == ["smith law group", "smith law group@ds", "other"]
+
+
+def test_another_reporters_invoice_works_on_a_case_of_its_own(s, tmp_path):
+    """billed_by's copy shared the job's attorney rows: same_entries filled a firm into them while renaming only
+    the copy's Excerpts... rows, and the day itself was then held."""
+    path = transcript_pdf(tmp_path / "Roe.pdf", 30, initials=["pr"] * 10 + ["ds"] * 20)
+    docs, _ = read_docs([str(path)], s)
+    job, = group(docs, s)
+    job.case.attorneys = [Attorney(name="Dana Smith", firm="Smith Law", checked=True)]
+    job.page_basis = {job.transcripts()[0].key(): ["me", "ds"]}
+    copy = job.billed_by("ds")
+    assert copy.case is not job.case and copy.case.attorneys[0] is not job.case.attorneys[0]
+
+
+def test_the_same_firm_on_two_days_is_one_column_of_excerpts():
+    from minute_filler.excerpts import firms_of
+    day1, day2 = Job(), Job()
+    day1.case.attorneys = [Attorney(name="Dana Smith", firm="Smith Law", checked=True)]
+    day2.case.attorneys = [Attorney(name="Dana Smith", checked=True)]
+    assert [a.key() for a in firms_of([day1, day2])] == ["smith law"]
+
+
+def test_an_invoice_the_records_cant_take_is_not_left_on_disk(s, tmp_path, monkeypatch):
+    """The PDF was saved, then the records refused it (database locked): its number was given again next time,
+    so two PDFs had one number."""
+    import sqlite3
+    from minute_filler.invoice import make_invoice
+    atty = Attorney(name="Alex B. Counsel", firm="Counsel & Counsel")
+    case = make_case({**ROE, "est_pages": "30"}, attorneys=[atty])
+    ledger = Ledger(tmp_path / "r.db")
+
+    def locked(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(ledger, "add_invoice", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        make_invoice(case, atty, s, tmp_path / "out", InvoiceOpts(30), ledger)
+    assert not list((tmp_path / "out").glob("*.pdf"))
+
+
+def test_one_csv_copy_that_cant_be_written_doesnt_stop_the_other(tmp_path):
+    ledger = Ledger(tmp_path / "r.db")
+    (tmp_path / "copies" / "invoices.csv").mkdir(parents=True)  # (it can't be replaced, as when open in Excel)
+    with pytest.raises(OSError):
+        ledger.export_csv(tmp_path / "copies")
+    assert (tmp_path / "copies" / "activity.csv").is_file()
+    assert not list((tmp_path / "copies").glob(".*.tmp"))
+
+
+def test_a_blank_payment_is_refused(tmp_path):
+    """It was recorded as $0.00 paid."""
+    with pytest.raises(ValueError):
+        Ledger(tmp_path / "r.db").mark_paid("2026-0001", "Regular", "")
+
+
+def test_batch_without_files_says_how_and_opens_no_window(monkeypatch, tmp_path):
+    """--batch OUTDIR with nothing after it opened the window, which read OUTDIR as a folder of documents."""
+    import sys
+    from minute_filler import main
+    monkeypatch.setattr(sys, "argv", ["YinItAgreementForm", "--batch", str(tmp_path)])
+    assert main.main() == 2
+    monkeypatch.setattr(sys, "argv", ["YinItAgreementForm", "--batch", str(tmp_path), "--outputs"])
+    assert main.main() == 2
+
+
+def test_the_swirl_follows_the_layout_while_it_lingers(qt):
+    """After a read the swirl goes on a while; a smaller layout (or another zoom) meanwhile was left for later, so
+    the window measured the big one, and a zoom cut a click's swirl short."""
+    from minute_filler.gui.main_window import DropZone
+    from minute_filler.gui.zoom import z
+    d = DropZone(lambda *a: None, lambda *a: None, lambda *a: None, lambda: None)
+    d.show()
+    d.linger_ms = 5000
+    d.set_mood("working")
+    d.set_mood("done")
+    assert d._settle.isActive()
+    d.set_compact(True)
+    assert not d.sub.isVisible() and d.minimumHeight() == z(170) and d.mood == ("working", z(150))
+    d.set_compact(False)
+    d._settle.stop()
+    d.set_mood("done")
+    d.encore()
+    d.rezoom()
+    assert d._settle.isActive() and d.mood[0] == "working" and d.wanted == "done"
+    d.deleteLater()

@@ -109,6 +109,12 @@ PAGE_3 = """Proceedings
 """
 
 EVERYONE = ["Samuel R. Advocate", "Dana White", "Alex B. Counsel", "Morgan Bright", "Taylor Green", "Jordan Quinn"]
+FIRMS_FOUND = ["Advocate Law Group", "Counsel, Ward & Counsel, LLP", "Bright Foster & Hayes", "Quinn Hartwell, LLP"]
+
+
+def everyone(attorneys) -> list[str]:
+    """The attorneys named in the entries, in order (a firm's entry names all of its attorneys)."""
+    return [n for a in attorneys for n in a.names()]
 
 
 def transcript(last_line="(Title continues on next page.)", pages=(PAGE_2, PAGE_3)) -> str:
@@ -125,9 +131,11 @@ def extract(text):
 def test_attorneys_on_the_second_title_page_are_found():
     ex = extract(transcript())
     assert ex.doc_kind == "transcript" and best(ex, "est_pages") == "95"
-    assert [a.name for a in ex.attorneys] == EVERYONE  # nobody from the caption or the dialogue
-    by_name = {a.name: a for a in ex.attorneys}
+    assert everyone(ex.attorneys) == EVERYONE  # nobody from the caption or the dialogue
+    assert [a.firm for a in ex.attorneys] == FIRMS_FOUND  # one entry per firm, with all its attorneys
+    by_name = {n: a for a in ex.attorneys for n in a.names()}
     assert by_name["Samuel R. Advocate"].firm == "Advocate Law Group" and by_name["Dana White"].party == "Plaintiff"
+    assert by_name["Samuel R. Advocate"] is by_name["Dana White"]
     assert by_name["Alex B. Counsel"].party == "Sam Poe, M.D."
     assert by_name["Alex B. Counsel"].address == "500 Sample Road, Suite 31\nLake Town, New York 10002"
     assert by_name["Taylor Green"].firm == "Bright Foster & Hayes"
@@ -146,12 +154,12 @@ def test_the_rest_of_the_title_is_read_without_the_line_numbers():
 
 def test_a_second_title_page_is_recognised_without_the_words():
     for last in ("", "(Appearances continued on the following page)", "(Continued on next page)"):
-        assert [a.name for a in extract(transcript(last)).attorneys] == EVERYONE, last
+        assert everyone(extract(transcript(last)).attorneys) == EVERYONE, last
 
 
 def test_a_one_page_title_stops_at_the_testimony():
     ex = extract(transcript("", pages=(PAGE_3,)))
-    assert [a.name for a in ex.attorneys] == EVERYONE[:3]
+    assert everyone(ex.attorneys) == EVERYONE[:3]
     assert title_pages("cover\fBY: A. B., Esq.\n\fTHE COURT:  Good morning.").count("Esq") == 1
     assert "Good morning" not in title_pages("cover (continued on next page)\f  THE COURT:  Good morning.")
 
@@ -176,7 +184,7 @@ def test_such_a_transcript_can_be_invoiced(tmp_path):
     docs, errors = read_docs([str(path)], s)
     job, = group(docs, s)
     assert not errors and job.transcript_pages() == 4 and job.invoice_pages() == 4
-    assert len(job.case.attorneys) == 6 and not any(a.checked for a in job.case.attorneys)
+    assert len(job.case.attorneys) == 4 and not any(a.checked for a in job.case.attorneys)  # one per firm
 
 
 FIRMS = """SUPREME COURT OF THE STATE OF NEW YORK

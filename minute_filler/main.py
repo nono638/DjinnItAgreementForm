@@ -92,7 +92,7 @@ def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> i
     forms per case and date with the saved settings, and writes batch.json (what was grouped, saved or
     unreadable). The files go into OUTDIR whatever folders Settings give each output (run sheets still go to
     their own folder). Without --outputs, the outputs ticked in the window are made. Returns 0, 1 when a file or
-    job had a problem, or 2 for an unknown output."""
+    job had a problem, or 2 for an unknown output (main also returns 2 when OUTDIR or the files are missing)."""
     import json
     from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
     from minute_filler.settings import OUTPUTS, Settings
@@ -165,10 +165,17 @@ def main() -> int:
     log.setup()
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         return selftest(sys.argv[2], sys.argv[3:])
-    if len(sys.argv) > 3 and sys.argv[1] == "--batch":
+    if len(sys.argv) > 1 and sys.argv[1] == "--batch":
         rest, outputs = sys.argv[3:], None
-        if len(rest) > 1 and rest[0] == "--outputs":
-            outputs, rest = [o.strip().lower() for o in rest[1].split(",") if o.strip()], rest[2:]
+        if rest[:1] == ["--outputs"]:
+            outputs, rest = [o.strip().lower() for o in (rest[1] if len(rest) > 1 else "").split(",") if o.strip()], \
+                rest[2:]
+        if len(sys.argv) < 3 or not rest or outputs == []:
+            # a bare --batch must not open the window, which would read OUTDIR as a folder of documents
+            if sys.stderr:
+                print("usage: --batch OUTDIR [--outputs agreement,mofr,invoice,runsheet] files/folders...",
+                      file=sys.stderr)
+            return 2
         return batch(sys.argv[2], rest, outputs)
 
     from PySide6.QtGui import QIcon

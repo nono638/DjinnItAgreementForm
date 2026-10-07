@@ -10,6 +10,10 @@ original also the fax lines, the date of agreement and the case name's second an
 field added, so every value can still be changed in a PDF viewer. A signature picture takes the place of the
 reporter's signature field there.
 
+Each attorney's agreement shows as its Estimated Number of Pages the pages that attorney ordered, whoever wrote
+them (agreement_case, from batch.Job.ordered_pages); with no count (no transcript and no pages typed), the
+field as it is. A firm that ordered no pages of the day gets no agreement (agreement_orderers).
+
 Also helpers that the MOFR, invoices and run sheets share: writing form fields (set_text) and adding new
 ones (add_text_field), file names (output_name, safe_filename, unique_path) and saving (save_output, which
 labels every PDF the app makes so it is never read back as an input, and flattens it when Settings say so).
@@ -17,6 +21,8 @@ lock_pdf saves a copy with the fields flattened (File → Lock finished PDFs).
 """
 from __future__ import annotations
 
+import copy
+import dataclasses
 import re
 import unicodedata
 from datetime import date
@@ -100,7 +106,7 @@ def wrap_fit(s: str, width: float, lines: int, max_fs: float = MAX_FS) -> tuple[
 
 def split_address(addr: str) -> list[str]:
     """An address as the form's two lines: the first line, then the rest joined with commas."""
-    lines =[l.strip(" ,") for l in re.split(r"[\r\n]+", addr or "") if l.strip(" ,")]
+    lines = [l.strip(" ,") for l in re.split(r"[\r\n]+", addr or "") if l.strip(" ,")]
     if len(lines) > 2:
         lines = [lines[0], ", ".join(lines[1:])]
     return lines + [""] * (2 - len(lines))
@@ -173,7 +179,8 @@ def set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
 def add_text_field(page: pymupdf.Page, name: str, rect, text: str = "", fs: float = 0, font: str = "Helv",
                    color=(0, 0, 0), multiline: bool = False, right: bool = False) -> pymupdf.Widget:
     """Adds a text field holding `text` at `rect`, so the value can still be changed in a PDF viewer.
-    fs: the font size (0 = automatic); font: "Helv", "TiRo" or "Cour" (fields can't be bold); right: right-aligned."""
+    fs: the font size (0 = automatic); font: "Helv", "TiRo" or "Cour" (fields can't be bold); right:
+    right-aligned."""
     w = pymupdf.Widget()
     w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
     w.field_name = name
@@ -309,10 +316,17 @@ def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool 
     """The file name (with .pdf) for a PDF made for this case, from a pattern with {case} (short caption),
     {index}, {attorney}, {date} (the first date of the minutes) and {today}. A pattern that can't be
     filled in gives '<fallback> - <index>'.
-    dated: add the date of the minutes, to tell apart the forms for several days of one case.
+    dated: add the date of the minutes, to tell apart the forms for several days of one case; a form of several
+    days (one for the whole case, see batch.form_groups) gets its first and last day ('9-28-2026 to 10-2-2026'),
+    for {date} too.
     pattern: another file name pattern (MOFR, invoice) than the agreement's; extra: more placeholders."""
+    from .extract_regex import find_dates
     pattern = s.filename_pattern if pattern is None else pattern
     day = case.get("dates").split(",")[0].strip().replace("/", "-")
+    found = list(dict.fromkeys(d for _, _, d in find_dates(case.get("dates")))) if dated else []
+    if len(found) > 1:
+        first, last = min(found, key=_date_key), max(found, key=_date_key)
+        day = f"{first.replace('/', '-')} to {last.replace('/', '-')}"
     today = date.today()
     caption = short_caption(case.get("case_name")) or "Case"
     if dated and day and "{case}" in pattern and "{date}" not in pattern:
@@ -330,6 +344,12 @@ def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool 
         name += f" - {day}"
     name = re.sub(r"(\s-\s*)+$", "", re.sub(r"\s-\s+-\s", " - ", name)).strip()
     return (safe_filename(name) if name.strip(" .-") else fallback) + ".pdf"
+
+
+def _date_key(d: str) -> tuple:
+    """'6/2/2026' -> (2026, 6, 2), to sort M/D/YYYY dates."""
+    m, day, y = (int(x) for x in d.split("/"))
+    return y, m, day
 
 
 MARK = "YinIt"  # PDF "creator" of every file this app makes: such files are skipped as inputs
@@ -410,6 +430,51 @@ def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, date
     return save_output(doc, "agreement", out_dir / output_name(case, atty, s, dated), s.flatten)
 
 
-def fill_all(case: CaseInfo, s: Settings, out_dir: Path, dated: bool = False) -> list[Path]:
-    """One PDF per checked attorney (or a single form with a blank attorney block)."""
-    return [fill(case, a, s, out_dir, dated) for a in case.orderers()]
+def agreement_pages(ordered: dict[str, int] | None, atty: Attorney | None) -> int | None:
+    """The Est. number of pages of one attorney's minute agreement: the pages it ordered, whoever wrote them
+    (ordered: by Attorney.key(), see batch.Job.ordered_pages), or those anyone ordered ("") for the blank
+    attorney block or an attorney not among them (a placeholder ticked). None without `ordered` (no transcript
+    and no pages typed, or the Pages field typed as 0: the form shows the Est. number of pages field as it
+    is)."""
+    if not ordered:
+        return None
+    k = atty.key() if atty is not None else ""
+    return ordered[k] if k in ordered else ordered.get("")
+
+
+def agreement_orderers(case: CaseInfo, ordered: dict[str, int] | None) -> list[Attorney | None]:
+    """Who gets a minute agreement for a day (CaseInfo.orderers: [None], a blank attorney block, when nobody is
+    ticked): each ticked entry once (two rows of one firm: one agreement), but not one that ordered no pages
+    of it (a firm ticked again after Excerpts... gave it no run: agreement_pages 0), as batch.case_forms does
+    for the days of a case together."""
+    out: list[Attorney | None] = []
+    seen: set[str] = set()
+    for atty in case.orderers():
+        if atty is not None:
+            k = atty.key()
+            if k in seen or agreement_pages(ordered, atty) == 0:
+                continue
+            seen.add(k)
+        out.append(atty)
+    return out
+
+
+def agreement_case(case: CaseInfo, atty: Attorney | None, ordered: dict[str, int] | None) -> CaseInfo:
+    """The case as one attorney's minute agreement shows it: its Est. number of pages that attorney's
+    (agreement_pages); the case itself when there is no such count. A shallow copy: the other fields are the
+    case's own FieldState objects, so an agreement date fill sets is set on the case too."""
+    n = agreement_pages(ordered, atty)
+    if n is None:
+        return case
+    out = copy.copy(case)
+    out.fields = dict(case.fields)
+    out.fields["est_pages"] = dataclasses.replace(case.fields["est_pages"], value=str(n))
+    return out
+
+
+def fill_all(case: CaseInfo, s: Settings, out_dir: Path, dated: bool = False,
+             ordered: dict[str, int] | None = None) -> list[Path]:
+    """One PDF per checked attorney (or a single form with a blank attorney block), each with the pages that
+    attorney ordered when `ordered` says (agreement_case). Used by the command line (main.py); unlike
+    deliver.generate it doesn't pick the attorneys with agreement_orderers, so every ticked row gets one."""
+    return [fill(agreement_case(case, a, ordered), a, s, out_dir, dated) for a in case.orderers()]

@@ -1,6 +1,8 @@
 """Data model shared by extractors, the GUI and the PDF filler."""
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field, asdict
 
 # Case-level fields in the order they appear on the form.
@@ -49,11 +51,64 @@ class Candidate:
     note: str = ""
 
 
+# Words written after a name that belong to it ("Sam Poe, Jr."): split_names keeps them with the name before.
+_NAME_SUFFIX = re.compile(r"(?i)^(?:jr|sr|ii|iii|iv|m\.?\s?d|ph\.?\s?d|d\.?d\.?s|cpa)\.?$")
+# Entity words at the end of a firm's name that firm_key leaves out ("Counsel & Counsel, LLP" = "Counsel & Counsel")
+_FIRM_SUFFIXES = {"llp", "pllc", "llc", "pc", "lp", "pa", "esqs", "esq", "inc", "ltd", "plc"}
+
+
+def split_names(text: str) -> list[str]:
+    """The attorneys named in an Attorney's name: 'Alex B. Counsel, Dana Smith and Sam Poe, Jr.' ->
+    ['Alex B. Counsel', 'Dana Smith', 'Sam Poe, Jr.']. Split at commas, semicolons, 'and' and '&'; a suffix
+    (Jr., III, M.D.) stays with the name before it, and 'Esq.' is left out."""
+    out: list[str] = []
+    for part in re.split(r"\s*(?:;|,|\s&\s|\band\b)\s*", text or ""):
+        part = re.sub(r"(?i)(?:^|\s+)esq\.?$", "", part.strip(" ,:")).strip(" ,:")
+        if not part:
+            continue
+        if out and _NAME_SUFFIX.match(part):
+            out[-1] += ", " + part
+        else:
+            out.append(part)
+    return out
+
+
+def join_names(names: list[str]) -> str:
+    """The names of a firm's attorneys as one Attorney.name: 'Alex B. Counsel, Dana Smith'."""
+    return ", ".join(n for n in names if n)
+
+
+def legacy_key(text: str) -> str:
+    """How Attorney.key() read up to version 2.0 (a name or firm in lowercase without '.' and ','), which
+    the Excerpts... rows of records made by older versions still use (see Attorney.legacy_keys)."""
+    return (text or "").lower().replace(".", "").replace(",", "").strip()
+
+
+def firm_key(firm: str) -> str:
+    """A firm's name for comparing: lowercase, '&' read as 'and', without punctuation, a leading 'The' or the
+    entity at the end, so 'Counsel & Counsel, LLP', 'COUNSEL AND COUNSEL' and 'Counsel & Counsel L.L.P.'
+    are the same firm ('counsel and counsel'). Accents go ('Ñandú & Pingüino' -> 'nandu and pinguino'); letters of
+    other scripts stay."""
+    s = unicodedata.normalize("NFKD", (firm or "").lower().replace("&", " and ").replace(".", ""))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    words = re.sub(r"[\W_]+", " ", s).split()
+    if words[:1] == ["the"]:
+        words = words[1:]
+    while len(words) > 1 and words[-1] in _FIRM_SUFFIXES:
+        words.pop()
+    if len(words) > 2 and words[-2:] == ["p", "c"]:  # "P. C." written apart
+        words = words[:-2]
+    return " ".join(words)
+
+
 @dataclass
 class Attorney:
-    """An attorney or firm found in the inputs. Every ticked (checked) one orders the minutes and gets
-    their own agreement and invoice (one invoice per key(); placeholders get none, see is_placeholder)."""
-    name: str = ""
+    """A firm or office (or a lone attorney) found in the inputs: one entry for billing. Its attorneys are all
+    named in `name` ('Alex B. Counsel, Dana Smith', see names()): two attorneys of one firm are one entry,
+    one party. Every ticked (checked) one orders the minutes and gets its own agreement and invoice (one
+    of each per key(); placeholders get no invoice, see is_placeholder; no agreement for a day it ordered
+    0 pages of, see fill.agreement_orderers)."""
+    name: str = ""     # the attorney, or the firm's attorneys joined by ", " (join_names)
     firm: str = ""
     address: str = ""  # multi-line
     phone: str = ""
@@ -64,9 +119,26 @@ class Attorney:
     checked: bool = True
 
     def key(self) -> str:
-        """Name (or firm) for comparing entries: 'Dana Smith, Esq.' -> 'dana smith esq'. Who ordered which
-        pages of a day (batch.Job.portions) names attorneys by it."""
-        return (self.name or self.firm).lower().replace(".", "").replace(",", "").strip()
+        """The entry for comparing and billing: its firm (firm_key: 'Counsel & Counsel, LLP' -> 'counsel and
+        counsel'), else its name ('Dana Smith, Esq.' -> 'dana smith esq'). Who ordered which pages of a day
+        (batch.Job.portions) and who was invoiced already (batch.Job.invoiced_keys) name entries by it; keyed by
+        the firm, it stays the same when an attorney of the firm is added to the row."""
+        return firm_key(self.firm) or legacy_key(self.name or self.firm)
+
+    def names(self) -> list[str]:
+        """The attorneys named in this entry (split_names of name)."""
+        return split_names(self.name)
+
+    def label(self) -> str:
+        """The entry in a few words, for a column or a line of the window: its attorney ('Dana Smith'), or its
+        firm when it names several attorneys ('Counsel & Counsel, LLP') or none."""
+        return self.firm if self.firm and len(self.names()) != 1 else (self.name or self.firm)
+
+    def legacy_keys(self) -> set[str]:
+        """The keys older versions gave this entry or any one of its attorneys (one entry per attorney, keyed by
+        the name, else the firm): Excerpts... rows kept in older records name them (see batch.one_row_per_firm)."""
+        return {k for k in [legacy_key(self.name or self.firm), legacy_key(self.firm),
+                            *(legacy_key(n) for n in self.names())] if k}
 
     def is_placeholder(self) -> bool:
         """'Unrepresented', 'No one appeared' and similar are not orderers."""
@@ -148,13 +220,14 @@ class CaseInfo:
         fs.value, fs.source, fs.confidence = value, source, 1.0
 
     def orderers(self) -> list[Attorney | None]:
-        """The ticked attorneys - one agreement each - or [None] (one with a blank attorney). Invoices go to
-        invoice_orderers()."""
+        """The ticked entries, or [None] (one form with a blank attorney block) when nobody is ticked.
+        fill.agreement_orderers picks the agreements from them (one per firm key, none for a firm that ordered
+        0 pages); invoices go to invoice_orderers()."""
         return [a for a in self.attorneys if a.checked] or [None]
 
     def invoice_orderers(self) -> list[Attorney | None]:
-        """Who gets an invoice: the ticked attorneys, one per Attorney.key() (the same attorney entered twice
-        is billed once) and without placeholders ("Unrepresented", a blank row being typed in), or [None]
+        """Who gets an invoice: the ticked attorneys, one per Attorney.key() (the same firm, or the same attorney,
+        entered twice is billed once) and without placeholders ("Unrepresented", a blank row being typed in), or [None]
         (one invoice with a blank Bill To)."""
         out, seen = [], set()
         for a in self.attorneys:
@@ -163,10 +236,10 @@ class CaseInfo:
                 out.append(a)
         return out or [None]
 
-    def ordering_firms(self) -> int:
-        """How many firms ordered: the ticked attorneys who get an invoice (invoice_orderers), two attorneys of
-        one firm counted once; 0 when none is ticked."""
-        return len({(a.firm.strip().lower() or a.key()) for a in self.invoice_orderers() if a is not None})
+    def ordering_parties(self) -> int:
+        """How many parties ordered: the ticked attorneys who get an invoice (invoice_orderers), as the invoice
+        counts its parties (a firm is one party, however many of its attorneys it names); 0 when none is ticked."""
+        return sum(1 for a in self.invoice_orderers() if a is not None)
 
     def missing_required(self) -> list[str]:
         """The REQUIRED_KEYS that are still blank."""

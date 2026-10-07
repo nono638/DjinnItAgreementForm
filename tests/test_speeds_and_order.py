@@ -1,7 +1,8 @@
 """The Order card (2.0.0): the speeds are chosen once, and the minute agreement form names one of the speeds the
 invoice offers (Settings.agreement_speed: Expedited, else the slowest offered, as Settings say; a job's own
-choice first). No. of copies follows the firms ticked, and the page count of a transcript is marked as counted
-from the PDF."""
+choice first, never a document's: see test_speed_rule.py), also when Settings name it as a rate sheet does or an
+older file had a default speed. No. of copies follows the parties ticked (a firm is one) or the Parties number,
+and the page count of a transcript is marked as counted from the PDF."""
 import json
 import os
 
@@ -49,22 +50,20 @@ def test_the_agreement_form_speed_is_expedited_when_offered_else_the_slowest():
     assert s.agreement_speed() == "Expedite"
 
 
-def test_merge_names_an_offered_speed():
-    """A speed read from a document stays when the invoice offers it, else gives way to agreement_speed; one
+def test_merge_names_the_rules_speed_unless_the_user_chose_one():
+    """The agreement form's speed is always the Settings rule's (agreement_speed), whatever a document says (an
+    e-mail's "at your regular rate" is no choice: the window asks about it instead, Job.speed_question); one
     chosen by the user stays until it is no longer offered (refresh_speed)."""
     s = Settings()
     case = CaseInfo()
     apply_defaults(case, s)
     assert case.get("delivery") == "Expedite"
     assert case.get("rate") == "5.40"  # the rate follows the speed on the form
-    case = CaseInfo()
-    case.fields["delivery"] = FieldState("Daily", SRC_REGEX, 0.8, ["Daily"])  # asked for, but not offered
-    apply_defaults(case, s)
-    assert case.get("delivery") == "Expedite"
-    case = CaseInfo()
-    case.fields["delivery"] = FieldState("regular", SRC_REGEX, 0.8, ["regular"])  # offered: it stays
-    apply_defaults(case, s)
-    assert case.get("delivery") == "Regular"
+    for read in ("Daily", "regular"):  # asked for in a document, offered or not: the rule's speed
+        case = CaseInfo()
+        case.fields["delivery"] = FieldState(read, SRC_REGEX, 0.8, [read])
+        apply_defaults(case, s)
+        assert case.get("delivery") == "Expedite" and case.get("rate") == "5.40"
     case = make_case({"delivery": "Regular"})  # the user's choice stays while it is offered
     assert not refresh_speed(case, s) and case.get("delivery") == "Regular"
     s.invoice_speeds = ["Expedited"]
@@ -109,22 +108,24 @@ def test_an_old_default_speed_becomes_the_first_choice():
     assert Settings.load().agreement_speed_fallback == "slowest"
 
 
-def test_copies_follow_the_firms_ticked():
-    """No. of copies is the number of different firms ticked (two attorneys of Counsel & Counsel are one;
-    "Unrepresented" orders nothing), over a number read from a document but not one the user typed; with nobody
-    ticked it is the default."""
+def test_copies_follow_the_parties_ticked():
+    """No. of copies is the number of ordering parties, as the invoice counts them (two attorneys of Counsel &
+    Counsel are one party, the firm; "Unrepresented" orders nothing), over a number read from a document but not
+    one the user typed; with nobody ticked it is the default."""
     s = Settings()
     case = make_case({}, [Attorney(name="Alex B. Counsel", firm="Counsel & Counsel"),
                           Attorney(name="Robin Counsel", firm="Counsel & Counsel"),
                           Attorney(name="Dana Smith", firm="Smith Law"),
                           Attorney(name="Unrepresented"),
                           Attorney(name="Sam Advocate", firm="Advocate LLP", checked=False)])
-    case.fields["copies"] = FieldState("5", SRC_REGEX, 0.8, ["5"])  # read from a document: the firms win
+    case.fields["copies"] = FieldState("5", SRC_REGEX, 0.8, ["5"])  # read from a document: the parties win
     refresh_copies(case, s)
     assert case.get("copies") == "2" and case.fields["copies"].source == SRC_DERIVED
-    case.set("copies", "3")  # typed by the user: it stays
-    refresh_copies(case, s)
-    assert case.get("copies") == "3"
+    refresh_copies(case, s, parties=4)  # the invoice's Parties number, when set
+    assert case.get("copies") == "4"
+    case.set("copies", "6")  # typed by the user: it stays
+    refresh_copies(case, s, parties=4)
+    assert case.get("copies") == "6"
     nobody = make_case({}, [Attorney(name="Alex B. Counsel", checked=False)])
     nobody.fields["copies"] = FieldState()
     refresh_copies(nobody, s)

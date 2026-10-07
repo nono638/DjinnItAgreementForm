@@ -2,8 +2,9 @@
 rule, a job's Extras and what granular detail shows. Also: a day billed once (Job.invoiced) is not billed
 again, choices kept when jobs or days come together (Excerpts... too), a failed joint invoice, a day with
 nobody ticked holding the joint invoice back, the progress count, the files counted for Generate all, Pages
-typed as 0, and the invoice's field names. Attorneys ordering different days or pages are in test_portions.py.
-All names and numbers are made up."""
+typed as 0, and the invoice's field names. Attorneys ordering different days or pages are in test_portions.py;
+the minute agreements and MOFR of the days of one invoice in test_trial_forms.py. All names and numbers are made
+up."""
 from decimal import Decimal
 
 import pymupdf
@@ -105,7 +106,8 @@ def test_three_days_one_invoice(three_days, s):
     fill_jobs(three_days, s, outputs=["agreement", "invoice"])
     invoices = {p for job in three_days for p in job.saved if p.name.startswith("Invoice")}
     agreements = [p for job in three_days for p in job.saved if p.name.startswith("Minute Agreement")]
-    assert len(invoices) == 1 and len(agreements) == 3  # the agreements stay one per day
+    # one agreement for the three days too (Settings.forms_per_case), listed under each of them
+    assert len(invoices) == 1 and len(agreements) == 3 and len(set(agreements)) == 1
     assert all(invoices <= set(job.saved) and job.invoiced for job in three_days)  # the invoice is each day's
     assert not any(job.error for job in three_days)
     inv = ledger_for(s).invoices()[0]

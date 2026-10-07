@@ -108,7 +108,8 @@ class Quote:
 
     @property
     def per_page(self) -> Decimal:
-        """What each party pays per page."""
+        """What each party pays a page, to the cent: per_party over the pages billed, so the copies and the
+        index are in it too."""
         return (self.per_party / max(1, self.pages)).quantize(CENT, ROUND_HALF_UP)
 
 
@@ -212,8 +213,8 @@ def quote_shares(shares: list[Share], sp: Speed, include_email: bool = True, ind
 
 def offered(sheet: RateSheet, speeds: list[str], chosen: str) -> list[Speed]:
     """The sheet's speeds an invoice lists: every one in `speeds` (the speeds ticked; one alone makes a
-    single-speed invoice). When none of them is on the sheet, the job's own speed `chosen`. Slowest
-    (cheapest) first."""
+    single-speed invoice). When none of them is on the sheet, the job's own speed `chosen`, else the sheet's
+    first. Slowest (cheapest) first, as the sheet is sorted."""
     keys = {speed_key(w) for w in speeds if w}
     found = [sp for sp in sheet.speeds if sp.key in keys]
     if not found and chosen:  # none of them is on the sheet: the job's own speed, matched by name too

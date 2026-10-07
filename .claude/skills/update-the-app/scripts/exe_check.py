@@ -7,8 +7,9 @@ It uses a temporary APPDATA and home folder, so the user's own settings, records
 touched (the folder is removed again when all is good); its settings say the user is Pat Reporter (initials
 P.R.). The inputs are two days of one trial (a transcript each, June 3 and June 4, written by Pat and Dana
 Smith: PR and DS at the foot of the pages) and an e-mail about another case. Expected: the built version, no
-errors in the log; for each day a minute agreement, a MOFR and the run sheet, and one joint invoice for both
-days (listed under each day) that bills Pat's own 10 of the 20 transcript pages, for one party, and has its
+errors in the log; for each day a minute agreement, a MOFR, the run sheet and the joint invoice, the agreement
+and the MOFR being one each for both days (Settings.forms_per_case: listed under each day, as the one joint
+invoice for both days is) and the invoice billing Pat's own 10 of the 20 transcript pages, for one party, and has its
 amounts as fields (and no "Lock fields" button, removed in 1.3.1); one run sheet with the 4 takes of each day;
 and --selftest says the libraries only the window uses are in the build (the Records' Fuzzy and Regex
 searches, HEIC photos, the look for a newer version, printing, The math as a PDF, the moving yin-yang). Exit
@@ -73,6 +74,10 @@ kinds = [sorted(kind(f) for f in j["forms"]) for j in days]
 if len(days) != 2 or any(j["error"] for j in days) or kinds != [["Invoice", "MOFR", "Minute Agreement",
                                                                   "Run sheet"]] * 2:
     problems.append("each day of the trial should have an agreement, a MOFR, the run sheet and the joint invoice")
+for what in ("Minute Agreement", "MOFR"):  # one for the whole trial, listed under both days
+    shared = {f for j in days for f in j["forms"] if kind(f) == what}
+    if len(shared) != 1 or "(6-3-2026 to 6-4-2026)" not in next(iter(shared), ""):
+        problems.append(f"the two days should share one {what} naming both days, not {sorted(shared)}")
 invoices = sorted({f for j in days for f in j["forms"] if f.startswith("Invoice")})
 if len(invoices) != 1:
     problems.append(f"the two days should share one invoice, not {len(invoices)}")

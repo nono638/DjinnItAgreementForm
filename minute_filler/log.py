@@ -56,7 +56,7 @@ class _Formatter(logging.Formatter):
     """Writes tracebacks short and private: file, line and function only, no folders (a folder can name
     the user or a case)."""
     def formatException(self, ei) -> str:
-        # where it happened (file, line, function - no source text, no folders), then the scrubbed message
+        """Where it happened (file, line, function: no source text, no folders), then the scrubbed message."""
         etype, exc, tb = ei
         frames = [f"  {Path(f.filename).name}:{f.lineno} in {f.name}" for f in traceback.extract_tb(tb)]
         return "Traceback:\n" + "\n".join(frames) + "\n" + describe(exc)
