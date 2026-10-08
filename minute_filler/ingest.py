@@ -1,7 +1,8 @@
 """Turns any dropped input into plain text (plus images for the AI model).
 
 - PDF with a text layer: text of the first pages (separated by form feeds, "\\f"), page count,
-  first page number, and for a transcript what each page says about itself (takes.scan_pdf).
+  first page number, what each page of a transcript says about itself, and its own pages without the word
+  index, read four ways (takes.read_pages, takes.count_pages).
 - Scanned PDF / photo: Windows' built-in OCR engine (fast, offline). Line
   positions are used to split the page into blocks, so appearance columns stay
   together.
@@ -22,7 +23,7 @@ import pymupdf
 from PIL import Image, ImageOps
 
 from .log import describe, log
-from .takes import scan_pdf
+from .takes import PageCount, count_pages, counted_marks, index_heading, read_pages
 
 try:  # iPhone photos (.heic/.heif): pillow-heif teaches Pillow to open them (in requirements and the installer)
     from pillow_heif import register_heif_opener
@@ -50,6 +51,8 @@ class Ingested:
     warnings: list[str] = field(default_factory=list)
     # PDF: one takes.PageMark per transcript page (its number, the reporter's initials...); [] otherwise
     marks: list = field(default_factory=list)
+    count: PageCount | None = None  # PDF: its own pages, read four ways and reconciled (takes.count_pages)
+    index_head: str = ""            # PDF: the first lines of the word index after the transcript (may name the case)
 
 
 # --------------------------------------------------------------------- OCR
@@ -182,7 +185,15 @@ def _read_pdf(doc: pymupdf.Document, name: str) -> Ingested:
     if m:
         ing.first_page_no = int(m.group(1))
     try:  # every page: who wrote it, and where the transcript ends (the word index after it isn't counted)
-        ing.marks = scan_pdf(doc)
+        facts = read_pages(doc)
+        ing.count = count_pages(facts, doc.page_count)
+        ing.marks = counted_marks(facts, ing.count)
+        ing.index_head = index_heading(facts, ing.count)
+        if ing.count.warning or ing.count.note:
+            # (numbers only: no case, no file). A PDF without line numbers is seldom a transcript (a scanned
+            # page sheet, an invoice): its count is only used if it turns out to be one, so no warning
+            loud = log.warning if "lines" in ing.count.readings else log.info
+            loud("page count: %s", ing.count.warning or ing.count.note)
     except Exception as e:  # the run sheet then has one row for the whole transcript
         log.warning("could not read the pages' initials: %s", describe(e))
     return ing

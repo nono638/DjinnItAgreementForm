@@ -276,7 +276,9 @@ def test_a_scan_gets_one_row(tmp_path, s):
     job = job_of(transcript(tmp_path / "Transcript 6-3-2026 Roe v Poe.pdf"), s)
     job.docs[0].ing.marks = []  # as for a scanned transcript: no text to find the initials in
     rows = job.runsheet_opts(s).rows
-    assert len(rows) == 1 and rows[0].pages == 11 and rows[0].note == "reporter's initials not found"
+    # the row has the pages the invoice bills: the transcript's own, the word index on the 11th page left out
+    assert len(rows) == 1 and rows[0].pages == job.transcript_pages() == 10
+    assert rows[0].note == "reporter's initials not found"
 
 
 def test_open_in_excel(tmp_path, s, monkeypatch):

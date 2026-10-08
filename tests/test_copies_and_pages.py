@@ -244,7 +244,7 @@ def test_a_past_job_with_a_document_gone_counts_its_transcript_again(window, tmp
     assert cur.case.fields["est_pages"].source == SRC_PDF and not cur.pages_typed()
     assert cur.invoice_pages() == 10 and window.rows["est_pages"].state.source == SRC_PDF
     assert window.rows["copies"].text() == "2"
-    assert "Your pages: 10 of 30" in window.inv_pages_info.text()
+    assert "Your pages: 10 of the 30 total transcribed pages" in window.inv_pages_info.text()
 
 
 # ------------------------------------------------------------------ found in the 2.1 sweep

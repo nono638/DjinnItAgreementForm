@@ -1856,12 +1856,21 @@ value in a PDF viewer. Every file made is listed in
 <ol>
 <li><b>Add the order:</b> drop the documents on the drop zone (or click <b>Browse...</b>, or Ctrl+O).</li>
 <li><b>Check the fields.</b> Amber fields are guesses; a ▾ button lists the other candidates. The badge
-on each field says where its value came from (found in the document, counted from the transcript PDF, AI,
-your defaults, calculated or typed by you). <i>No. of copies</i> is the number of ordering parties (the
-firms ticked, or the invoice's <i>Parties</i> number when you set it).
+on each field says where its value came from (found in the document, counted from the transcript PDF, your
+records, AI, your defaults, calculated or typed by you). A case name marked <i>records</i> is the one an earlier
+job with the same index number has in your records: a suggestion to check, as the document gave none surer.
+<i>No. of copies</i> is the number of ordering parties (the firms ticked, or the invoice's <i>Parties</i> number
+when you set it).
 <i>Est. number of pages</i> is counted from the transcript PDF when there is one: every page, whoever wrote
-it. Each attorney's agreement shows the pages that attorney ordered, and on a transcript of several reporters
-your invoice bills only your own pages (the Invoice panel's <i>Billed</i> line says how many). A number you
+it, without the word index printed after the transcript (the line under the field says which: "Transcript
+pages 378–460 · excludes the 13 word-index pages after them"). The count is read four ways: the pages up to
+the word index, the pages with line numbers, the printed page numbers, and the index found from the end. When
+two of them agree on another count, or the index would take more than a quarter of the PDF's pages (rounded
+up, or 5 pages of a short one), the field turns amber and a warning under it says so: check the count (the
+other count is in the ▾ list). Each attorney's agreement
+shows the pages
+that attorney ordered, and on a transcript of several reporters your invoice bills only your own pages (the
+Invoice panel's <i>Billed</i> line: "Your pages: 45 of the 83 total transcribed pages"). A number you
 type in either stays; a typed page count is what your invoice bills, and the day's pages on every agreement
 (an excerpt counts its pages of it). Typing the transcript's own count (or your own pages of it) is no number of
 yours: to bill every page of a transcript of several reporters, choose <i>Whose pages…</i> → <i>The whole

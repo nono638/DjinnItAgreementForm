@@ -40,6 +40,7 @@ DELIVERY_TYPES = ["Regular", "Expedited", "Daily", "Immediate", "Other"]
 # Where a value came from, most to least trustworthy for display purposes.
 SRC_USER, SRC_REGEX, SRC_AI, SRC_DERIVED, SRC_DEFAULT = "you", "regex", "AI", "derived", "default"
 SRC_PDF = "PDF"  # counted from the transcript PDF itself (its pages), not read from its words
+SRC_RECORDS = "records"  # the user's records: an earlier job with the same index number (a suggestion)
 
 
 @dataclass
@@ -198,8 +199,9 @@ class FieldState:
 
     @property
     def needs_review(self) -> bool:
-        """A value worth a second look: the extractors weren't sure of it, or found rivals."""
-        return bool(self.value) and (self.confidence < 0.6 or len(self.alternatives) > 1)
+        """A value worth a second look: the extractors weren't sure of it, or found rivals, or it is only a
+        suggestion from the user's records."""
+        return bool(self.value) and (self.confidence < 0.6 or len(self.alternatives) > 1 or self.source == SRC_RECORDS)
 
 
 @dataclass

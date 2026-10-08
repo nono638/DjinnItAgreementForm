@@ -227,7 +227,7 @@ def test_the_invoice_panel_shows_my_pages_and_asks_whose(window, tmp_path, monke
     load(window, transcript_pdf(tmp_path / "Roe 6-3-2026.pdf", 6, initials=[PR, PR, DS, DS, DS, PR]))
     window.output_boxes["invoice"].setChecked(True)
     window._refresh_outputs()
-    assert window.inv_pages_info.text() == "Your pages: 3 of 6"
+    assert window.inv_pages_info.text() == "Your pages: 3 of the 6 total transcribed pages"
     assert window.inv_form.isRowVisible(window.inv_pages_row)
 
     shown = []
@@ -239,7 +239,7 @@ def test_the_invoice_panel_shows_my_pages_and_asks_whose(window, tmp_path, monke
     monkeypatch.setattr(PagesOwnerDialog, "exec", choose)
     assert window._whose_pages(window.cur)
     assert shown and window.cur.invoice_pages() == 6 and window.rows["est_pages"].text() == "6"
-    assert window.inv_pages_info.text() == "Chosen pages: 6 of 6"
+    assert window.inv_pages_info.text() == "Chosen pages: 6 of the 6 total transcribed pages"
 
 
 def test_a_held_transcript_with_a_long_name_does_not_widen_the_invoice_panel(window, tmp_path, qt):

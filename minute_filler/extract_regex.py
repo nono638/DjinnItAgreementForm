@@ -18,9 +18,9 @@ import unicodedata
 from datetime import date, timedelta
 
 from .ingest import Ingested
-from .models import Attorney, Extraction, SRC_PDF, SRC_REGEX, firm_key, join_names, to_int
+from .models import Attorney, Candidate, Extraction, SRC_PDF, SRC_REGEX, firm_key, join_names, to_int
 from .settings import Profile
-from .takes import body_pages
+from .takes import CREDENTIALS, body_pages
 
 # ------------------------------------------------------------------ helpers
 
@@ -57,6 +57,7 @@ MONTH_RE = r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|A
 KEEP_UPPER = {"LLP", "PLLC", "LLC", "PC", "P.C.", "L.L.P.", "P.L.L.C.", "L.L.C.", "P.A.", "N.A.", "NY", "N.Y.",
               "NYC", "USA", "II", "III", "IV", "DDS", "MD", "CPA", "LP", "NYCHA", "MTA", "MSK", "NYU", "CUNY"}
 SMALL_WORDS = {"and", "of", "the", "for", "in", "on", "at", "to", "a", "an", "v.", "vs.", "v", "vs", "de", "del"}
+_CREDENTIAL_FORMS = {c.upper(): c for c in CREDENTIALS}  # 'PH.D.' -> 'Ph.D.' (see smart_title)
 
 FIRM_RE = re.compile(
     r"(\bL\.?L\.?P\.?|\bP\.?L\.?L\.?C\.?|\bL\.?L\.?C\.?\b|\bP\.\s?C\.?|,\s*PC\b|\bP\.A\.|\bEsqs\.|\bAssociates\b|"
@@ -99,18 +100,37 @@ def is_firm_line(line: str) -> bool:
     return bool(FIRM_RE.search(line)) and not SURE_ADDRESS_RE.search(line)
 
 
+def _credential(core: str) -> str | None:
+    """A doctor's or nurse's letters as they are written ('DPM', 'PH.D.' -> 'Ph.D.', 'PH.D' -> 'Ph.D'), or None."""
+    up = core.upper()
+    if up in _CREDENTIAL_FORMS:
+        return _CREDENTIAL_FORMS[up]
+    dotted = _CREDENTIAL_FORMS.get(up + ".")
+    return dotted[:-1] if dotted else None
+
+
 def smart_title(s: str) -> str:
-    """Title-cases ALL-CAPS names while keeping initials, suffixes and small words sane."""
-    parts = re.split(r"(\s+|-|/)", s.strip())
-    out, first = [], True
-    for w in parts:
+    """Title-cases ALL-CAPS names while keeping initials, suffixes and small words sane. The letters after a
+    name's comma keep their own case ('SAM POE, DPM' -> 'Sam Poe, DPM', 'PAT ROE, PH.D.' -> 'Pat Roe, Ph.D.'), but
+    only where they end the name (the last word, or another comma or "and" after them): 'DO' anywhere else is a
+    word, and 'ROE v. NGUYEN, DO THI MAI' a name."""
+    parts = re.split(r"(\s+|-(?!C\b)|/)", s.strip())  # ("PA-C", "FNP-C" are one word)
+    words = [i for i, w in enumerate(parts) if w and not re.fullmatch(r"\s+|-|/", w)]
+    nxt = {i: parts[j] for i, j in zip(words, words[1:])}
+    out, first, after_comma = [], True, False
+    for i, w in enumerate(parts):
         if not w or re.fullmatch(r"\s+|-|/", w):
             out.append(w)
             continue
         core = w.strip(",;:()")
         pre, post = w[: w.find(core)] if core else "", w[w.find(core) + len(core):] if core else ""
         up = core.upper()
-        if up in KEEP_UPPER:
+        ends = i not in nxt or w.endswith(",") or nxt[i].lower() in ("and", "&", "et")
+        cred = _credential(core) if after_comma and not first and ends else None
+        after_comma = w.endswith(",")
+        if cred:
+            new = cred
+        elif up in KEEP_UPPER:
             new = up
         elif re.fullmatch(r"(?:[A-Z]\.){1,4}[A-Z]?\.?", core):  # initials like V.M. or N.
             new = core
@@ -442,7 +462,10 @@ class RegexExtractor:
         self._court_county(head, text, ex)
         self._part(head, text, ex)
         self._judge(head, text, ex)
-        self._case_name(text, ex)
+        count = getattr(ing, "count", None)
+        # a short transcript's word index is among the first pages: its "v." lines are no caption
+        body = "\f".join(text.split("\f")[:count.pages]) if count is not None and count.index_pages else text
+        self._case_name(body, ex, getattr(ing, "index_head", ""))
         self._dates(text, head, ex)
         self._proc_types(head, text, ex)
         self._order_terms(text, ex)
@@ -620,30 +643,102 @@ class RegexExtractor:
                     ex.add("judge", val, SRC_REGEX, conf if scope_i == 0 else conf - 0.1)
 
     # ----- case name
-    def _case_name(self, text: str, ex: Extraction) -> None:
-        """Case name from a 'Title:', 'Caption:' or 'Re:' line, 'Matter of ...', a court caption, or
-        'X v. Y' anywhere in the text. Lowercase 'smith v jones' is only trusted, weakly, in e-mails.
+    def _case_name(self, text: str, ex: Extraction, index_head: str = "") -> None:
+        """Case name, read several ways: a 'Title:', 'Caption:' or 'Re:' line, 'Matter of ...', the court
+        caption, the heading of the word index printed after a transcript (index_head, see takes.index_heading),
+        and 'X v. Y' anywhere in the text. Lowercase 'smith v jones' is only trusted, weakly, in e-mails.
         What a subject line adds after the caption is cut off, as _inline_case cuts it: 'Re: Jane Roe v. Sam
         Poe, Index No. 712345/2021, Part 12' -> 'Jane Roe v. Sam Poe'.
+        The readings are then reconciled: a name that two of the first four find (the label line, Matter of,
+        the caption, the index heading: each reads another part of the document) is surer, +0.1. A name found
+        only in the running text doesn't count for that, as it may be the same line read twice.
         """
+        readings: list[tuple[str, Extraction]] = []
+
+        def reading(name: str) -> Extraction:
+            r = Extraction()
+            readings.append((name, r))
+            return r
+        label = reading("label")
+        labelled: list[tuple[int, int]] = []  # the label lines: a 'Matter of' on one is the label's reading
         for m in re.finditer(r"(?im)^\s*(?:title|case(?:\s+name)?|caption|re)\s*:\s*(.+)$", text):
+            labelled.append(m.span())
             val = re.split(r"(?i)\s*(?:,|\s-)\s*(?=(?:index|part|judge|justice|minutes|transcripts?|dated|"
                            r"before|on\s+\d)\b|ind\.)", m.group(1).strip())[0].strip(" ,-")
             if re.search(r"\sv\.?s?\.?\s|\bmatter of\b|\bagainst\b", val, re.I):
-                ex.add("case_name", self._norm_case(val), SRC_REGEX, 0.9)
+                label.add("case_name", self._norm_case(val), SRC_REGEX, 0.9)
             else:
-                self._inline_case(val, ex, 0.75)
-        for m in re.finditer(r"(?i)\b(?:IN\s+THE\s+)?MATTER\s+OF\s*(?:THE\s+)?:?\s*([^\n,]+)", text):
+                self._inline_case(val, label, 0.75)
+        matter = reading("matter")
+        # (the party starts with a capital: testimony's "as a matter of law" is no case)
+        for m in re.finditer(r"(?i:\b(?:IN\s+THE\s+)?MATTER\s+OF\s*(?:THE\s+)?:?)\s*"
+                             r"(?!(?i:law|fact|course|record|right|time|principle)\b)([A-Z][^\n,]*)", text):
+            if any(start <= m.start() < end for start, end in labelled):
+                continue
             party = m.group(1).strip(" ,.:")
             if party and len(party) < 90:
-                ex.add("case_name", "Matter of " + self.tc(party), SRC_REGEX, 0.85)
-        self._caption(text, ex)
-        self._inline_case(text, ex, 0.6)
+                matter.add("case_name", "Matter of " + self.tc(party), SRC_REGEX, 0.85)
+        self._caption(text, reading("caption"))
+        self._index_heading(index_head, reading("index heading"))
+        running = reading("text")
+        self._inline_case(text, running, 0.6)
         if self.kind in ("email", "text"):  # lowercase "smith v jones"
             for m in re.finditer(r"\b([a-z][\w.'&-]+)\s+(?:v|vs)\.?\s+([a-z][\w.'&-]+)\b", text, re.I):
                 left, right = m.group(1), m.group(2)
                 if left.lower() not in ("re", "the", "for", "of", "in", "minutes", "transcript"):
-                    ex.add("case_name", f"{smart_title(left.upper())} v. {smart_title(right.upper())}", SRC_REGEX, 0.4)
+                    running.add("case_name", f"{smart_title(left.upper())} v. {smart_title(right.upper())}",
+                                SRC_REGEX, 0.4)
+        found: dict[str, list[tuple[str, Candidate]]] = {}
+        for name, r in readings:
+            for c in r.fields.get("case_name", []):
+                found.setdefault(re.sub(r"[^a-z0-9]", "", c.value.lower()), []).append((name, c))
+        for hits in found.values():
+            best = max((c for _, c in hits), key=lambda c: (c.confidence, len(c.value)))
+            sure = len({name for name, _ in hits if name != "text"}) >= 2
+            ex.add("case_name", best.value, SRC_REGEX, min(0.99, best.confidence + 0.1) if sure else best.confidence,
+                   best.note)
+
+    def _index_heading(self, head: str, ex: Extraction) -> None:
+        """The case as the word index's heading names it, at 0.75: 'JANE ROE v.' over 'SAM POE, DPM' (the 'v.'
+        ending the first line, or alone between them, or '-against-'), or 'JANE ROE v. SAM POE' on one line (what
+        stands beside it after a '|' or a wide gap left out, on either side: 'Roe v. Poe | Word Index', 'WORD
+        INDEX      ROE v. POE'). A date is no party."""
+        vs = r"(?:v\.?|vs\.?|-?\s*against\s*-?)"
+        beside = r"\s+[|•·]\s+|\s{2,}"
+
+        def case_part(line: str) -> str:
+            """The part of a line, between '|'s or wide gaps, that has the 'v.' ('WORD INDEX    JANE ROE v.'),
+            else its first part."""
+            parts = [p for p in re.split(beside, line.strip()) if p.strip()]
+            return next((p for p in parts if re.search(rf"(?:^|[\s,]){vs}(?:\s|$)", p, re.I)), parts[0])
+        lines = [case_part(l) for l in self._clean(head).splitlines() if l.strip()]
+        for i, line in enumerate(lines):
+            left = right = ""
+            if m := re.fullmatch(rf"(.+?)[\s,]+{vs}", line, re.I):
+                left, right = m.group(1), lines[i + 1] if i + 1 < len(lines) else ""
+            elif re.fullmatch(vs, line, re.I) and 0 < i < len(lines) - 1:
+                left, right = lines[i - 1], lines[i + 1]
+            elif m := re.fullmatch(rf"(.+?)\s+{vs}\s+(.+)", line, re.I):
+                left, right = m.group(1), m.group(2)
+            left = re.split(beside, left)[-1].strip(" ,")
+            right = re.split(beside, right)[0].strip(" ,")
+            if left and right and all(len(s.split()) <= 12 and s[:1].isalpha() and not find_dates(s)
+                                      for s in (left, right)):
+                ex.add("case_name", f"{self._tidy_side(left)} v. {self._tidy_side(right)}", SRC_REGEX, 0.75,
+                       "the word index's heading")
+                return
+
+    def _tidy_side(self, s: str) -> str:
+        """tc, and a side in capitals but for 'et al.' and the like too: 'SAM POE, DPM, et al.' -> 'Sam Poe, DPM, et
+        al.' (smart_title of the whole side, so the letters after the comma and the small words keep their case).
+        A side written in mixed case otherwise stays as written ('ABC Holding Corp.', 'Sam Poe, DO')."""
+        if not self.title_case or is_mostly_upper(s):
+            return self.tc(s)
+        words = s.split()
+        if not all(w.isupper() or w.strip(",.").lower() in ("et", "al", "ano", "and", "&") for w in words):
+            return " ".join(words)
+        titled = smart_title(" ".join(words)).split()
+        return " ".join(t if len(w) > 1 and w.isupper() else w for w, t in zip(words, titled))
 
     def _norm_case(self, s: str) -> str:
         """normalize_caption, tidying each side with tc."""
@@ -669,19 +764,23 @@ class RegexExtractor:
     def _caption(self, text: str, ex: Extraction) -> None:
         """Reads the court caption: the lines above and below a line that says 'against' or 'v.'.
 
-        Takes up to eight lines each way. Going up it stops at the court heading or an X rule line and
-        skips party roles ('Plaintiffs,'); going down it stops at those and at the first party role.
-        Index numbers and the like are skipped. Adds the full caption (0.85) and a short form with
-        'et al.' (0.55).
+        That line may carry the caption's right-hand column ('-against-        Index No. 712345/2021'), as
+        every other line of it may. Takes up to eight lines each way. Going up it stops at the court heading
+        or an X rule line and skips party roles ('Plaintiffs,'); going down it stops at those and at the first
+        party role. Index numbers, a line number left on a line of its own and the like are skipped. Adds the
+        full caption (0.85) and a short form with 'et al.' (0.55).
         """
         lines = text.splitlines()
         role = re.compile(r"^(?:[-\s]*)(plaintiffs?|defendants?|petitioners?|respondents?|claimants?|appellants?|"
                           r"appellees?|third[- ]party\s+\w+)[,.;:\s-]*(?:and\s*)?$", re.I)
         noise = re.compile(r"(?i)^(index\s*(no\.?|number|#)?\s*:?|\d{3,7}\s*[-/]\s*\d{2,4}|cal\.?\s*no\..*|"
-                           r"attorneys?\.?|jury\s+trial|bench\s+trial|trial|hearing|motion|x|-+)$")
+                           r"attorneys?\.?|jury\s+trial|bench\s+trial|trial|hearing|motion|x|-+|\d{1,3})$")
         stopper = re.compile(r"(?i)(\bcourt\b|county\s+of|\bpart\s+\d|^-{5,}|x\s*$|cal\.\s*no|supreme|state of new york)")
+        # (with one space only, a column to the right is known by its label: '-against- Index No. 712345/2021')
+        against = re.compile(r"\s*-?\s*(?:against|vs?\.?)\s*-?\s*"
+                             r"(?:\s(?:index\b|ind\.|no\.|case\b|docket\b|cal\b|calendar\b|#).*)?", re.I)
         for i, line in enumerate(lines):
-            if not re.fullmatch(r"\s*-?\s*(against|vs?\.?)\s*-?\s*", line, re.I):
+            if not against.fullmatch(self._caption_side(line)):
                 continue
             left, j = [], i - 1
             while j >= 0 and len(left) < 8:
@@ -867,18 +966,25 @@ class RegexExtractor:
         ('about 1,250 pages' -> 1250). A range of pages in an e-mail ('pages 10-25', 'pp. 10 to 25') counts
         them, 16, at a lower confidence; a single page ('p. 10') is not a count. 'expect 30-40 pages' is an
         estimate, the larger number: 40.
-        A transcript's count leaves out the word index printed after it (see takes.scan_pdf). It is
-        counted, not read from the words, so its source is SRC_PDF (the "PDF" badge), not SRC_REGEX.
+        A transcript's count leaves out the word index printed after it, and is read four ways and reconciled
+        (takes.count_pages): when the readings disagree or the index looks too long, its confidence is lower and
+        the field is marked for review (batch._all_pages offers the other counts). It is counted, not read from
+        the words, so its source is SRC_PDF (the "PDF" badge), not SRC_REGEX.
         """
         if ing.kind == "pdf" and self.is_transcript and ing.page_count:
-            pages = body_pages(ing.marks, ing.page_count)  # without the word index printed after it
+            count = getattr(ing, "count", None)
+            pages = body_pages(ing.marks, ing.page_count, count)  # without the word index printed after it
             note = ""
             if ing.first_page_no and ing.first_page_no > 1:
                 note = f"transcript pages {ing.first_page_no}-{ing.first_page_no + pages - 1}"
-            if pages < ing.page_count:
+            index = count.index_pages if count is not None else ing.page_count - pages
+            if index > 0:
                 note = (note or f"{pages} transcript pages") + \
-                    f", not counting {ing.page_count - pages} page(s) after the transcript (word index)"
-            ex.add("est_pages", str(pages), SRC_PDF, 0.95, note or "page count of the transcript")
+                    f", not counting {index} page(s) after the transcript (word index)"
+            if count is not None and (count.warning or count.note):
+                note = count.warning or count.note
+            ex.add("est_pages", str(pages), SRC_PDF, count.confidence if count else 0.95,
+                   note or "page count of the transcript")
         if self.kind not in ("email", "text"):
             return
         num, dash = r"(\d{1,3}(?:,\d{3})+|\d{1,5})", r"\s*(?:-|to|through|thru)\s*"

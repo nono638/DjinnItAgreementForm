@@ -48,10 +48,11 @@ from .invoice import (ORDERED_BY_NOBODY, DayOrder, InvoiceOpts, Portion, day_rep
                       reporters_text)
 from .ingest import IMAGE_EXT, Ingested, ingest_file
 from .log import error as log_error, log
-from .merge import merge, refresh_copies, refresh_delivery_date, refresh_rate
+from .merge import merge, refresh_copies, refresh_delivery_date, refresh_rate, same_value
 from .models import (Attorney, Candidate, CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_DERIVED, SRC_PDF,
-                     SRC_REGEX, SRC_USER, to_int)
+                     SRC_RECORDS, SRC_REGEX, SRC_USER, to_int)
 from .rates import speed_key
+from .records import recorded_cases
 from .runsheet import NO_RUNSHEET, RunSheetOpts, matches, name_rows, read_info, rows_from, transcript_pages
 from .takes import my_initials, page_owners
 from .settings import OUTPUTS, Settings
@@ -98,13 +99,17 @@ def _sides(name: str) -> tuple:
     return tuple(sides) if all(sides) else ()
 
 
+def index_key(value: str) -> str:
+    """An index number as jobs compare it: "712345/21" is "712345/2021" (as on the run sheet, see
+    runsheet.index_numbers); "" when it has no number."""
+    nums = re.findall(r"\d+", value or "")
+    return (norm_index(*nums) if len(nums) == 2 else None) or "/".join(str(int(n)) for n in nums)
+
+
 def ident(case: CaseInfo) -> Ident:
     """What case and days these fields are about: the index number, the dates and the caption words."""
-    nums = re.findall(r"\d+", case.get("index_no"))
-    # "712345/21" is "712345/2021" (as on the run sheet, see runsheet.index_numbers)
-    index = (norm_index(*nums) if len(nums) == 2 else None) or "/".join(str(int(n)) for n in nums)
     dates = frozenset(d for _, _, d in find_dates(case.get("dates")))
-    return Ident(index, dates, _sides(case.get("case_name")))
+    return Ident(index_key(case.get("index_no")), dates, _sides(case.get("case_name")))
 
 
 def _same_word(a: str, b: str) -> bool:
@@ -145,10 +150,11 @@ class Doc:
     ai: Extraction | None = None
     path: str = ""
     ident: Ident = field(default_factory=Ident)
+    records: Extraction | None = None  # the case names the user's records give its index number (a suggestion)
 
     def extractions(self) -> list[Extraction]:
-        """The regex extraction, then the AI model's when there is one (for merge)."""
-        return [self.regex] + ([self.ai] if self.ai is not None else [])
+        """The regex extraction, the records' suggestion and the AI model's, those there are (for merge)."""
+        return [x for x in (self.regex, self.records, self.ai) if x is not None]
 
     def key(self) -> str:
         """The document as Job.page_basis and Job.front_owner name it: its path (its name when pasted)."""
@@ -317,6 +323,49 @@ class Job:
         """Pages of the transcript PDFs among the inputs, without the word index printed after them; 0 when
         there is none (then no run sheet can be made, nor an invoice unless the pages are typed in)."""
         return sum(transcript_pages(d.ing) for d in self.transcripts())
+
+    def count_confidence(self) -> float:
+        """How sure the readings of the transcripts' pages are (takes.count_pages): the least sure one's, 0.95
+        when there is nothing to say."""
+        reads = [d.ing.count for d in self.transcripts() if getattr(d.ing, "count", None) is not None]
+        return min([c.confidence for c in reads] or [0.95])
+
+    def pages_help(self) -> tuple[str, str]:
+        """What Est. number of pages counts, for the line under it in the window, and the warnings of the
+        transcripts whose readings of their pages disagree (takes.count_pages): ("Transcript pages 378–460 ·
+        excludes the 13 word-index pages after them", ""). A count taken from another reading than the scan says
+        so on a second line. ("", "") without a transcript PDF."""
+        docs = self.transcripts()
+        if not docs:
+            return "", ""
+        reads = [(d, transcript_pages(d.ing), getattr(d.ing, "count", None)) for d in docs]
+        total = sum(n for _, n, _ in reads)
+        index = sum(c.index_pages if c else max(0, d.ing.page_count - n) for d, n, c in reads)
+        many = len(docs) > 1
+        name = (lambda d: f"{d.ing.name}: " if many else "")
+        warns = [name(d) + c.warning.removeprefix("⚠ ") for d, _, c in reads if c and c.warning]
+        warning = "⚠ " + "\n".join(warns) if warns else ""
+        if all(c and c.how == "pdf" for _, _, c in reads):  # no reading could tell: every page is counted
+            if self.pages_typed():
+                return f"Typed by you · the PDF{'s have' if many else ' has'} {total} pages", warning
+            why = "" if warns else " (no text to find a word index in)"
+            return f"{total} pages: every page of the PDF{'s' if many else ''}{why}", warning
+        if index:
+            gone = (f"excludes the {index} word-index page{'s' if index > 1 else ''} "
+                    f"after {'them' if index > 1 else 'it'}")
+        else:
+            gone = "no word index"
+        if self.pages_typed():
+            line = (f"Typed by you · the transcript{'s have' if many else ' has'} {total} pages, "
+                    f"{'index excluded' if index else 'no word index'}")
+        elif many:
+            line = f"{len(docs)} transcripts, {' + '.join(str(n) for _, n, _ in reads)} pages · {gone}"
+        else:
+            c = reads[0][2]
+            span = f"Transcript pages {c.first}–{c.last}" if c and c.first is not None else f"{total} transcript pages"
+            line = f"{span} · {gone}" if index else f"{span} ({gone})"
+        notes = [name(d) + c.note for d, _, c in reads if c and c.note and not c.warning]
+        return "\n".join([line] + notes), warning
 
     def runsheet_opts(self, s: Settings) -> RunSheetOpts:
         """The takes of every transcript of the job, for the run sheet. The pages before the first initials go
@@ -1027,8 +1076,41 @@ def one_row_per_firm(job: Job) -> None:
 
 
 def make_doc(ing: Ingested, regex: Extraction, s: Settings, path: str = "") -> Doc:
-    """A Doc, with what it says about its case worked out from its regex fields."""
-    return Doc(ing, regex, path=path, ident=ident(merge([regex], s)))
+    """A Doc, with what it says about its case worked out from its regex fields, and the case names the user's
+    records give its index number (records_extraction)."""
+    doc_ident = ident(merge([regex], s))
+    return Doc(ing, regex, path=path, ident=doc_ident, records=records_extraction(doc_ident.index, regex))
+
+
+RECORDS_CONF = 0.55  # a case name from the records alone: offered, marked for review, below any read from the document
+
+
+def records_extraction(index: str, regex: Extraction) -> Extraction | None:
+    """The case names of earlier jobs with this index number in the user's records (records.recorded_cases), as
+    a suggestion (SRC_RECORDS): many days of a trial share one case, and the first day's name may have been put
+    right by hand. A recorded name that is the same case as one the document gives itself ('Roe v. Poe' and
+    'Jane Roe v. Sam Poe', see _same_caption) is added in the document's own words, so that merge.pool counts
+    the two as agreeing (+0.1, once per job), and in its own words too when they differ; any other at
+    RECORDS_CONF (offered, and marked for review whatever its confidence), below a name the document's caption,
+    word index or a "Re:" line gives (0.75 and up), above a guess from a lowercase "roe v poe" or a file name.
+    None when the index number is not a number and a year, or the records have none for it."""
+    if not re.fullmatch(r"\d+/\d{4}", index or ""):
+        return None
+    own = [c.value for c in regex.fields.get("case_name", [])]
+    out = Extraction()
+    for number, name in recorded_cases(index.split("/")[0]):
+        if index_key(number) != index:
+            continue
+        twin = next((v for v in own if _same_caption(_sides(v), _sides(name))), None)
+        if twin:
+            out.add("case_name", twin, SRC_RECORDS, RECORDS_CONF, "your records: same index number")
+            if same_value("case_name", twin, name):
+                continue
+            # the recorded wording too, as put right by hand once, maybe ('Jane Roe v. Sam Poe, DPM' for the
+            # e-mail's 'Roe v. Poe'): offered, not above the document's
+        if len(out.fields.get("case_name", [])) < 3:
+            out.add("case_name", " ".join(name.split()), SRC_RECORDS, RECORDS_CONF, "your records: same index number")
+    return out if out.fields else None
 
 
 def case_reporters(jobs: list[Job]) -> set[str]:
@@ -1164,17 +1246,24 @@ def _all_pages(case: CaseInfo, job: Job) -> None:
     (it is then what the user's invoice bills, and the day's pages on the agreements: Job.pages_typed),
     unless it is the pages the invoice bills anyway (Job.own_pages) or the count itself: then it is the count
     again (the user's own pages billed). Such a "typed" count came from a record of an older version opened again while one of its
-    documents had moved, from the suggestion then shown picked from the menu, or from the count typed again."""
+    documents had moved, from the suggestion then shown picked from the menu, or from the count typed again.
+    A transcript whose readings of its pages disagree lowers the confidence (takes.count_pages: 0.8 when the
+    count came from another reading than the scan, 0.55 with a warning, marked for review), and with a warning
+    the totals its other counts would give are offered in the ▾ list (the scan's count that the others put
+    right is no rival)."""
     counts = [transcript_pages(d.ing) for d in job.transcripts()]
     if not counts:
         return
     fs = case.fields["est_pages"]
-    value = str(sum(counts))
-    own = str(job.own_pages() or sum(counts))
+    total = sum(counts)
+    value = str(total)
+    own = str(job.own_pages() or total)
     if fs.source == SRC_USER and not job.is_the_count(fs.value):
         return  # typed by the user: theirs, and what their invoice bills (Job.pages_typed)
-    case.fields["est_pages"] = FieldState(value, SRC_PDF, 0.95, list(dict.fromkeys(
-        [value] + [a for a in fs.alternatives if a and a != own])))
+    reads = [d.ing.count for d in job.transcripts() if getattr(d.ing, "count", None) is not None]
+    rivals = [str(total - c.pages + n) for c in reads if c.warning for n in c.others]
+    case.fields["est_pages"] = FieldState(value, SRC_PDF, job.count_confidence(), list(dict.fromkeys(
+        [value] + rivals + [a for a in fs.alternatives if a and a != own])))
 
 
 def group(docs: list[Doc], s: Settings, jobs: list[Job] | None = None) -> list[Job]:

@@ -44,6 +44,7 @@ QLabel#kpiValue[tone="warn"] { color: {review}; }
 QLabel#problem { color: {review}; font-weight: 600; }
 QLabel#subhead { font-weight: 700; color: {card_title}; padding-top: 6px; padding-bottom: 2px; border-bottom: 1px solid {border}; }
 QLabel#speedAsk { background: {warn_bg}; color: {warn}; border-radius: 6px; padding: 4px 8px; font-weight: 600; }
+QLabel#pagesWarn { background: {warn_bg}; color: {warn}; border-radius: 6px; padding: 3px 8px; font-weight: 600; }
 QLabel#payTable { background: {drop_bg}; border: 1px solid {border}; border-radius: 8px; padding: 6px 10px; }
 
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
@@ -100,6 +101,7 @@ QLabel#badge[src="PDF"] { color: {pdf}; }
 QLabel#badge[src="AI"] { color: {ai}; }
 QLabel#badge[src="default"] { color: {default}; }
 QLabel#badge[src="derived"] { color: {derived}; }
+QLabel#badge[src="records"] { color: {records}; }
 QLabel#badge[src="you"] { color: {you}; }
 QLabel#badge[src=""] { color: transparent; border: 1px solid transparent; }
 

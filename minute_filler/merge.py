@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from .dates import next_weekday, us_date
 from .extract_regex import dedupe_attorneys, find_dates, norm_index
 from .models import (CaseInfo, Candidate, Extraction, FIELD_KEYS, FieldState, SRC_DEFAULT, SRC_DERIVED,
-                     SRC_USER, SRC_AI)
+                     SRC_RECORDS, SRC_USER, SRC_AI)
 from .rates import speed_key
 from .settings import Settings
 
@@ -47,24 +47,32 @@ def _index_key(v: str) -> str | None:
     return norm_index(m.group(1), m.group(2)) if m else None
 
 
+_CREDIT = {SRC_AI: 0, SRC_RECORDS: 1}  # whose a value two sources agree on is: the document's words, then the records
+
+
 def pool(extractions: list[Extraction]) -> dict[str, list[Candidate]]:
     """All candidates per field, best first; one value written two ways (same_value) is one candidate, as
-    first written. When the rules and the AI agree on a value its confidence goes up, and it is credited to
-    the rules."""
+    first written. When two sources agree on a value (the rules, the AI, the user's records) its confidence goes
+    up, and it is credited to the document's words before the records, and to the records before the AI. The
+    records speak once for a value however many of the job's documents asked them (each Doc has its own)."""
     out: dict[str, list[Candidate]] = {}
+    by_records: set[int] = set()  # the candidates the records have already agreed with
     for ex in extractions:
         for key, cands in ex.fields.items():
             lst = out.setdefault(key, [])
             for c in cands:
                 twin = next((o for o in lst if same_value(key, o.value, c.value)), None)
                 if twin is None:
-                    lst.append(Candidate(c.value, c.source, c.confidence, c.note))
-                elif twin.source != c.source:
+                    twin = Candidate(c.value, c.source, c.confidence, c.note)
+                    lst.append(twin)
+                elif twin.source != c.source and not (c.source == SRC_RECORDS and id(twin) in by_records):
                     twin.confidence = min(0.99, max(twin.confidence, c.confidence) + 0.1)
-                    if twin.source == SRC_AI:
+                    if _CREDIT.get(c.source, 2) > _CREDIT.get(twin.source, 2):
                         twin.source = c.source
                 else:
                     twin.confidence = max(twin.confidence, c.confidence)
+                if c.source == SRC_RECORDS:
+                    by_records.add(id(twin))
     for lst in out.values():
         # highest confidence first; ties go to the longer (more complete) value
         lst.sort(key=lambda c: (-c.confidence, -len(c.value)))

@@ -78,3 +78,58 @@ def transcript_pdf(path: Path, pages: int = 30, date: str = "", initials: list[s
             page.insert_text((520, page.rect.height - 40), initials[i], fontsize=10)
     doc.save(path)
     return path
+
+
+# A title page whose "-against-" line carries the caption's right-hand column, and a defendant with a
+# podiatrist's letters after the name (fictional)
+CAPTION_DPM = """ 1  SUPREME COURT OF THE STATE OF NEW YORK
+    COUNTY OF QUEENS :  CIVIL TERM :  PART 14
+ 2  ------------------------------------------X
+    JANE ROE,
+ 3
+                             Plaintiff,
+ 4
+                -against-               Index No. 712345/2021
+ 5
+    SAM POE, DPM,                      JURY TRIAL
+ 6
+                             Defendant.
+ 7  ------------------------------------------X
+ 8                           June 3, 2026"""
+INDEX_HEADING = "JANE ROE v.\nSAM POE, DPM\nJune 3, 2026"
+
+
+def page_numbered_transcript(path: Path, pages: int = 20, first: int = 378, initials: list[str] | None = None,
+                             index_pages: int = 0, heading: str = INDEX_HEADING, lined: bool = True,
+                             numbered: bool = True, index_like: tuple[int, ...] = (), caption: str = CAPTION_DPM
+                             ) -> Path:
+    """A fictional transcript as a reporter's software prints it: the caption on its first page, each page's
+    number at the top (from `first`), 25 numbered lines (lined) and the initials at the foot ("pr" on every page
+    unless `initials` says), then `index_pages` pages of word index under `heading`. index_like: the places
+    (0-based) of transcript pages printed without line numbers or initials and full of page:line references
+    (an exhibit list, say), which look like the index to the first reading of the pages."""
+    doc = pymupdf.open()
+    refs = "\n".join(f"word{k} ({k % 3 + 1})\n    {first + k % max(1, pages)}:{k % 25 + 1};"
+                     f"{first + (k * 7) % max(1, pages)}:{(k * 3) % 25 + 1}" for k in range(18))
+    for i in range(pages):
+        page = doc.new_page()
+        if numbered:
+            page.insert_text((300, 40), str(first + i), fontsize=10)
+        if i in index_like:
+            page.insert_text((72, 80), "EXHIBITS\n" + refs, fontsize=9)
+            continue
+        if i == 0:
+            body = caption
+        else:
+            body = "\n".join(f"{n:2}  {'Q.  And then?' if n % 2 else 'A.  Yes.'}" for n in range(1, 26))
+        if not lined:
+            body = "\n".join(line[4:] if line[:2].strip().isdigit() else line for line in body.splitlines())
+        page.insert_text((60, 80), body, fontsize=9)
+        mark = (initials[i] if initials else "pr")
+        if mark:
+            page.insert_text((520, page.rect.height - 40), mark, fontsize=10)
+    for i in range(index_pages):
+        page = doc.new_page()
+        page.insert_text((72, 60), (heading + "\n" if heading else "") + refs, fontsize=9)
+    doc.save(path)
+    return path

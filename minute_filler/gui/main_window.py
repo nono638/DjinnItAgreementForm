@@ -58,7 +58,7 @@ from ..deliver import backup_folder, backup_records, generate, ledger_for
 from ..ingest import ingest_file, ingest_pil, ingest_text
 from ..merge import apply_defaults, apply_speed_rule, refresh_delivery_date, refresh_rate
 from ..models import (Attorney, CaseInfo, FIELD_LABELS, FieldState, PROC_TYPES, REQUIRED_KEYS, SRC_AI,
-                      SRC_DEFAULT, SRC_DERIVED, SRC_PDF, SRC_USER)
+                      SRC_DEFAULT, SRC_DERIVED, SRC_PDF, SRC_RECORDS, SRC_USER)
 from ..runsheet import SheetUnreadable, find_sheets, run_sheet_summary, runsheets_folder, transcript_pages
 from ..settings import OUTPUTS, Settings
 from .dialogs import ClarifyDialog, RunSheetDialog, SettingsDialog
@@ -90,6 +90,10 @@ NOBODY_DAY = "⚠ nobody ticked on this day: no invoice for the case until you t
 SPEEDS_TIP = ("The speeds the invoice offers, each at its own price (the attorney chooses one). One ticked:\n"
               "the invoice bills that speed alone. They are kept for the next job too.")
 EST_PAGES_TIP = ("Counted from the transcript PDF: every page, whoever wrote it (without the word index).\n"
+                 "It is read four ways (the pages up to the index, the line numbers, the printed page numbers,\n"
+                 "the index from the end); when two of them agree on another count, or the index would take\n"
+                 "more than a quarter of the PDF (rounded up; 5 pages of a short one), the field turns amber\n"
+                 "and a warning under it says so.\n"
                  "Each attorney's minute agreement shows the pages that attorney ordered (the whole day,\n"
                  "or its excerpt under Excerpts…); the MOFR the pages anyone ordered. Your invoice bills\n"
                  "only your own pages of them (Invoice panel: Billed).\n"
@@ -319,9 +323,11 @@ class FieldRow(QWidget):
         self.badge.setProperty("src", st.source if st.value else "")
         tip = {"regex": "Found in the document", "AI": "Suggested by the AI model - please check",
                "default": "Your default setting", "derived": "Calculated",
-               "PDF": "Counted from the transcript PDF (without the word index)", "you": "Entered by you"}
+               "PDF": "Counted from the transcript PDF, without the word index (the line under it says which pages)",
+               "records": "From your records: an earlier job with the same index number - please check",
+               "you": "Entered by you"}
         self.badge.setToolTip(tip.get(st.source, ""))
-        review = st.value and st.source != SRC_USER and (st.confidence < 0.6 or st.source == SRC_AI)
+        review = st.value and st.source != SRC_USER and (st.confidence < 0.6 or st.source in (SRC_AI, SRC_RECORDS))
         self.edit.setProperty("review", bool(review))
         self.edit.setProperty("missing", self.key in REQUIRED_KEYS and not st.value)
         others = [a for a in st.alternatives if a != st.value]
@@ -997,6 +1003,22 @@ class MainWindow(QMainWindow):
             row(fb, k)
         fb.labelForField(self.rows["est_pages"]).setToolTip(EST_PAGES_TIP)
         self.rows["est_pages"].edit.setToolTip(EST_PAGES_TIP)
+        # what the number counts ("Transcript pages 378–460 · excludes the 13 word-index pages after them"), and
+        # a warning when the PDF's readings of its pages disagree (Job.pages_help); hidden without a transcript
+        help_box = QVBoxLayout()
+        help_box.setSpacing(4)
+        self.pages_help = QLabel("")
+        self.pages_help.setObjectName("muted")
+        self.pages_help.setWordWrap(True)
+        self.pages_help.setToolTip(EST_PAGES_TIP)
+        help_box.addWidget(self.pages_help)
+        self.pages_warn = QLabel("")
+        self.pages_warn.setObjectName("pagesWarn")
+        self.pages_warn.setWordWrap(True)
+        help_box.addWidget(self.pages_warn)
+        fb.addRow("", help_box)
+        self.pages_help_row = help_box
+        self.order_form = fb
         row(fb, "delivery_date")
         # three buttons a row: six in one row would make the Order card too wide for a small screen
         quick = QGridLayout()
@@ -1244,12 +1266,15 @@ class MainWindow(QMainWindow):
         self.inv_pages_row.setSpacing(8)
         self.inv_pages_info = QLabel("")
         self.inv_pages_info.setObjectName("muted")
-        self.inv_pages_row.addWidget(self.inv_pages_info)
+        # "Your pages: 45 of the 83 total transcribed pages" wraps in the narrow panel, taking the width the
+        # button leaves (a stretch after the button would take half of it, and the lines past the second be cut)
+        self.inv_pages_info.setWordWrap(True)
+        self.inv_pages_info.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        self.inv_pages_row.addWidget(self.inv_pages_info, 1)
         self.inv_whose = QPushButton("Whose pages…")
         self.inv_whose.setToolTip(WHOSE_TIP)
         self.inv_whose.clicked.connect(lambda: self._whose_pages(self.cur))
-        self.inv_pages_row.addWidget(self.inv_whose)
-        self.inv_pages_row.addStretch(1)
+        self.inv_pages_row.addWidget(self.inv_whose, 0, Qt.AlignTop)
         inv.addRow("Billed:", self.inv_pages_row)
         inv.setRowVisible(self.inv_pages_row, False)  # until a transcript of several reporters is loaded
         self.inv_form = inv
@@ -1757,7 +1782,8 @@ class MainWindow(QMainWindow):
 
     def _maybe_ai(self, job: Job, docs: list):
         """Asks the model about documents added to a single job (batches use the rules only): pictures always,
-        e-mails and text when Settings say so, PDFs only while a required field is still blank. The questions
+        e-mails and text when Settings say so, PDFs only while a required field is still blank (or the case name
+        only a suggestion from the records). The questions
         are asked one at a time (ai_runner, on ai_pool). Each answer merges the job the document is in by then
         again (a later read may have merged its job into another), unless "New job" was clicked, the document
         was removed or the AI turned off meanwhile."""
@@ -1769,7 +1795,8 @@ class MainWindow(QMainWindow):
                 todo.append(d)
             elif d.ing.kind in ("email", "text") and self.s.ai_for_text:
                 todo.append(d)
-            elif d.ing.kind == "pdf" and job.case.missing_required():
+            elif d.ing.kind == "pdf" and (job.case.missing_required()
+                                          or job.case.fields["case_name"].source == SRC_RECORDS):
                 todo.append(d)
         if not todo:
             return
@@ -2072,7 +2099,7 @@ class MainWindow(QMainWindow):
         st = self.rows[key].state
         whole = self.cur.transcript_pages() if key == "est_pages" else 0
         if whole and st.source == SRC_USER and st.value.strip() == str(whole):
-            st = FieldState(str(whole), SRC_PDF, 0.95, st.alternatives)
+            st = FieldState(str(whole), SRC_PDF, self.cur.count_confidence(), st.alternatives)
             self.rows[key].set_state(st)
         self.case.fields[key] = st
         self._update_status()
@@ -2659,13 +2686,14 @@ class MainWindow(QMainWindow):
         if billing and (not self._ask_parties([job]) or job not in self.jobs):
             return
         case = job.case  # (Whose pages... or a read that ended meanwhile may have merged the job again)
-        # Ask about required fields that are blank, and fields with competing values (only the case name
-        # when neither the agreement nor the MOFR is made)
+        # Ask about required fields that are blank, fields with competing values, and a case name only the records
+        # suggest (only the case name when neither the agreement nor the MOFR is made)
         questions = []
         for key in REQUIRED_KEYS if {"agreement", "mofr"} & set(outputs) else ["case_name"]:
             fs = case.fields[key]
-            if not fs.value or (fs.source != SRC_USER and len([a for a in fs.alternatives if a != fs.value]) > 0
-                                and fs.confidence < 0.8):
+            if not fs.value or fs.source == SRC_RECORDS or (
+                    fs.source != SRC_USER and len([a for a in fs.alternatives if a != fs.value]) > 0
+                    and fs.confidence < 0.8):
                 questions.append((key, fs.value, fs.alternatives))
         real = [a for a in case.attorneys if not a.is_placeholder() and (a.name or a.firm)]
         # who ordered: only agreements and invoices are addressed to an attorney
@@ -3428,6 +3456,7 @@ class MainWindow(QMainWindow):
         self.rs_info.setText("" if job.transcript_pages() or not job.docs else
                              "⚠ no transcript PDF: no run sheet for this job")
         self.rs_info.setVisible(bool(self.rs_info.text()))
+        self._show_pages_help(job)
         self._show_form_speed()
         self._show_who_pays(*self._show_invoice_prices())  # (the invoices priced once for both)
         self._show_orders()
@@ -3566,8 +3595,20 @@ class MainWindow(QMainWindow):
             return
         dlg.exec()
 
+    def _show_pages_help(self, job: Job) -> None:
+        """The lines under Est. number of pages: what the number counts, and a warning when the transcript PDF's
+        readings of its pages disagree (Job.pages_help); the row is hidden for a job without a transcript."""
+        line, warning = job.pages_help()
+        # (the row first: showing it shows every label in it)
+        self.order_form.setRowVisible(self.pages_help_row, bool(line or warning))
+        self.pages_help.setText(line)
+        self.pages_help.setVisible(bool(line))
+        self.pages_warn.setText(warning)
+        self.pages_warn.setVisible(bool(warning))
+
     def _show_whose_pages(self, job: Job) -> str:
-        """The Invoice panel's Billed row, shown for a transcript of several reporters: "Your pages: 65 of 153",
+        """The Invoice panel's Billed row, shown for a transcript of several reporters: "Your pages: 65 of the 153 total
+        transcribed pages" (the whole transcripts' own pages, the word index left out),
         and the Whose pages... button. Returns why the invoice is held until Whose pages... says ("" when it
         isn't)."""
         shared = job.shared_transcripts()
@@ -3580,9 +3621,9 @@ class MainWindow(QMainWindow):
         if held:
             text = "Whose pages?"
         elif job.pages_typed():
-            text = f"the Pages field ({job.invoice_pages()}) of {whole}"
+            text = f"the Pages field ({job.invoice_pages()}) of the {whole} total transcribed pages"
         else:
-            text = f"{'Your' if mine else 'Chosen'} pages: {job.invoice_pages()} of {whole}"
+            text = f"{'Your' if mine else 'Chosen'} pages: {job.invoice_pages()} of the {whole} total transcribed pages"
         others = [r for r in job.bill_reporters() if r != "me"]
         if others and not held:  # invoices in other reporters' names too (Whose pages... ticked them)
             if "me" not in job.bill_reporters():

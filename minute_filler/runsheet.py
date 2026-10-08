@@ -145,8 +145,8 @@ def rows_from(ing, day: date | None, s: Settings, front: str = "") -> list[Row]:
     page count and text); day: the day the transcript is of; front: whose the pages before the first initials
     are, as the invoice counts them (batch.Job.front_owner: initials, or "none"; see takes.find_takes). The
     reporters are named as reporter_label says."""
-    if not ing.marks:  # no text to read the initials from (a scan): one row for the whole transcript
-        return [Row(day, "", ing.page_count, ing.first_page_no, note=NOT_FOUND)]
+    if not ing.marks:  # no initials or page numbers to read (a scan): one row for the whole transcript
+        return [Row(day, "", transcript_pages(ing), ing.first_page_no, note=NOT_FOUND)]
     title_text, _ = strip_line_numbers(ing.text)
     names = title_reporters("\n".join(title_text.split("\f")[:title_page_count(title_text)]))
     takes = find_takes(ing.marks, title_page_count(title_text), front)
@@ -177,8 +177,9 @@ def name_rows(rows: list[Row], known: dict[str, str] | None = None) -> dict[str,
 
 
 def transcript_pages(ing) -> int:
-    """The pages of an ingested transcript that are written and billed (not the word index)."""
-    return body_pages(ing.marks, ing.page_count)
+    """The pages of an ingested transcript that are written and billed (not the word index): the count read
+    four ways and reconciled (ing.count, takes.count_pages)."""
+    return body_pages(ing.marks, ing.page_count, getattr(ing, "count", None))
 
 
 def to_date(v) -> date | None:

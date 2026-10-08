@@ -827,6 +827,27 @@ def _read_only(path: Path) -> str:
     return "file:" + quote(Path(path).as_posix(), safe="/:") + "?mode=ro"
 
 
+def recorded_cases(number: str, path: Path | None = None) -> list[tuple[str, str]]:
+    """(index number, case name) of the invoices and files made whose index number has `number` in it
+    ("712345": "712345/2021", "Index No. 712345-21"), newest first, without those in the trash or without a case
+    name. Read only: a write meanwhile waits a moment at most, and a database locked for long (a restore) gives
+    [], as do no database (path: default_db()) and one that can't be read. batch.records_extraction picks those
+    of the same index number and year."""
+    path = Path(path) if path else default_db()
+    if not number.isdigit() or not path.exists():
+        return []
+    try:
+        with closing(sqlite3.connect(_read_only(path), uri=True)) as db:
+            rows = db.execute(
+                "SELECT index_no, case_name, ts AS t FROM activity WHERE deleted IS NULL AND index_no LIKE ? "
+                "AND case_name != '' UNION ALL "
+                "SELECT index_no, case_name, created AS t FROM invoices WHERE deleted IS NULL AND index_no LIKE ? "
+                "AND case_name != '' ORDER BY t DESC", (f"%{number}%", f"%{number}%")).fetchall()
+    except sqlite3.Error:
+        return []
+    return [(str(i or ""), str(c or "")) for i, c, _ in rows]
+
+
 def backup_counts(copy: Path) -> tuple[int, int] | None:
     """(invoices, files made) in a backup copy, without those in the trash; None when it can't be read as a
     records database."""
