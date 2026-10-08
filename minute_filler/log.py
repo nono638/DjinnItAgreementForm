@@ -90,6 +90,9 @@ def setup() -> None:
         return
     log.setLevel(logging.INFO)
     log.propagate = False
+    # the hooks first: a crash is told to the user (on_crash) even when there is no log file to write it to
+    sys.excepthook = _excepthook
+    threading.excepthook = lambda a: _excepthook(a.exc_type, a.exc_value, a.exc_traceback)
     try:
         _handler = RotatingFileHandler(log_path(), maxBytes=1_000_000, backupCount=2, encoding="utf-8")
     except OSError:  # a read-only profile: run without a log rather than not at all
@@ -98,8 +101,6 @@ def setup() -> None:
         return
     _handler.setFormatter(_Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S"))
     log.addHandler(_handler)
-    sys.excepthook = _excepthook
-    threading.excepthook = lambda a: _excepthook(a.exc_type, a.exc_value, a.exc_traceback)
     frozen = "installed app" if getattr(sys, "frozen", False) else "from source"
     log.info("started: version %s (%s), %s, Python %s", __version__, frozen, windows_version(),
              platform.python_version())
@@ -130,8 +131,9 @@ def _excepthook(etype, exc, tb) -> None:
 
 
 def error(what: str, exc: BaseException) -> None:
-    """Records a failure the program handled itself (a message box was shown, the job went on)."""
-    log.error("%s", what, exc_info=(type(exc), exc, exc.__traceback__))
+    """Records a failure the program handled itself (a message box was shown, the job went on). `what` is
+    scrubbed too: a message may name a file, and a file's name is often the case's."""
+    log.error("%s", scrub(what), exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def recent(lines: int = 60) -> str:

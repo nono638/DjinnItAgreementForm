@@ -4,7 +4,8 @@ Several of the form's own field names don't match the label they sit on, so each
 its position on the page:
   "1" is the court blank, "Court" is the county blank, "FirmAddress" is Name of Attorney/Party,
   "Address3" is the Firm/Address line and "Address4" the line under it.
-The form has no fax lines. The two signature spots get text fields added by fill.py (OVERLAYS).
+The form has no fax lines. The two signature spots, and a second line for the dates, get text fields added by
+fill.py (OVERLAYS).
 """
 
 WIDGETS = {
@@ -45,14 +46,17 @@ WIDGETS = {
     "Email address_2": "atty_email",
 }
 
-# Signature lines (the court's copy had Adobe signature fields here): (x0, y0, x1, y1)
+# Lines the form lacks, as (x0, y0, x1, y1): the signature lines (the court's copy had Adobe signature fields
+# here), and a second line for the dates, under "4. Date(s) of Minutes Requested", for dates that don't fit the
+# form's 100-point blank (fill._spill_dates)
 OVERLAYS = {
     "sig_reporter": (58, 622, 220, 636),
     "sig_attorney": (255, 622, 417, 636),
+    "dates_2": (344, 264, 566, 277),
 }
 
 # Values with no line of their own on this form are appended to a neighbouring one
-MERGE_INTO = {"atty_address_2": "atty_address_1", "rep_address_3": "rep_address_2", "dates_2": "dates"}
+MERGE_INTO = {"atty_address_2": "atty_address_1", "rep_address_3": "rep_address_2"}
 
 # Page 2 holds the official instructions (fill.py drops it when Settings.include_instructions is off)
 INSTRUCTION_PAGES = 1

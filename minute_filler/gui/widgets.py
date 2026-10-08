@@ -65,6 +65,7 @@ class QuietCombo(QComboBox):
         self.setFocusPolicy(Qt.StrongFocus)  # (no focus from the wheel)
 
     def wheelEvent(self, e) -> None:
+        """The wheel changes the choice only once the box has been clicked (has the focus)."""
         if self.hasFocus():
             super().wheelEvent(e)
         else:

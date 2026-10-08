@@ -34,7 +34,8 @@ REQUIRED_KEYS = ["case_name", "index_no", "dates", "judge"]
 
 # The form's proceeding checkboxes ("Other" is the proc_other field).
 PROC_TYPES = ["Arraignment", "Application", "Hearing", "Plea", "Trial", "Sentence"]
-DELIVERY_TYPES = ["Regular", "Expedited", "Daily", "Other"]
+# The delivery speeds by name, and "Other" (the ones offered come from the rate sheet: Settings.offered_speeds)
+DELIVERY_TYPES = ["Regular", "Expedited", "Daily", "Immediate", "Other"]
 
 # Where a value came from, most to least trustworthy for display purposes.
 SRC_USER, SRC_REGEX, SRC_AI, SRC_DERIVED, SRC_DEFAULT = "you", "regex", "AI", "derived", "default"
@@ -227,8 +228,8 @@ class CaseInfo:
 
     def invoice_orderers(self) -> list[Attorney | None]:
         """Who gets an invoice: the ticked attorneys, one per Attorney.key() (the same firm, or the same attorney,
-        entered twice is billed once) and without placeholders ("Unrepresented", a blank row being typed in), or [None]
-        (one invoice with a blank Bill To)."""
+        entered twice is billed once) and without placeholders ("Unrepresented", a blank row being typed in), or
+        [None] (one invoice with a blank Bill To)."""
         out, seen = [], set()
         for a in self.attorneys:
             if a.checked and not a.is_placeholder() and a.key() and a.key() not in seen:

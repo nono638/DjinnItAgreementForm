@@ -110,6 +110,7 @@ class ColorTabBar(QTabBar):
     the bottom: stronger on the tab shown."""
 
     def paintEvent(self, _e) -> None:
+        """Draws each tab as the style does, with its colour laid over the shape and under the label."""
         from PySide6.QtWidgets import QStyle, QStyleOptionTab, QStylePainter
         painter = QStylePainter(self)
         for i in range(self.count()):
@@ -683,7 +684,7 @@ class WelcomeDialog(QDialog):
         s.rate_sheet = self.sheet.currentData() or s.rate_sheet
         s.output_dir = self.folder.text().strip()
         try:
-            s.save()
+            s.save(force=True)  # (the user's own Start: written even over a settings file that couldn't be read)
         except OSError as e:
             log_error("could not save the settings", e)
         super().accept()

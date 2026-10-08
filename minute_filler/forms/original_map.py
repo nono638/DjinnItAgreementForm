@@ -2,8 +2,9 @@
 
 Its widgets have random names ("Text-gJUsgvzPVi"; fill.py drops the "Text-"), so each one
 is mapped to a logical key here by its position on the page. Things the original lacks (signature lines, date of
-agreement, fax, case name lines 2-3) get a text field that fill.py adds at a fixed rectangle (OVERLAYS, in PDF
-points, origin top-left, page 608.4 x 790.2), so they can still be changed in a PDF viewer.
+agreement, fax, case name lines 2-3, a second line for the dates) get a text field that fill.py adds at a fixed
+rectangle (OVERLAYS, in PDF points, origin top-left, page 608.4 x 790.2), so they can still be changed in a PDF
+viewer.
 """
 
 WIDGETS = {
@@ -39,10 +40,12 @@ WIDGETS = {
     "bkM2mficv0": "atty_phone",
 }
 
-# Keys with no widget on the original: (x0, y0, x1, y1)
+# Keys with no widget on the original: (x0, y0, x1, y1). dates_2: a second line for the dates, under
+# "4. Date(s) of Minutes Requested", for dates that don't fit its blank (fill._spill_dates)
 OVERLAYS = {
     "case_name_2": (163, 174, 368, 186),
     "case_name_3": (163, 186, 368, 198),
+    "dates_2": (380, 223, 580, 235),
     "sig_reporter": (82, 571, 230, 585),
     "sig_attorney": (268, 573, 415, 587),
     "agreement_date": (455, 573, 565, 587),
@@ -52,4 +55,4 @@ OVERLAYS = {
 
 # Values with no line of their own on the original are appended to a neighbouring one (it has a
 # single attorney address line after Firm/Address, for example).
-MERGE_INTO = {"atty_address_2": "atty_address_1", "rep_address_3": "rep_address_2", "dates_2": "dates"}
+MERGE_INTO = {"atty_address_2": "atty_address_1", "rep_address_3": "rep_address_2"}

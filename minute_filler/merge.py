@@ -1,4 +1,9 @@
-"""Combines extractions from several inputs/extractors into one CaseInfo."""
+"""Combines extractions from several inputs/extractors into one CaseInfo.
+
+pool gathers every field's candidates (one value however it is written: same_value), merge picks the best of
+each and joins the attorneys, and apply_defaults and the refresh_* functions fill in what follows from the
+settings: court, county, the speed the agreement form names, its rate, the copies and the delivery date.
+"""
 from __future__ import annotations
 
 import re
@@ -6,7 +11,7 @@ from dataclasses import replace
 from datetime import date, timedelta
 
 from .dates import next_weekday, us_date
-from .extract_regex import dedupe_attorneys
+from .extract_regex import dedupe_attorneys, find_dates, norm_index
 from .models import (CaseInfo, Candidate, Extraction, FIELD_KEYS, FieldState, SRC_DEFAULT, SRC_DERIVED,
                      SRC_USER, SRC_AI)
 from .rates import speed_key
@@ -16,19 +21,42 @@ CHECK_THRESHOLD = 0.6  # a proceeding type is ticked from this confidence up
 
 
 def _norm(v: str) -> str:
-    """A value for comparing: '712345-2024' and '712345/2024' are the same."""
+    """A value for comparing: 'Smith v Jones' and 'SMITH V. JONES' are the same."""
     return re.sub(r"[^a-z0-9]", "", v.lower())
 
 
+def same_value(key: str, a: str, b: str) -> bool:
+    """Two candidates for the field `key` are one value. Dates by the days they name ('1/12/2026' and
+    '11/2/2026' are two, '9/14/2026' and 'Sept. 14, 2026' one); index numbers as norm_index writes them
+    ('712345-24' and '712345/2024' are one); anything else by its letters and digits (_norm)."""
+    if key == "dates":
+        da, db = find_dates(a), find_dates(b)
+        if da and db:
+            return [d for _, _, d in da] == [d for _, _, d in db]
+    if key == "index_no":
+        na, nb = _index_key(a), _index_key(b)
+        if na and nb:
+            return na == nb
+    return _norm(a) == _norm(b)
+
+
+def _index_key(v: str) -> str | None:
+    """An index number's value as norm_index writes it ('712345-24' -> '712345/2024'); None when it isn't
+    a number and a year."""
+    m = re.fullmatch(r"\s*(\d{3,7})\s*(?:[-/]|\s+of\s+)\s*(\d{4}|\d{2})\s*[A-Za-z]?\s*", v)
+    return norm_index(m.group(1), m.group(2)) if m else None
+
+
 def pool(extractions: list[Extraction]) -> dict[str, list[Candidate]]:
-    """All candidates per field, best first. When the rules and the AI agree on a value its confidence
-    goes up, and it is credited to the rules."""
+    """All candidates per field, best first; one value written two ways (same_value) is one candidate, as
+    first written. When the rules and the AI agree on a value its confidence goes up, and it is credited to
+    the rules."""
     out: dict[str, list[Candidate]] = {}
     for ex in extractions:
         for key, cands in ex.fields.items():
             lst = out.setdefault(key, [])
             for c in cands:
-                twin = next((o for o in lst if _norm(o.value) == _norm(c.value)), None)
+                twin = next((o for o in lst if same_value(key, o.value, c.value)), None)
                 if twin is None:
                     lst.append(Candidate(c.value, c.source, c.confidence, c.note))
                 elif twin.source != c.source:
@@ -102,8 +130,8 @@ def apply_defaults(case: CaseInfo, s: Settings, cands: dict[str, list[Candidate]
     """Fills blank fields from Settings: court, county, the rate from the rate sheet, the delivery date (when
     Settings.fill_delivery_date) and today's agreement date (when Settings.agreement_today). The speed and the
     copies are set even when not blank (refresh_speed, refresh_copies): the speed is the user's choice, else
-    the Settings rule's, and the parties ticked decide the copies. With the pooled candidates `cands`, the page count can also come from an
-    invoice's total."""
+    the Settings rule's, and the parties ticked decide the copies. With the pooled candidates `cands`, a blank
+    page count can also come from an invoice's total at the chosen speed."""
     cands = cands or {}
     f = case.fields
 
@@ -154,8 +182,8 @@ def refresh_speed(case: CaseInfo, s: Settings) -> bool:
     """The agreement form names one speed: the one the user chose for the job (in the Order card, or when
     asked about a speed a document mentions: batch.Job.speed_question), while it is still among the speeds
     offered (or "Other"); else always the one Settings picks (Settings.agreement_speed: by default "Expedited,
-    else the slowest offered"). A speed found in a document doesn't change it: an e-mail's "at your regular rate" is
-    no choice of the user's (the window asks instead). True when it changed."""
+    else the slowest offered"). A speed found in a document doesn't change it: an e-mail's "at your regular
+    rate" is no choice of the user's (the window asks instead). True when it changed."""
     f = case.fields["delivery"]
     if f.source == SRC_USER and f.value and (f.value == "Other" or s.speed_offered(f.value)):
         return False

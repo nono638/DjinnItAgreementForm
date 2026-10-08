@@ -186,11 +186,13 @@ class Doc:
         return next((i for i, o in enumerate(owners) if o), 0)
 
 
-@dataclass
+@dataclass(eq=False)
 class Job:
     """One case and day (or days, see Settings.batch_combine_dates): its documents, the editable result (case) and
     the user's choices for its outputs - an agreement per ticked attorney, the MOFR, the invoices and the run
-    sheet."""
+    sheet. eq=False: a job is only equal to itself. The window keeps its jobs in a list and finds them with
+    index, remove and "in"; two emptied jobs (New job twice) compare equal field by field, and the wrong one
+    would be found."""
     docs: list[Doc] = field(default_factory=list)
     case: CaseInfo = field(default_factory=CaseInfo)
     proc_touched: bool = False   # the user changed the proceeding types / attorneys,
@@ -317,10 +319,11 @@ class Job:
         return sum(transcript_pages(d.ing) for d in self.transcripts())
 
     def runsheet_opts(self, s: Settings) -> RunSheetOpts:
-        """The takes of every transcript of the job, for the run sheet."""
+        """The takes of every transcript of the job, for the run sheet. The pages before the first initials go
+        to whoever Whose pages... said they are (front_owner), as the invoice bills them (reporter_pages)."""
         rows = []
         for d in self.transcripts():
-            rows += rows_from(d.ing, self._day_of(d), s)
+            rows += rows_from(d.ing, self._day_of(d), s, self.front_owner.get(d.key(), ""))
         rows.sort(key=lambda r: (r.day or date.max, r.start if r.start is not None else -1))
         name_rows(rows)  # a reporter named on one day's title page is named on the other days too
         return RunSheetOpts(rows, self.runsheet_to)
@@ -1096,6 +1099,27 @@ def remerge(job: Job, s: Settings) -> None:
     job.case = new
 
 
+def split_forgotten(job: Job, keys: set[str], s: Settings) -> bool:
+    """Answers about rows that may be one firm were forgotten (keys: those rows' keys, see Attorney.key). A job
+    whose table the user changed keeps its rows as they are on a merge (remerge), so a row that joined such
+    rows ("Smith Law: Dana Smith, Sam Poe") would stay joined. Its rows are read again from its documents
+    instead: the user's ticks go back on the rows they were on (the same key, or same_entry), and rows the user
+    added stay. Returns True when the job's rows were read again (False: none of its rows has one of the keys,
+    or the user hasn't changed its table, and then the next remerge reads its rows again anyway)."""
+    if not job.att_touched or not any(a.key() in keys for a in job.case.attorneys):
+        return False
+    prev = job.case.attorneys
+    job.att_touched = False
+    remerge(job, s)
+    job.att_touched = True
+    rows = job.case.attorneys
+    for b in rows:
+        b.checked = any(p.checked and (p.key() == b.key() or same_entry(p, b)) for p in prev)
+    rows += [p for p in prev if p.source == SRC_USER and not any(p.key() == b.key() for b in rows)]
+    job.refresh_copies(s)
+    return True
+
+
 def _date_key(d: str) -> tuple:
     """'6/2/2026' -> (2026, 6, 2), to sort M/D/YYYY dates."""
     m, day, y = (int(x) for x in d.split("/"))
@@ -1103,9 +1127,10 @@ def _date_key(d: str) -> tuple:
 
 
 def dates_text(texts) -> str:
-    """Days as a form of several days lists them: '9/28/2026, 9/30/2026, 10/1/2026', each once, earliest first.
-    texts: the dates, or texts holding them ("9/28/2026, 9/30/2026"); one in which no date is found is kept as
-    it is, after the others."""
+    """Days as the Dates field of a job or form of several days holds them: '9/28/2026, 9/30/2026, 10/1/2026',
+    each once, earliest first (the forms then write days in a row as a range: fill.date_ranges). texts: the
+    dates, or texts holding them ("9/28/2026, 9/30/2026"); one in which no date is found is kept as it is, after
+    the others."""
     found, other = [], []
     for t in texts:
         days = [d for _, _, d in find_dates(t or "")]

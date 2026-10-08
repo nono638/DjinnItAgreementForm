@@ -16,13 +16,16 @@ Settings.show_math is off); the box that says what was saved can print it. File 
 documents opened lately, and Export / Import settings carry the settings to another computer. A job once
 made can be opened again from the Records window (open_past_job). When the window opens it makes the day's
 backup of the records and, once a day, asks whether there is a newer version (update.py); a new user is asked
-a few questions first (preview.WelcomeDialog). On the first day the app is used in a new year, the yin-yang's
+a few questions first (preview.WelcomeDialog), and a settings file that couldn't be read is said so instead
+(MainWindow._startup). On the first day the app is used in a new year, the yin-yang's
 "done" picture is the New Year one (note_opened).
 
-Documents are read, the AI is asked and batches are made on a thread pool (workers.Runner). Their results
-are applied on the UI thread; the results of work started before "New job" are dropped (see MainWindow.gen)."""
+Documents are read and batches are made on a thread pool (workers.Runner), and the AI is asked on a pool of its
+own, one question at a time (MainWindow.ai_pool). Their results are applied on the UI thread; the results of
+work started before "New job" are dropped (see MainWindow.gen), and AI questions still waiting are never asked."""
 from __future__ import annotations
 
+import html
 import json
 import re
 import tempfile
@@ -33,7 +36,7 @@ from datetime import date
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSignalBlocker, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QMovie, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
@@ -47,7 +50,7 @@ from .. import log as logfile
 from ..log import log
 from ..batch import (BATCH_EXT, HELD, NOT_INVOICED, Job, case_reporters, expand_paths, files_to_make, fill_jobs,
                      firm_questions, group, ident, input_folders, job_from_origin, job_origin, join_entries,
-                     out_dir_for, read_loaders, remerge, same_case)
+                     out_dir_for, read_loaders, remerge, same_case, split_forgotten)
 from ..extract_llm import OllamaExtractor
 from ..extract_regex import maybe_same_entry, use_firm_answers
 from ..dates import quick_date
@@ -56,7 +59,7 @@ from ..ingest import ingest_file, ingest_pil, ingest_text
 from ..merge import apply_defaults, apply_speed_rule, refresh_delivery_date, refresh_rate
 from ..models import (Attorney, CaseInfo, FIELD_LABELS, FieldState, PROC_TYPES, REQUIRED_KEYS, SRC_AI,
                       SRC_DEFAULT, SRC_DERIVED, SRC_PDF, SRC_USER)
-from ..runsheet import find_sheets, run_sheet_summary, runsheets_folder, transcript_pages
+from ..runsheet import SheetUnreadable, find_sheets, run_sheet_summary, runsheets_folder, transcript_pages
 from ..settings import OUTPUTS, Settings
 from .dialogs import ClarifyDialog, RunSheetDialog, SettingsDialog
 from .theme import apply_theme
@@ -534,6 +537,7 @@ class DropZone(QFrame):
             self._hover(True)
 
     def dragLeaveEvent(self, e):
+        """The drag left the zone without a drop: its highlight goes."""
         self._hover(False)
 
     def dropEvent(self, e):
@@ -611,7 +615,7 @@ class MainWindow(QMainWindow):
     Background work and the state that guards it:
       gen       bumped by "New job"; a result whose gen is old is dropped.
       work      reads and batches still running (the progress bar shows while it is above 0).
-      ai_pending  AI questions still running.
+      ai_pending  AI questions not answered yet (waiting their turn on ai_pool, one at a time, or being asked).
       filling   "Generate all" is making files on another thread. It works on copies of the jobs and the
                 settings. Until it is done, Generate, Generate all and New job only say "one moment".
       _loading  files being read now, so dropping the same file again does not load it twice.
@@ -620,8 +624,17 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: Settings, app: QApplication):
         super().__init__()
         self.s, self.app = settings, app
-        use_firm_answers(settings.firm_answers)  # (rows the user said are one firm, or not, are read so)
+        # the user's answers about rows that may be one firm: kept ones (Settings.firm_answers) and those for now
+        # only (Remember unticked: until the app is closed)
+        self._session_answers: list[list] = []
+        self._use_answers()
         self.runner = Runner()
+        # The AI's questions go on a pool of their own, one at a time: Ollama answers one at a time anyway, and
+        # on the global pool each document's question held a thread for up to a minute, so reads and Generate
+        # all waited behind them on a laptop with few cores
+        self.ai_pool = QThreadPool(self)
+        self.ai_pool.setMaxThreadCount(1)
+        self.ai_runner = Runner(self.ai_pool)
         self.ai = OllamaExtractor(settings)
         self.ai_ok = False
         self.gen = 0  # bumped by "New job": results of work started before it are dropped
@@ -1026,7 +1039,8 @@ class MainWindow(QMainWindow):
         self.att.itemChanged.connect(self._att_changed)
         cl.addWidget(self.att)
         # two rows that may be one firm or attorney ("Smith Law" and "Smith Law Group"): the user says (Same firm,
-        # Not the same), and the answer is kept for later documents too (batch.firm_questions, Settings.firm_answers)
+        # Not the same), and the answer is kept for later documents too (batch.firm_questions, Settings.firm_answers),
+        # or with Remember unticked only until the app is closed
         self.firm_ask_box = QWidget()
         fq = QHBoxLayout(self.firm_ask_box)
         fq.setContentsMargins(0, 0, 0, 0)
@@ -1043,6 +1057,11 @@ class MainWindow(QMainWindow):
         self.firm_apart.clicked.connect(lambda: self._answer_firm(False))
         fq.addWidget(self.firm_same, 0, Qt.AlignTop)
         fq.addWidget(self.firm_apart, 0, Qt.AlignTop)
+        self.firm_remember = QCheckBox("Remember")
+        self.firm_remember.setChecked(True)
+        self.firm_remember.setToolTip("Keep the answer for later documents naming these two (Settings → Invoice →\n"
+                                      "Firms you answered lists them, to forget one). Unticked: for now only.")
+        fq.addWidget(self.firm_remember, 0, Qt.AlignTop)
         self.firm_ask_box.setVisible(False)
         self._firm_q = None  # (the days asked about, (row, row)) of the question shown
         cl.addWidget(self.firm_ask_box)
@@ -1349,8 +1368,18 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------- startup
     def _startup(self):
         """Runs once the window is on screen: the welcome questions on the first run (no name yet; asked once),
-        then the AI check, the day's backup of the records and, once a day, the look for a newer version."""
-        if not self.s.profile.name and not self.s.welcomed:
+        then the AI check, the day's backup of the records and, once a day, the look for a newer version. A
+        settings file that couldn't be read is said so instead of the welcome: the app runs on the defaults, and
+        nothing is written over the file until the user presses Save in Settings or imports settings
+        (Settings.save(force=True))."""
+        if self.s.unreadable:
+            QMessageBox.warning(self, "Your settings couldn't be read",
+                                "Your settings file couldn't be read (it may be damaged, or held by another "
+                                "program), so the app starts with its defaults for now. Nothing is saved over it "
+                                "until you press Save in Settings, which replaces it with the settings you see "
+                                f"there; to keep what it holds, close the app and look at the file first:\n\n"
+                                f"{self.s.path}")
+        elif not self.s.profile.name and not self.s.welcomed:
             self.s.welcomed = True
             self.welcome()
         self._check_ai()
@@ -1490,7 +1519,7 @@ class MainWindow(QMainWindow):
             # the Settings object is shared (the Records window, the AI helper): filled in place
             for name in Settings.__dataclass_fields__:
                 setattr(self.s, name, getattr(new, name))
-            self.s.save()
+            self.s.save(force=True)  # (the user's own choice: written even over a settings file that couldn't be read)
         except OSError as e:
             show_save_error(self, e, "Could not import the settings")
             return
@@ -1529,7 +1558,7 @@ class MainWindow(QMainWindow):
                 return
             self.ai_ok, msg = res
             link = "" if self.ai_ok else '  <a href="setup">How to set up</a>'
-            self._ai_text(("● " if self.ai_ok else "○ ") + msg + link)
+            self._ai_text(("● " if self.ai_ok else "○ ") + html.escape(msg, quote=False) + link)  # (the label is rich text)
             # inputs dropped while the check was still running were not sent to the AI
             waiting = [d for d in self.cur.docs if d.ai is None]
             if self.ai_ok and waiting and self.ai_pending == 0 and len(self.jobs) == 1:
@@ -1644,7 +1673,8 @@ class MainWindow(QMainWindow):
         messages; paths: the files (None for pasted text or pictures); keys: the files' _path_key, held in
         self._loading until the read ends. With a single job and documents all about one case, they are
         added to that job (with same_job, whatever they are about); otherwise (or with batch=True) they are
-        sorted into jobs by case and date.
+        sorted into jobs by case and date. A cell of the attorney table being typed in when the read ends is
+        taken as typed, and opened again afterwards while the same job is on screen (_resume_edit).
         """
         # the reading thread gets its own copy of the settings: Settings may change them meanwhile
         gen, target, s = self.gen, self.cur, deepcopy(self.s)
@@ -1671,7 +1701,8 @@ class MainWindow(QMainWindow):
                 for w in d.ing.warnings:
                     self._toast(w)
             if docs:
-                self._sync_from_ui()
+                typing = self._sync_from_ui()
+                shown = self.cur
                 one_job = len(self.jobs) == 1 and target in self.jobs and not batch
                 if one_job and (same_job or len(docs) == 1 or len(group(docs, self.s)) == 1):
                     # the usual way: everything dropped is about the job on screen
@@ -1693,6 +1724,8 @@ class MainWindow(QMainWindow):
                     new = len(self.jobs) - count
                     self._toast(f"{len(docs)} document(s) read:  {new} new job(s), "
                                 f"{len(self.jobs)} in total.")
+                if self.cur is shown:  # (still the job the user was typing in)
+                    self._resume_edit(typing)
             else:
                 self._update_status()
             log.info("read %d of %d document(s)%s", len(docs), len(loaders), " (batch)" if batch else "")
@@ -1724,8 +1757,10 @@ class MainWindow(QMainWindow):
 
     def _maybe_ai(self, job: Job, docs: list):
         """Asks the model about documents added to a single job (batches use the rules only): pictures always,
-        e-mails and text when Settings say so, PDFs only while a required field is still blank. Each answer
-        merges the job again, unless "New job" was clicked or the document was removed meanwhile."""
+        e-mails and text when Settings say so, PDFs only while a required field is still blank. The questions
+        are asked one at a time (ai_runner, on ai_pool). Each answer merges the job the document is in by then
+        again (a later read may have merged its job into another), unless "New job" was clicked, the document
+        was removed or the AI turned off meanwhile."""
         if not (self.s.use_ai and self.ai_ok):
             return
         todo = []
@@ -1747,19 +1782,20 @@ class MainWindow(QMainWindow):
                 if gen != self.gen:
                     return
                 self.ai_pending -= 1
-                if job in self.jobs and d in job.docs:
+                holder = next((j for j in self.jobs if any(x is d for x in j.docs)), None)
+                if holder is not None and self.s.use_ai:
                     d.ai = ex
-                    self._remerge(job)
+                    self._remerge(holder)
                 self._update_status()
 
             def failed(msg, d=d):
                 if gen != self.gen:
                     return
                 self.ai_pending -= 1
-                self._ai_text(f"○ AI failed on {d.ing.name}: {msg[:120]}")
+                self._ai_text(f"○ AI failed on {html.escape(d.ing.name, quote=False)}: {html.escape(msg[:120], quote=False)}")
                 self._update_status()
 
-            self.runner.start(self.ai.extract, d.ing, on_done=done, on_error=failed)
+            self.ai_runner.start(self.ai.extract, d.ing, on_done=done, on_error=failed)
 
     def _input_menu(self, pos):
         """Right-click on an input: show its text, move it to a job of its own, or remove it."""
@@ -1940,13 +1976,14 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------- merge/show
     def _remerge(self, job: Job | None = None):
         """Merges a job's documents again (default: the current job). For the job on screen, the edits in
-        the editor are taken first and the editor shows the result."""
+        the editor are taken first and the editor shows the result, with a cell of the attorney table that was
+        being typed in opened again (_resume_edit: an AI answer arrives while the user types)."""
         job = job or self.cur
-        if job is self.cur:
-            self._sync_from_ui()
+        typing = self._sync_from_ui() if job is self.cur else None
         remerge(job, self.s)
         if job is self.cur:
             self._show_case()
+            self._resume_edit(typing)
 
     def _show_case(self):
         """Shows the current job's case in the editor: fields, speed, proceeding boxes, attorneys, invoice line.
@@ -2009,15 +2046,21 @@ class MainWindow(QMainWindow):
             out.append(a)
         return out
 
-    def _sync_from_ui(self):
+    def _sync_from_ui(self, commit: bool = True) -> tuple[int, str, int] | None:
         """Copies the user's edits in the editor into the current job's case: typed fields, the proceeding
-        boxes and the attorney table. Call it before the case is merged again, switched or filled."""
+        boxes and the attorney table. Call it before the case is merged again, switched or filled.
+
+        commit: a cell still being typed in is taken as typed (an AI answer or a second document arriving
+        must not throw it away), and its editor closes; returns what _commit_edit returns, for _resume_edit.
+        With commit=False (the status pill, which only reads the fields) an open editor is left alone."""
+        typing = self._commit_edit() if commit else None
         for key, r in self.rows.items():
             if r.state.source == SRC_USER:
                 self.case.fields[key] = FieldState(r.text(), SRC_USER, 1.0, r.state.alternatives)
         # (the speed has no FieldRow: _delivery_changed, Keep and ↺ put it in the case as it is chosen)
         self.case.proc_types = {p for p, cb in self.proc_boxes.items() if cb.isChecked()}
         self.case.attorneys = self._read_attorneys()
+        return typing
 
     # ---------------------------------------------------- UI events
     def _field_edited(self, key: str):
@@ -2035,8 +2078,10 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _proc_toggled(self, _):
-        """A proceeding box was clicked: later merges keep the user's choice."""
+        """A proceeding box was clicked: the tick goes into the case straight away (an answer about the firms
+        shows the case again from it), and later merges keep the user's choice."""
         self.proc_touched = True
+        self.case.proc_types = {p for p, cb in self.proc_boxes.items() if cb.isChecked()}
 
     def _att_changed(self, _item):
         """A cell or tick of the attorney table changed: later merges keep the user's table."""
@@ -2238,7 +2283,7 @@ class MainWindow(QMainWindow):
         if not name or name == self.s.rate_sheet:
             return
         self.s.rate_sheet = name
-        self.s.save()
+        self._save_settings()
         self._fill_invoice_speeds()
         self._apply_speed_rule()
         self._remerge_others()
@@ -2307,9 +2352,10 @@ class MainWindow(QMainWindow):
 
     def _set_opt(self, name, value):
         """Sets a setting and saves it: an option changed in the Outputs box (the outputs ticked and each one's
-        options), the zoom, the list of recent files cleared."""
+        options), the zoom, the list of recent files cleared. A file that can't be written is logged, not shown
+        (the window must follow the option all the same; the settings are saved again when it closes)."""
         setattr(self.s, name, value)
-        self.s.save()
+        self._save_settings()
 
     # ------------------------------------------------------- status
     def _set_status(self, text: str, state: str, mood: str | None = None):
@@ -2350,22 +2396,35 @@ class MainWindow(QMainWindow):
         self.firm_ask_box.setVisible(bool(qs))
 
     def _answer_firm(self, same: bool) -> None:
-        """Same firm / Not the same, for the question shown (see _show_firm_question)."""
+        """Same firm / Not the same, for the question shown (see _show_firm_question): kept for later documents
+        while the card's Remember is ticked, else until the app is closed."""
         if self._firm_q is None or self._batch_running():
             return
         _, (a, b) = self._firm_q
-        self._record_firm_answer(a, b, same)
+        self._commit_edit()  # (a cell still being typed in: the table is shown again from the case)
+        self._record_firm_answer(a, b, same, self.firm_remember.isChecked())
         self._show_case()
         self._update_status()
 
-    def _record_firm_answer(self, a: Attorney, b: Attorney, same: bool) -> None:
-        """Keeps the user's answer about rows a and b (Settings.firm_answers, saved: later documents naming them
-        are read so too) and, when they are one, makes them one row on each day of every job loaded
-        (batch.join_entries, a case at a time); No. of copies follows."""
+    def _use_answers(self) -> None:
+        """The answers about rows that may be one firm, as same_entry reads them: those kept in Settings and those
+        given for now only (extract_regex.use_firm_answers)."""
+        use_firm_answers(self.s.firm_answers + self._session_answers)
+
+    def _record_firm_answer(self, a: Attorney, b: Attorney, same: bool, remember: bool = True) -> None:
+        """The user's answer about rows a and b: kept (remember: Settings.firm_answers, saved, with the names as
+        written, so later documents naming them are read so too) or for now only (until the app is closed).
+        When they are one, they become one row on each day of every job loaded (batch.join_entries, a case at a
+        time); No. of copies follows."""
         pair = {a.key(), b.key()}
-        self.s.firm_answers = [r for r in self.s.firm_answers if {r[0], r[1]} != pair] + [[a.key(), b.key(), same]]
-        use_firm_answers(self.s.firm_answers)
-        self._save_settings()
+        row = [a.key(), b.key(), same, _entry_text(a), _entry_text(b)]
+        self._session_answers = [r for r in self._session_answers if {r[0], r[1]} != pair]
+        if remember:
+            self.s.firm_answers = [r for r in self.s.firm_answers if {r[0], r[1]} != pair] + [row]
+            self._save_settings()
+        else:
+            self._session_answers.append(row)
+        self._use_answers()
         if same:  # on every job loaded, not only the case asked about: it won't be asked about again
             for case in _cases(self.jobs):
                 join_entries(case, a, b)
@@ -2374,9 +2433,11 @@ class MainWindow(QMainWindow):
 
     def _ask_firms(self, groups: list[list[Job]]) -> bool:
         """Before anything is made: rows of these days (each list the days of a case) that may be one firm or
-        attorney and haven't been answered are asked about, one pair at a time (Same firm, Not the same). False
+        attorney and haven't been answered are asked about, one pair at a time (Same firm, Not the same). The
+        Remember box starts as the card's and carries from one question to the next, and back to the card. False
         when Go back was clicked (nothing is made), or Generate all started meanwhile."""
         asked = False
+        ticked = self.firm_remember.isChecked()
         for group in groups:
             # the questions are worked out again after each answer: an answer joins rows, and a read that ends
             # while the box is open may merge the job again (new rows); an answered pair isn't asked again
@@ -2387,17 +2448,23 @@ class MainWindow(QMainWindow):
                 box.setWindowTitle("One firm or two?")
                 case = ", ".join(x for x in (group[0].title(), group[0].case.get("dates")) if x)
                 box.setText(f"{case}: are these one firm (or one attorney)?\n\n•  {_entry_text(a)}\n"
-                            f"•  {_entry_text(b)}\n\nOne firm gets one invoice and one minute agreement. Your "
-                            "answer is kept for later documents too.")
+                            f"•  {_entry_text(b)}\n\nOne firm gets one invoice and one minute agreement.")
+                remember = QCheckBox("Remember my answer for later documents")
+                remember.setChecked(ticked)
+                remember.setToolTip("Unticked: the answer holds until you close the app. Settings → Invoice →\n"
+                                    "Firms you answered lists your answers (those for now too), to forget one.")
+                box.setCheckBox(remember)
                 same = box.addButton("Same firm", QMessageBox.YesRole)
                 apart = box.addButton("Not the same", QMessageBox.NoRole)
                 back = box.addButton("Go back", QMessageBox.RejectRole)
                 box.setEscapeButton(back)
                 box.exec()
                 clicked = box.clickedButton()
+                ticked = remember.isChecked()
+                self.firm_remember.setChecked(ticked)
                 if clicked not in (same, apart) or self._batch_running():
                     return False
-                self._record_firm_answer(a, b, clicked is same)
+                self._record_firm_answer(a, b, clicked is same, ticked)
                 asked = True
         if asked:
             self._show_case()
@@ -2418,13 +2485,19 @@ class MainWindow(QMainWindow):
         w.load(self._excerpt_group())
 
     def _job_status(self):
-        """The status pill for the job on screen: asking the AI, fields missing or to review, or ready."""
+        """The status pill for the job on screen: reading (documents still being read, whatever the job on
+        screen says: a single file read while a folder is still coming in), asking the AI, fields missing or to
+        review, or ready."""
         busy = self.ai_pending > 0
         self.busy.setVisible(busy or self.work > 0)
+        if self.work > 0:
+            if self.status.property("state") != "busy":  # ("Reading 2 of 5: ..." is kept as it is)
+                self._set_status("Reading…", "busy")
+            return
         if not self.cur.docs:
             self._set_status("Drop a document to begin", "")
             return
-        self._sync_from_ui()
+        self._sync_from_ui(commit=False)  # (a name being typed in the attorney table stays open)
         missing = [FIELD_LABELS[k] for k in self.case.missing_required()]
         review = [k for k, r in self.rows.items() if r.edit.property("review")]
         if busy:
@@ -2480,22 +2553,66 @@ class MainWindow(QMainWindow):
             self._toast("Still making the files of the batch - one moment.")
         return self.filling
 
-    def _commit_edit(self):
-        """A cell of the attorney table still being typed in (Ctrl+Enter pressed in it) is taken as typed."""
+    def _commit_edit(self) -> tuple[int, str, int] | None:
+        """A cell of the attorney table still being typed in (Ctrl+Enter pressed in it, a merge, an answer about
+        the firms) is taken as typed. The editor is found in the table itself, not by the keyboard focus: a
+        background answer arrives while the focus may be anywhere. Returns (column, text, cursor position) when
+        the user was typing in it (it had the focus), for _resume_edit, else None."""
+        if self.att.state() != QAbstractItemView.EditingState or getattr(self, "_committing", False):
+            return None  # (committing fires itemChanged, whose handlers sync the editor again: once is enough)
         editor = QApplication.focusWidget()
-        if editor is not None and editor is not self.att and self.att.isAncestorOf(editor):
+        if editor is None or editor is self.att or not self.att.isAncestorOf(editor):
+            viewport = self.att.viewport()
+            # (the editor is the viewport's own child; one closed before is hidden until Qt deletes it)
+            editor = next((w for w in viewport.findChildren(QWidget) if w.parent() == viewport
+                           and w.isVisibleTo(viewport)), None)
+        if editor is None:
+            return None
+        typing = None  # (the window's focus, kept while another program is in front; elsewhere = typing elsewhere)
+        if isinstance(editor, QLineEdit) and self.focusWidget() is editor:
+            typing = (self.att.currentIndex().column(), editor.text().strip(), editor.cursorPosition())
+        self._committing = True
+        try:
             self.att.commitData(editor)
             self.att.closeEditor(editor, QAbstractItemDelegate.NoHint)
+        finally:
+            self._committing = False
+        return typing
+
+    def _resume_edit(self, typing: tuple[int, str, int] | None) -> None:
+        """Opens the cell editor again after a merge from the background (a document read, an AI answer) closed
+        it, on the row that now holds the text typed (or starts with it: the merge may have added the firm's other
+        names), with the cursor where it was: the next key the user types goes on with "Dana Smi" instead of
+        replacing it. Nothing happens when that row can't be told."""
+        if not typing or not typing[1]:
+            return
+        col, text, cursor = typing
+        cells = [(r, it.text()) for r in range(self.att.rowCount()) if (it := self.att.item(r, col))]
+        rows = [r for r, t in cells if t == text] or [r for r, t in cells if t.startswith(text)]
+        if len(rows) != 1:
+            return
+        index = self.att.model().index(rows[0], col)
+        self.att.setCurrentIndex(index)
+        self.att.edit(index)
+        viewport = self.att.viewport()
+        editor = next((w for w in viewport.findChildren(QLineEdit) if w.parent() == viewport
+                       and w.isVisibleTo(viewport)), None)
+        if editor is not None:
+            editor.setFocus()
+            editor.deselect()
+            editor.setCursorPosition(min(cursor, len(editor.text())))
 
     def fill(self):
         """Generate: makes the ticked outputs for the job on screen, on the UI thread (Ctrl+Enter).
 
         Asks first, as needed: whether to go on without the invoice (no pages to bill: no transcript and none
         typed) or the run sheet (no transcript); whose pages to bill, or whether to go on without an invoice
-        that is held (_without_unchecked_invoice); which speed, when an e-mail asks for another one
-        (_ask_speeds); about blank required fields and competing values; who ordered, when no attorney is
-        ticked; and where the run sheet takes go. Background work can finish while a question is on screen,
-        so after each one the job is checked to still exist and is taken as it is now.
+        that is held (_without_unchecked_invoice); whether rows that may be one firm are one (_ask_firms); which
+        speed, when an e-mail asks for another one (_ask_speeds); a Parties number that isn't the firms that
+        ordered (_ask_parties); about blank required fields and competing values; who ordered, when no attorney
+        is ticked; and where the run sheet takes go (nothing is made while that run sheet can't be read).
+        Background work can finish while a question is on screen, so after each one the job is checked to still
+        exist and is taken as it is now.
         """
         if self._batch_running():
             return
@@ -2566,14 +2683,13 @@ class MainWindow(QMainWindow):
                 case.fields[key] = FieldState(val, SRC_USER, 1.0, case.fields[key].alternatives)
             chosen = dlg.checked_attorneys()
             if chosen is not None:
-                if len(case.attorneys) == len(asked):
-                    for i, a in enumerate(case.attorneys):
-                        a.checked = i in chosen
-                else:  # (by key, or as the same entry: an AI answer may have filled in a firm, a new key)
-                    from ..extract_regex import same_entry
-                    keys = {asked[i].key() for i in chosen}
-                    for a in case.attorneys:
-                        a.checked = a.key() in keys or any(same_entry(asked[i], a) for i in chosen)
+                # the rows as asked about, never by their place: an AI answer may have put them in another order
+                # (or filled in a firm, a new key: then by key, or as the same entry)
+                from ..extract_regex import same_entry
+                rows = [asked[i] for i in chosen]
+                keys = {x.key() for x in rows if x.key()}
+                for a in case.attorneys:
+                    a.checked = any(a is x for x in rows) or a.key() in keys or any(same_entry(x, a) for x in rows)
                 job.att_touched = True  # a later AI answer must not undo the choice
                 job.refresh_copies(self.s)  # No. of copies: the parties just ticked
             if job is self.cur:
@@ -2745,12 +2861,19 @@ class MainWindow(QMainWindow):
         box.exec()
         return False
 
-    def _run_sheet_for(self, job: Job) -> str | None:
+    def _run_sheet_for(self, job: Job, button: str = "Generate") -> str | None:
         """The run sheet to add the job's takes to ("" = a new one), as Settings → Run sheet says; asks when the
-        case seems to have one already. None = cancelled."""
+        case seems to have one already. None = cancelled, also when a workbook named for the case can't be
+        opened just now (runsheet.SheetUnreadable: the user is told which, and to press `button` again; nothing
+        is made)."""
         if self.s.runsheet_existing == "new":
             return ""
-        found = find_sheets(job.case, [runsheets_folder(self.s), *input_folders(job)])
+        try:
+            found = find_sheets(job.case, [runsheets_folder(self.s), *input_folders(job)])
+        except SheetUnreadable as e:
+            QMessageBox.warning(self, "Run sheet", f"{e}\n\nNothing was made. Press {button} again once it can "
+                                                   "be opened.")
+            return None
         if not found:
             return ""
         if self.s.runsheet_existing == "add":
@@ -2761,8 +2884,9 @@ class MainWindow(QMainWindow):
     def fill_all_jobs(self):
         """Generate all: makes the outputs of every ticked job on another thread (Ctrl+Shift+Enter).
 
-        Asked first, once per job that needs it: whose pages to bill, and the speed an e-mail asks for
-        (_ask_speeds). Days whose invoice still waits for a choice are listed, to go back or go on without
+        Asked first, once per job that needs it: whose pages to bill, rows of a case's days that may be one firm
+        (_ask_firms), the speed an e-mail asks for (_ask_speeds) and a Parties number that isn't the firms that
+        ordered (_ask_parties). Days whose invoice still waits for a choice are listed, to go back or go on without
         them; blank fields are not asked about, but incomplete jobs are listed, to leave out or make anyway.
         Where the takes go is asked once per case when it has a run sheet already (Settings → Run sheet); the
         jobs of one case share a run sheet group, so its days go on one sheet. The batch works on copies of
@@ -2867,7 +2991,7 @@ class MainWindow(QMainWindow):
                 continue
             case_no = next((n for n, (k, _) in enumerate(asked) if same_case(ident(k.case), ident(j.case))), None)
             if case_no is None:
-                target = self._run_sheet_for(j)
+                target = self._run_sheet_for(j, "Generate all")
                 if target is None or self._batch_running():
                     return
                 case_no = len(asked)
@@ -3070,9 +3194,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- misc
     def new_job(self):
-        """Clears every job and starts over (Ctrl+N), asking first in a batch. Work still running in the
-        background is not stopped, but its results are dropped (self.gen goes up). Nothing happens when there
-        is nothing to clear (the button is greyed out then)."""
+        """Clears every job and starts over (Ctrl+N), asking first in a batch. Work already running in the
+        background is not stopped, but its results are dropped (self.gen goes up), and AI questions still
+        waiting their turn are never asked (_clear_jobs). Nothing happens when there is nothing to clear (the
+        button is greyed out then)."""
         if not self._anything_to_clear():
             return
         if self._batch_running():
@@ -3098,8 +3223,9 @@ class MainWindow(QMainWindow):
 
     def _clear_jobs(self, job: Job | None = None) -> None:
         """Drops every job and starts with one (a blank one, or `job`); results of work still running are
-        dropped (self.gen goes up)."""
+        dropped (self.gen goes up), and AI questions still waiting their turn are never asked."""
         self.gen += 1
+        self.ai_runner.drop_queued()
         if self.excerpts is not None:  # (it shows days of the jobs dropped)
             self.excerpts.clear()
         self.jobs = [job or Job()]
@@ -3123,8 +3249,11 @@ class MainWindow(QMainWindow):
         an older record's columns. The case comes back as it was filled in (batch.job_from_origin) and the
         documents it was read from are read again when they are still where they were. An invoice of several
         days is read from its documents alone, a job per day. Asks first when there is work on screen; False
-        when nothing was opened."""
-        if self._batch_running():
+        when nothing was opened (during Generate all a box says so, over the Records window the click came from:
+        this window's status bar is behind it)."""
+        if self.filling:
+            QMessageBox.information(getattr(self, "_records_win", None) or self, "Open this job again",
+                                    "Still making the files of the batch - one moment, then try again.")
             return False
         try:
             data = json.loads(origin)
@@ -3181,17 +3310,31 @@ class MainWindow(QMainWindow):
         return True
 
     def open_settings(self, _checked: bool = False):
-        """Opens Settings. After Save, the theme, the window's options, the rate sheets and the AI check are
-        refreshed and every job is merged and priced again."""
-        dlg = SettingsDialog(self.s, self)
+        """Opens Settings (not while Generate all is making files: it reads the settings, and the answers about
+        the firms, on its thread). After Save, the theme, the window's options, the rate sheets and the AI check
+        are refreshed and every job is merged and priced again, with the answers about rows that may be one firm
+        as they are now (one forgotten, for now or for good, splits its rows again and is asked about again)."""
+        if self._batch_running():
+            return
+        def pairs() -> set[frozenset]:
+            return {frozenset(r[:2]) for r in self.s.firm_answers + self._session_answers}
+        before = pairs()
+        dlg = SettingsDialog(self.s, self, self._session_answers)
         if dlg.exec():
-            self._settings_changed()
+            self._session_answers = dlg.session_answers
+            self._settings_changed({k for pair in before - pairs() for k in pair})
 
-    def _settings_changed(self) -> None:
+    def _settings_changed(self, forgotten: set[str] | frozenset = frozenset()) -> None:
         """The settings were changed (Settings saved, the welcome questions answered, settings imported): the
         theme, the window's options, the rate sheets and the AI check are refreshed and every job is merged
-        and priced again (with the answers about rows that may be one firm as they are now)."""
-        use_firm_answers(self.s.firm_answers)
+        and priced again (with the answers about rows that may be one firm as they are now). forgotten: the
+        keys of rows whose answer was forgotten: a job that joined them reads its rows again (split_forgotten)."""
+        self._use_answers()
+        if forgotten:
+            self._sync_from_ui()
+            for job in self.jobs:
+                if split_forgotten(job, forgotten, self.s) and job is self.cur:
+                    self._show_attorneys()  # (the merge below starts from the table)
         if self.s.zoom != zooming.zoom():
             self.set_zoom(self.s.zoom)  # (the theme too)
         apply_theme(self.app, self.s.theme)
@@ -3769,8 +3912,9 @@ class MainWindow(QMainWindow):
             self.drop.set_compact(True)
 
     def _size_drop_later(self):
-        """_size_drop once Qt has laid the window out (sizes measured before that are not the final ones)."""
-        QTimer.singleShot(0, self._size_drop)
+        """_size_drop once Qt has laid the window out (sizes measured before that are not the final ones). The
+        window is the timer's context: a window closed meanwhile is not measured."""
+        QTimer.singleShot(0, self, self._size_drop)
 
     def resizeEvent(self, e):
         """The Outputs columns follow the window's width, and the drop zone its height."""
@@ -4053,5 +4197,5 @@ class MainWindow(QMainWindow):
             e.ignore()
             return
         self.s.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
-        self.s.save()
+        self._save_settings()  # (a file that can't be written must not keep the window from closing)
         super().closeEvent(e)

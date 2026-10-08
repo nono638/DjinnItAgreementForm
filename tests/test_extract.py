@@ -1,4 +1,5 @@
-"""Extraction tests against the fictional samples in tests/samples.
+"""Extraction tests against the fictional samples in tests/samples (a transcript's cover page, an invoice, two
+e-mails), with the merge of one of them, the AI's answers checked against the text, Title Case and parts.
 
 Real documents go in samples_internal/ (git-ignored) and are covered by test_private_samples.py.
 """
@@ -19,6 +20,7 @@ def run(name, as_pdf=False, **pdf):
 
 
 def test_transcript_cover_page():
+    """A transcript PDF's cover page gives every field, its page count, and one entry per firm (not the reporter)."""
     ex = run("transcript_cover.txt", as_pdf=True, page_count=30, first_page_no=101)
     assert best(ex, "index_no") == "712345/2021"
     assert best(ex, "court") == "Supreme"
@@ -38,6 +40,7 @@ def test_transcript_cover_page():
 
 
 def test_invoice():
+    """An invoice gives the case, and its To: line the firm that ordered, ticked."""
     ex = run("invoice.txt")
     assert best(ex, "index_no") == "712222/2024"
     assert best(ex, "part") == "53"
@@ -51,6 +54,7 @@ def test_invoice():
 
 
 def test_informal_email():
+    """An informal e-mail gives the case, two days, the speed and copies, and its sender's signature, ticked."""
     ex = run("email_informal.txt")
     assert best(ex, "index_no") == "812345/2023"
     assert best(ex, "part") == "19"
@@ -86,6 +90,7 @@ def test_merge_defaults_and_derived():
 
 
 def test_smart_title():
+    """ALL CAPS becomes Title Case, keeping initials, LLP/PLLC, small words, Mc and O'."""
     assert smart_title("X.Y. HOLDING CORPORATION and ACME CORP.") == "X.Y. Holding Corporation and Acme Corp."
     assert smart_title("SMITH JONES & BROWN PLLC") == "Smith Jones & Brown PLLC"
     assert smart_title("JOHN MCDONALD O'BRIEN") == "John McDonald O'Brien"
@@ -106,6 +111,8 @@ def test_ai_answers_are_checked_against_the_text():
 
 
 def test_part_letters_and_numbers():
+    """A court document's 'PART MDP', 'PART 25', 'Part: TAP-A' and 'IAS PART 12' are parts; 'part of the record'
+    and 'PART OF THE RECORD' are not."""
     from minute_filler.models import Extraction
     x = RegexExtractor(PROFILE)
     for text, want in [("COUNTY OF QUEENS:  CIVIL TERM:  PART MDP \n", "MDP"),

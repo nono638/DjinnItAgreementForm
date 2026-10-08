@@ -122,6 +122,7 @@ for key, what, lib in (("fuzzy_search", "the Records' Fuzzy search", "rapidfuzz"
                        ("update_check", "the look for a newer version", "ssl"),
                        ("printing", "Print…", "PySide6.QtPrintSupport"),
                        ("math_pdf", "Save as PDF in The math", "pymupdf (Story)"),
+                       ("single_instance", "one window at a time", "PySide6.QtNetwork"),
                        ("moving_picture", "the swirling yin-yang", "Qt's imageformats plugin (qwebp)")):
     got = st.get(key, "no selftest.json" if not st else "missing from selftest.json")
     print(f"  {key.replace('_', ' ')}:", got)

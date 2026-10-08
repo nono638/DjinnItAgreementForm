@@ -1,8 +1,9 @@
 # Private test documents (real transcripts, invoices, photos) - never commit
 samples_internal/
 
-# Personal notes: questions to settle about billing
+# Personal notes: questions to settle about billing, and the plan for other courthouses
 QUESTIONS TO ASK.md
+MIGRATION.md
 
 # Original full-size artwork (resized copies live in minute_filler/assets)
 sillyImages/

@@ -5,8 +5,12 @@ The tables here name the choices the window and the Settings dialog offer: the o
 (SPEEDS) and which one the agreement form names when its first choice isn't offered (AGREEMENT_FALLBACKS),
 which days of an invoice get an index (INDEX_RULES), who pays the index of pages several firms ordered together
 (INDEX_SHARED), what "Show granular detail" adds to an invoice (DETAIL_ITEMS), and where the
-invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN, default_invoice_texts), and the folders
-the outputs go to when they have none of their own (OUTPUT_FOLDERS, see Settings.folder_for).
+invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN, default_invoice_texts), when the AI may
+tick who ordered (AI_TICKS), and the folders the outputs go to when they have none of their own (OUTPUT_FOLDERS,
+see Settings.folder_for).
+
+A settings.json that load() can't read (locked by a sync, damaged) is never written over on the app's own: the
+app runs on the defaults (Settings.unreadable), and only the user's own Save does (save(force=True)).
 
 The settings can be saved to a file and read back on another computer (export_to, import_from): everything but
 what belongs to this computer (LOCAL), with the rate sheets.
@@ -290,6 +294,12 @@ INVOICE_PAYMENT_TEXT = (
     "The transcript is sent after the check clears.")
 RUNSHEET_FILENAME_PATTERN = "{month} {year} {index} {case} - Run Sheet"
 RUNSHEET_EXISTING = ("ask", "add", "new")  # when the case has a run sheet: ask / add to it / start a new one
+# When the AI's answer may tick an attorney as the one who ordered: key -> label (see Settings.ai_ticks)
+AI_TICKS = {
+    "text": "From e-mails and pasted text only",
+    "never": "Never",
+    "any": "From any input, transcripts and photos too",
+}
 # Which days of an invoice get an index, when the job doesn't say: key -> what it means
 INDEX_RULES = {
     "any": "If any day reaches the threshold, every day gets one",
@@ -449,7 +459,9 @@ class Settings:
     excerpt_hidden_speeds: list = field(default_factory=list)
     excerpt_show_place: bool = False
     # the user's answers when two attorney rows may be one firm or attorney ("Smith Law" and "Smith Law Group"):
-    # [[Attorney.key(), Attorney.key(), True (the same) or False], ...] (see extract_regex.use_firm_answers)
+    # [[Attorney.key(), Attorney.key(), True (the same) or False, how the first was written, the second], ...]
+    # (see extract_regex.use_firm_answers; the names are for Settings → Invoice → Firms you answered; rows saved
+    # by 2.2.0 have none, and load with them blank)
     firm_answers: list = field(default_factory=list)
     invoice_turnaround: dict = field(default_factory=lambda: dict(INVOICE_TURNAROUND))
     # the invoice's own text, each row placed and shown as it says (see TEXT_PLACES, TEXT_WHEN); the payment
@@ -475,6 +487,9 @@ class Settings:
     # AI
     use_ai: bool = True
     ai_for_text: bool = True          # also ask the model about text inputs with gaps
+    # when the AI's answer may tick an attorney as the one who ordered (a transcript lists who appeared, not
+    # who ordered): one of AI_TICKS
+    ai_ticks: str = "text"
     ollama_model: str = "gemma4:e2b"
     ollama_host: str = "http://localhost:11434"
     ai_timeout: int = 180
@@ -500,8 +515,8 @@ class Settings:
     recap_month: str = ""             # the month a recap was last shown in ("2026-10")
     recap_year: str = ""              # the year the yearly one was last shown in ("2026")
 
-    # (not a field, so not saved) load() found a settings file it couldn't read (locked by a sync, damaged): what
-    # saves on its own, without the user changing anything, must not write the defaults over it
+    # (not a field, so not saved) load() found a settings file it couldn't read (locked by a sync, damaged): save()
+    # skips every save but the user's own Save (force), so that the defaults are never written over it
     unreadable = False
 
     @property
@@ -657,9 +672,16 @@ class Settings:
         rest = [p for p in self.recent_files if os.path.normcase(os.path.abspath(p)) != key]
         self.recent_files = ([os.path.abspath(path)] + rest)[:RECENT_MAX]
 
-    def save(self) -> None:
+    def save(self, force: bool = False) -> None:
         """Writes settings.json. It goes to a .tmp file first and then replaces the old one, so a crash
-        halfway leaves the old settings, not a broken file."""
+        halfway leaves the old settings, not a broken file. While `unreadable` (load() found a file it couldn't
+        read) nothing is written: the app runs on the defaults, and a save made on its own (a file opened, an
+        option ticked, the look for a newer version) would write them over the user's settings. force: the user
+        pressed Save in Settings (Start in Welcome, Import settings), which is their choice to replace the file;
+        it is written, and the flag cleared."""
+        if self.unreadable and not force:
+            return
+        self.unreadable = False
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -825,10 +847,15 @@ class Settings:
             s.invoice_index_shared = "split"
         s.invoice_detail_items = [k for k in s.invoice_detail_items if isinstance(k, str) and k in DETAIL_ITEMS]
         s.excerpt_hidden_speeds = [k for k in s.excerpt_hidden_speeds if isinstance(k, str)]
-        s.firm_answers = [[r[0], r[1], r[2]] for r in s.firm_answers if isinstance(r, list) and len(r) == 3
+        # an answer about two firms: [key, key, same, name, name]; a row saved by 2.2.0 ([key, key, same]) gets
+        # blank names
+        s.firm_answers = [r[:3] + [x if isinstance(x, str) else "" for x in (r[3:5] + ["", ""])[:2]]
+                          for r in s.firm_answers if isinstance(r, list) and len(r) in (3, 5)
                           and all(isinstance(k, str) and k for k in r[:2]) and isinstance(r[2], bool)]
         if s.runsheet_existing not in RUNSHEET_EXISTING:
             s.runsheet_existing = "ask"
+        if s.ai_ticks not in AI_TICKS:
+            s.ai_ticks = "text"
         # v8: a folder for each output. The run sheets' folder (runsheet_dir before) is one of them now.
         s.output_dirs = {k: v.strip() for k, v in s.output_dirs.items()
                          if k in OUTPUTS and isinstance(v, str) and v.strip()}

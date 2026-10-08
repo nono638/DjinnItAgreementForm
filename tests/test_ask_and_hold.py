@@ -2,8 +2,9 @@
 ordered (a Parties number set by hand that disagrees is asked about at Generate); a case whose run sheet can't be
 written (open in Excel) gets nothing made, its days saying why, and Generate checks the run sheet before making
 anything; the takes of a trial go on its run sheet in one save; rows that may be one firm ("Smith Law" and "Smith
-Law Group", "Mr. Smith" and Dana Smith of Smith Law) are not joined without asking, and the answer is kept. All
-names are made up."""
+Law Group", "Mr. Smith" and Dana Smith of Smith Law) are not joined without asking, and the answer is kept with the
+names as written, or for now only (Remember unticked); Settings → Invoice → Firms you answered lists the answers,
+and Forget there splits joined rows again at once. All names are made up."""
 import os
 import sys
 
@@ -258,6 +259,8 @@ def window(tmp_path, monkeypatch, make_window, qt, s):
 
 
 def test_the_attorneys_card_asks_and_keeps_the_answer(window):
+    """The card asks about Smith Law and Smith Law Group; 'the same' makes them one row, and the answer is saved
+    with each row as it was written."""
     from minute_filler.settings import Settings
     window.cur.case.attorneys = [firm("Dana Smith", "Smith Law"), firm("Sam Poe", "Smith Law Group, PLLC")]
     window._show_case()
@@ -266,7 +269,57 @@ def test_the_attorneys_card_asks_and_keeps_the_answer(window):
     window._answer_firm(True)
     assert [a.firm for a in window.cur.case.attorneys] == ["Smith Law"]
     assert not window.firm_ask_box.isVisibleTo(window) and window.att.rowCount() >= 1
-    assert Settings.load().firm_answers == [["smith law", "smith law group", True]]
+    assert Settings.load().firm_answers == [["smith law", "smith law group", True, "Smith Law (Dana Smith)",
+                                             "Smith Law Group, PLLC (Sam Poe)"]]
+
+
+def test_an_answer_for_now_only_is_not_kept(window):
+    """"Remember" unticked: the answer (here: not the same, so two rows) holds and the pair isn't asked about again
+    until the app is closed, even after Settings are saved, but nothing is saved for later documents."""
+    from minute_filler.settings import Settings
+    window.cur.case.attorneys = [firm("Dana Smith", "Smith Law"), firm("Sam Poe", "Smith Law Group, PLLC")]
+    window._show_case()
+    window._update_status()
+    window.firm_remember.setChecked(False)
+    window._answer_firm(False)
+    assert len(window.cur.case.attorneys) == 2 and firm_questions([window.cur]) == []
+    assert Settings.load().firm_answers == [] and window.s.firm_answers == []
+    window._settings_changed()  # (Settings saved: the answer for now still counts)
+    assert firm_questions([window.cur]) == []
+
+
+def test_answers_load_with_their_names_and_without():
+    """Rows saved by 2.2.0 have no names and load with them blank; a damaged row is left out."""
+    import json
+    from minute_filler.settings import Settings
+    Settings().path.write_text(json.dumps({"firm_answers": [
+        ["smith law", "smith law group", True], ["roe legal", "roe legal partners", False, "Roe Legal", "Roe Legal "
+                                                 "Partners"], ["x", "y"], ["a", "b", "yes"]]}), encoding="utf-8")
+    assert Settings.load().firm_answers == [["smith law", "smith law group", True, "", ""],
+                                            ["roe legal", "roe legal partners", False, "Roe Legal", "Roe Legal Partners"]]
+
+
+def test_an_answer_can_be_forgotten_in_settings(qt):
+    """Settings → Invoice → Firms you answered: Forget takes the selected answer out, and the pair is asked about
+    again."""
+    from minute_filler.gui.dialogs import SettingsDialog
+    from minute_filler.settings import Settings
+    s = Settings.load()
+    s.firm_answers = [["smith law", "smith law group", True, "Smith Law", "Smith Law Group"],
+                      ["roe legal", "roe legal partners", False, "Roe Legal", "Roe Legal Partners"]]
+    dlg = SettingsDialog(s)
+    assert dlg.i_firms.item(0).text().startswith("Smith Law  =  Smith Law Group")
+    assert "≠" in dlg.i_firms.item(1).text()
+    dlg.i_firms.item(0).setSelected(True)
+    dlg.i_forget.click()
+    dlg.accept()
+    assert [r[0] for r in Settings.load().firm_answers] == ["roe legal"]
+    use_firm_answers(s.firm_answers)
+    assert maybe_same_entry(firm("Dana Smith", "Smith Law"), firm("Sam Poe", "Smith Law Group"))
+    dlg = SettingsDialog(s)
+    dlg.i_forget_all.click()
+    dlg.accept()
+    assert Settings.load().firm_answers == [] and not dlg.i_forget.isEnabled()
 
 
 def test_an_answer_joins_the_rows_of_every_job_loaded(window):
@@ -338,3 +391,105 @@ def test_generate_checks_the_run_sheet_first(window, tmp_path, monkeypatch):
     assert not window._sheets_free([str(tmp_path / "Roe - Run Sheet.xlsx"), ""], "Generate all")
     assert "Roe - Run Sheet.xlsx" in shown[0] and "press Generate all again" in shown[0]
     assert window._sheets_free(["", None], "Generate")
+
+
+# ------------------------------------------------------------------ forgetting an answer takes effect at once
+def firm_docs(window):
+    """A document of the job naming Dana Smith of Smith Law and Sam Poe of Smith Law Group: the two rows the
+    merge builds from it may be one firm, so the card asks."""
+    from helpers import text_doc
+    d = text_doc(window.s, "Please send the minutes of Jane Roe v. Sam Poe, Index No. 712345/2021.", "order.txt")
+    d.regex.attorneys = [firm("Dana Smith", "Smith Law"), firm("Sam Poe", "Smith Law Group, PLLC")]
+    window.cur.docs.append(d)
+    window._remerge()
+    window._update_status()
+    assert window.firm_ask_box.isVisibleTo(window) and len(window.cur.case.attorneys) == 2
+    return d
+
+
+def test_forgetting_an_answer_splits_the_rows_again_at_once(window, monkeypatch):
+    """Settings → Invoice → Forget all, then Save: the jobs open now are read again, the pair is two rows again
+    and the card asks again (before: the joined row stayed until the app was closed)."""
+    from minute_filler.gui.dialogs import SettingsDialog
+    from minute_filler.settings import Settings
+    firm_docs(window)
+    window._answer_firm(True)
+    assert len(window.cur.case.attorneys) == 1 and not window.firm_ask_box.isVisibleTo(window)
+
+    def forget_all(self):
+        assert self.i_firms.count() == 1 and self.i_firms.item(0).text().endswith("(Sam Poe)   (same firm)")
+        self.i_forget_all.click()
+        self.accept()
+        return 1
+    monkeypatch.setattr(SettingsDialog, "exec", forget_all)
+    window.open_settings()
+    assert Settings.load().firm_answers == [] and len(window.cur.case.attorneys) == 2
+    assert window.firm_ask_box.isVisibleTo(window) and len(firm_questions([window.cur])) == 1
+
+
+def test_forgetting_an_answer_splits_rows_the_user_ticked_too(window, monkeypatch):
+    """A tick after the answer (the usual next step) makes the table the user's: Forget still splits the joined row,
+    "Smith Law: Dana Smith, Sam Poe", into its two firms, and the tick stays on Smith Law (before: Sam Poe stayed in
+    Smith Law's row, which went on its agreement and invoice)."""
+    from PySide6.QtCore import Qt
+    from minute_filler.gui.dialogs import SettingsDialog
+    firm_docs(window)
+    window._answer_firm(True)
+    tick = window.att.item(0, 0)
+    tick.setCheckState(Qt.Unchecked)
+    tick.setCheckState(Qt.Checked)
+    assert window.cur.att_touched
+
+    def forget_all(self):
+        self.i_forget_all.click()
+        self.accept()
+        return 1
+    monkeypatch.setattr(SettingsDialog, "exec", forget_all)
+    window.open_settings()
+    rows = {a.firm: a for a in window.cur.case.attorneys}
+    assert set(rows) == {"Smith Law", "Smith Law Group, PLLC"}
+    assert rows["Smith Law"].name == "Dana Smith" and rows["Smith Law"].checked
+    assert rows["Smith Law Group, PLLC"].name == "Sam Poe"
+    assert window.firm_ask_box.isVisibleTo(window)
+
+
+def test_an_answer_for_now_is_listed_and_can_be_forgotten(window, monkeypatch):
+    """Remember unticked: the answer is listed under Firms you answered as "for now", and Forget takes it back:
+    the card asks again."""
+    from minute_filler.gui.dialogs import SettingsDialog
+    firm_docs(window)
+    window.firm_remember.setChecked(False)
+    window._answer_firm(False)
+    assert len(window._session_answers) == 1 and not window.firm_ask_box.isVisibleTo(window)
+
+    def forget_it(self):
+        assert self.i_firms.count() == 1 and self.i_firms.item(0).text().endswith("(not the same, for now)")
+        assert self.i_forget.isEnabled()
+        self.i_firms.item(0).setSelected(True)
+        self.i_forget.click()
+        self.accept()
+        return 1
+    monkeypatch.setattr(SettingsDialog, "exec", forget_it)
+    window.open_settings()
+    assert window._session_answers == [] and window.firm_ask_box.isVisibleTo(window)
+
+
+def test_remember_unticked_carries_to_the_next_question(window, monkeypatch):
+    """Generate asks about two pairs: Remember unticked on the first is unticked on the second too, and the
+    card's box follows (before: each box started from the card's, so the second answer was kept for good)."""
+    from minute_filler.gui import main_window
+    from minute_filler.settings import Settings
+    job = window.cur
+    job.case.attorneys = [firm("Dana Smith", "Smith Law"), firm("Sam Poe", "Smith Law Group, PLLC"),
+                          firm("Kim Lee", "Roe Legal"), firm("Pat Doe", "Roe Legal Partners")]
+    ticks = []
+
+    def answer(box):
+        ticks.append(box.checkBox().isChecked())
+        box.checkBox().setChecked(False)
+        next(b for b in box.buttons() if b.text() == "Not the same").click()
+        return 0
+    monkeypatch.setattr(main_window.QMessageBox, "exec", answer)
+    assert window._ask_firms([[job]])
+    assert ticks == [True, False] and not window.firm_remember.isChecked()
+    assert Settings.load().firm_answers == [] and window.s.firm_answers == [] and len(window._session_answers) == 2

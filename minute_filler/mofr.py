@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pymupdf
 
-from .fill import form_text, forms_dir, output_name, save_output, set_check, set_text
+from .fill import date_ranges, form_text, forms_dir, output_name, save_output, set_check, set_text
 from .forms import mofr_map
 from .models import CaseInfo, PROC_TYPES
 from .rates import speed_key
@@ -28,7 +28,9 @@ def mofr_path() -> Path:
 
 def build_values(case: CaseInfo, s: Settings, pages: str = "") -> dict[str, str | bool]:
     """The MOFR's values: field key (see mofr_map) -> text or checkmark. pages: the page count to write, when
-    known (the pages anyone ordered, see fill_mofr); "" = the case's Est. number of pages."""
+    known (the pages anyone ordered, see fill_mofr); "" = the case's Est. number of pages. The dates are listed
+    as fill.date_ranges says (days in a row as a range: the line gives out at six dates written out, five from
+    October on, and has no second line to go on to)."""
     g = case.get
     civil = s.mofr_division != "criminal"
     title = " ".join(g("case_name").split())
@@ -41,7 +43,7 @@ def build_values(case: CaseInfo, s: Settings, pages: str = "") -> dict[str, str 
     key = speed_key(g("delivery"))
     v: dict[str, str | bool] = {
         "county": g("county"), "title": title, "index_no": g("index_no"), "part": g("part"),
-        "judge": g("judge"), "dates": g("dates"), "copies": g("copies"),
+        "judge": g("judge"), "dates": date_ranges(g("dates")), "copies": g("copies"),
         "pages": pages or g("est_pages"),
         "rep_name": s.profile.name, "rep_location": s.profile.address1,
         "proc_other": ", ".join(others), "proc_other_check": bool(others),

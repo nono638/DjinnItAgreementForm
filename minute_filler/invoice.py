@@ -33,8 +33,9 @@ price per page, the charges in each amount and the split between parties (settin
 
 The page is laid out as HTML and drawn with PyMuPDF (Story); no other library is needed. Its values (number,
 Bill To, case details, amounts) are text fields, so they can be corrected in a PDF viewer, unless the PDF is
-flattened (see fill.save_output). Every invoice is numbered and entered in the records (records.Ledger); one
-the records refuse is deleted again (make_invoice), so no two PDFs share a number.
+flattened (see fill.save_output). Every invoice's number is claimed in the records before it is drawn
+(records.Ledger.reserve_invoice_no), and the invoice entered there once it is; one that can't be drawn, or that
+the records refuse, is deleted again and its number given back (make_invoice), so no two PDFs share a number.
 """
 from __future__ import annotations
 
@@ -51,6 +52,7 @@ import pymupdf
 from .dates import us_date
 from .fill import add_text_field, output_name, save_output
 from .invoice_calc import Quote, Share, fmt, index_days, offered, quote_shares, quotes_for
+from .log import error as log_error
 from .models import Attorney, CaseInfo
 from .rates import speed_key
 from .records import NUMBER_LOCK, Invoice, Ledger
@@ -369,12 +371,13 @@ def invoice_layout(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: l
 
 
 def render(case: CaseInfo, atty: Attorney | None, s: Settings, quotes: list[Quote], number: str, out: Path,
-           opts: InvoiceOpts | None = None) -> Path:
+           opts: InvoiceOpts | None = None, when: date | None = None) -> Path:
     """Draws the invoice on one letter page and saves it at out (or "out (2)" when taken); returns the path.
     The page is laid out like Page.insert_htmlbox does it (shrunk to fit when it runs long), then each
     value (number, Bill To, case details, amounts) is turned into a text field at the same place, so it can
-    be corrected in a PDF viewer. With Settings.flatten the fields are flattened again."""
-    html_text, fields = invoice_layout(case, atty, s, quotes, number, opts=opts)
+    be corrected in a PDF viewer. With Settings.flatten the fields are flattened again. when: the invoice's
+    date (today)."""
+    html_text, fields = invoice_layout(case, atty, s, quotes, number, when, opts=opts)
     doc = pymupdf.open()
     page = doc.new_page(width=PAGE.width, height=PAGE.height)
     box = pymupdf.Rect(MARGIN, MARGIN, PAGE.width - MARGIN, PAGE.height - MARGIN)
@@ -415,35 +418,59 @@ def job_quotes(case: CaseInfo, s: Settings, opts: InvoiceOpts) -> list[Quote]:
 
 
 def make_invoice(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, opts: InvoiceOpts,
-                 ledger: Ledger, dated: bool = False, quotes: list[Quote] | None = None) -> tuple[Path, str]:
+                 ledger: Ledger, dated: bool = False, quotes: list[Quote] | None = None,
+                 today: date | None = None) -> tuple[Path, str]:
     """Numbers, draws and records one invoice; returns (file, invoice number). quotes: the job's prices,
-    when already worked out for its other invoices. When the records refuse the invoice, its PDF is deleted
-    and the error raised."""
+    when already worked out for its other invoices. today: the invoice's date (default: today), for a caller that
+    dates another copy of it the same (deliver.generate's detailed copy). When the invoice can't be drawn, or the
+    records refuse it (the database locked), the error is raised, its PDF deleted and its number given back, to be
+    given again next time. The number is given back only once the file is gone (never written, or deleted): a PDF
+    that can't be deleted keeps its number, as "Invoice 2026-0007.pdf" left behind with 2026-0007 given to the
+    next invoice would be two invoices with one number. A gap in the count is harmless."""
     quotes = quotes or job_quotes(case, s, opts)
     s = settings_for(s, opts)  # (another reporter's invoice: their details and numbers)
-    with NUMBER_LOCK:  # no other thread may take the same number before this invoice is in the records
-        number, year, seq = ledger.next_invoice_no(s.invoice_number_format, reporter=opts.reporter)
-        pattern = s.invoice_filename_pattern
-        if opts.reporter and "{reporter}" not in pattern:
-            pattern += " ({reporter})"  # two reporters' invoices of a case for one attorney, told apart
-        name = output_name(case, atty, s, dated, pattern=pattern, fallback=f"Invoice {number}", number=number,
-                           reporter=opts.reporter.upper())
-        out = render(case, atty, s, quotes, number, Path(out_dir) / name, opts)
+    # one day for the number's year, the date on the page and the records: asked three times across midnight on
+    # December 31, they would disagree (a 2026 number on an invoice dated 2027)
+    today = today or date.today()
+    with NUMBER_LOCK:  # this app's own threads (the window, the batch) take their numbers one at a time
+        # the number is taken from the records as they are now, and claimed there at once (reserve_invoice_no
+        # enters it in used_numbers): that row, not the lock, is what keeps another copy of the app making an
+        # invoice meanwhile from the same number; it gets the next one
+        number, year, seq = ledger.reserve_invoice_no(s.invoice_number_format, today=today, reporter=opts.reporter)
+        out = None
         try:
+            pattern = s.invoice_filename_pattern
+            if opts.reporter and "{reporter}" not in pattern:
+                pattern += " ({reporter})"  # two reporters' invoices of a case for one attorney, told apart
+            name = output_name(case, atty, s, dated, pattern=pattern, fallback=f"Invoice {number}", number=number,
+                               reporter=opts.reporter.upper())
+            out = render(case, atty, s, quotes, number, Path(out_dir) / name, opts, when=today)
             ledger.add_invoice(Invoice(
-                invoice_no=number, created=date.today().isoformat(), case_name=case.get("case_name"),
+                invoice_no=number, created=today.isoformat(), case_name=case.get("case_name"),
                 index_no=case.get("index_no"), dates=case.get("dates"), judge=case.get("judge"),
                 bill_to=atty.name if atty else "", firm=atty.firm if atty else "",
                 email=atty.email if atty else "", pages=opts.pages, parties=opts.parties,
                 amounts={q.speed: str(q.per_party) for q in quotes}, billed_speed=billed_speed(case, quotes),
                 file_path=str(out), reporter=opts.reporter, **record_details(case, opts, quotes)), year, seq)
-        except Exception:
-            # Not in the records (the database locked, or the number taken by another copy of the app): the
-            # number is given again next time, so the drawn invoice goes too (else two PDFs would share it)
-            try:
-                out.unlink(missing_ok=True)
-            except OSError:
-                pass
+        except Exception as failed:
+            # Not drawn, or not in the records (the database locked): the drawn invoice goes (else two PDFs would
+            # share its number), and then the number is given back, to be given again next time. A save that
+            # failed part way may have left its half-written file too (fill.save_output: left_behind).
+            out = out or getattr(failed, "left_behind", None)
+            gone = True
+            if out is not None:
+                try:
+                    out.unlink(missing_ok=True)
+                except OSError as e:
+                    gone = False  # (held open, or the folder read-only: the file stays, and its number with it)
+                    # (not the file's name: it names the case, and the log goes out with problem reports)
+                    log_error(f"could not delete an invoice that was not recorded; its number {number} stays "
+                              f"taken", e)
+            if gone:
+                try:
+                    ledger.release_invoice_no(number)
+                except Exception as e:  # (the records can't be written: the number stays taken, a gap in the count)
+                    log_error("could not give an invoice number back", e)
             raise
     return out, number
 
@@ -493,7 +520,7 @@ def sample_invoice(s: Settings, folder: Path) -> Path:
 def make_invoices(case: CaseInfo, s: Settings, out_dir: Path, opts: InvoiceOpts, ledger: Ledger | None = None,
                   dated: bool = False) -> list[Path]:
     """One invoice per ticked firm that ordered pages (or one with a blank Bill To); each is numbered and
-    recorded (see firm_invoices)."""
+    recorded (see firm_invoices). The window and the batch make theirs through deliver.generate instead."""
     ledger = ledger or Ledger()
     return [make_invoice(f.case, f.atty, s, out_dir, f.opts, ledger, dated, f.quotes)[0]
             for f in firm_invoices(case, s, opts)]

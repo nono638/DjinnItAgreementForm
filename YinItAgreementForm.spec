@@ -40,7 +40,7 @@ a = Analysis(
     hiddenimports=hidden,
     excludes=["tkinter", "matplotlib", "numpy", "pandas", "PySide6.QtWebEngineCore", "PySide6.Qt3DCore",
               "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtMultimedia", "PySide6.QtCharts",
-              "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtNetwork", "pytest"],
+              "PySide6.QtDataVisualization", "PySide6.QtPdf", "pytest"],  # QtNetwork: one window at a time
 )
 pyz = PYZ(a.pure)
 exe = EXE(

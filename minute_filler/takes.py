@@ -20,6 +20,12 @@ _NUMBER = re.compile(r"^\d{1,5}$")
 _EXAM = re.compile(r"(?i)\b(?:re-?)?(?:direct|cross)\b|\bvoir\s+dire\b|\bexamination\b")  # "Redirect" too
 _INDEX_REF = re.compile(r"\b\d{1,2}:\d{1,5}/\d{1,2}\b")  # the word index: "1:360/25"
 _PAGE_LINE = re.compile(r"\b\d{1,5}:\d{1,2}\b")          # and "394:18"
+# a time of day, not a reference: "9:10 a.m.", "at 9:10", "about 9:10"
+_TIME_AFTER = re.compile(r"(?i)^\s*(?:[ap]\.?\s?m\b|o'clock)")
+_TIME_BEFORE = re.compile(r"(?i)\b(?:at|about|around|until|till|by|from|to|between)\s+$")
+# a transcript's line number at the left edge ("1", "1    THE COURT:"); an index entry is "1 (5) 312:4;..."
+_LEFT_NUMBER = re.compile(r"(?m)^[ \t]{0,4}(\d{1,2})(?:[ \t]+(?!\(\d+\))\S|[ \t]*$)")
+LINE_NUMBERS = 8  # this many in a row (1, 2, 3...) at the left edge: a page of the transcript, not of its index
 _SWORN = re.compile(r"(?i)\bcalled\s+(?:as\s+a\s+witness|virtually|on\s+behalf)|\bduly\s+(?:sworn|affirmed)|"
                     r"\ba\s+witness\s+(?:called|having)")
 _EXCUSED = re.compile(r"(?i)\bwitness\s+(?:was\s+|is\s+)?(?:excused|steps?\s+down|stepped\s+down|"
@@ -136,22 +142,59 @@ def unspace(name: str) -> str:
 
 def is_index_page(text: str) -> bool:
     """The word index (concordance) printed after a transcript: many 'page:line' references ("1:360/25",
-    "394:18"). "Min-U-Script" alone doesn't say so: a condensed transcript prints it on every page."""
-    lines = [ref.split(":")[1] for ref in _PAGE_LINE.findall(text)]
-    # a time ("7:00", "9:38") is not a reference: a page has 25 lines, numbered without a 0 in front
-    refs = len(_INDEX_REF.findall(text)) + sum(1 for n in lines if not n.startswith("0") and int(n) <= 25)
+    "394:18"). "Min-U-Script" alone doesn't say so: a condensed transcript prints it on every page. A page of
+    testimony reading out the times of a chart ("9:10, 9:15, 9:20... 11:15") has the same shape, so a time with
+    a.m., p.m. or o'clock after it, or "at", "about", "until"... before it, doesn't count, and a page with the
+    transcript's line numbers down its left edge (1, 2, 3... in order, see has_line_numbers) is never the index,
+    whatever else is on it (scan_pdf also keeps a page signed with initials seen before it). Taken for the index,
+    such a page would end the count, and every page after it go unbilled and off the run sheet."""
+    if has_line_numbers(text):
+        return False
+    refs = len(_INDEX_REF.findall(text))
+    for m in _PAGE_LINE.finditer(text):
+        line = m.group(0).split(":")[1]
+        # a time ("7:00", "9:38") is not a reference: a page has 25 lines, numbered without a 0 in front
+        if line.startswith("0") or int(line) > 25:
+            continue
+        if _TIME_AFTER.match(text[m.end():m.end() + 12]) or _TIME_BEFORE.search(text[max(0, m.start() - 12):m.start()]):
+            continue
+        refs += 1
     return refs >= 8 or (refs >= 3 and "Min-U-Script" in text)
+
+
+def has_line_numbers(text: str) -> bool:
+    """A transcript page: at least LINE_NUMBERS line numbers in a row at the left edge, counted from 1 (1, 2, 3...),
+    as a page's lines always are. The word index's entries for numbers can look the same ("10 [2] 45:3",
+    "11 45:3, 67:12"; one with its count in parentheses, "10 (3) 312:4;...", is not taken for a line number), but
+    the index sorts them as text ("1", "10", "100", "11" ... "19", "2"), so those in a row start at 10, 20...:
+    "10" to "19" is no page of testimony."""
+    run, best, prev = 0, 0, None
+    for m in _LEFT_NUMBER.finditer(text):
+        n = int(m.group(1))
+        if n == 1:
+            run = 1
+        elif run and n == prev + 1:
+            run += 1
+        else:
+            run = 0  # (a number that doesn't go on from 1, like the page number above the lines, counts for nothing)
+        best, prev = max(best, run), n
+    return best >= LINE_NUMBERS
 
 
 def scan_pdf(doc) -> list[PageMark]:
     """One PageMark per transcript page, without the word index after it. [] when no page has initials or
-    a page number (not a transcript, or a scan without text)."""
+    a page number (not a transcript, or a scan without text). A page that looks like the index but carries the
+    initials seen on the pages before it is a page of the transcript (the index is unsigned)."""
     marks: list[PageMark] = []
+    seen: set[str] = set()
     for i, page in enumerate(doc):
         text = page.get_text()
-        if i and is_index_page(text):
+        mark = scan_page(page, text)
+        if i and mark.initials not in seen and is_index_page(text):
             break
-        marks.append(scan_page(page, text))
+        if mark.initials:
+            seen.add(mark.initials)
+        marks.append(mark)
     # trailing pages with neither initials nor a number are dropped; a last page with only its number is
     # kept (it ends the last take)
     signed = [i for i, m in enumerate(marks) if m.initials or m.number is not None]
@@ -166,15 +209,18 @@ def body_pages(marks: list[PageMark], page_count: int) -> int:
     return len(marks) or page_count
 
 
-def find_takes(marks: list[PageMark], title_count: int = 1) -> list[Take]:
-    """Groups the pages into takes. A page without initials belongs to the take it is in (or to the next
-    one, at the start); a page without a number is numbered on from the one before. Each take also lists
-    the witnesses who took the stand and stepped down in it, from the swearing-in and "witness excused"
-    lines and the running heads. title_count: how many title pages the transcript begins with."""
+def find_takes(marks: list[PageMark], title_count: int = 1, front: str = "") -> list[Take]:
+    """Groups the pages into takes. A page without initials belongs to the take it is in; a page without a
+    number is numbered on from the one before. Each take also lists the witnesses who took the stand and
+    stepped down in it, from the swearing-in and "witness excused" lines and the running heads. title_count:
+    how many title pages the transcript begins with. front: whose the pages before the first initials are, as
+    Whose pages... answered (batch.Job.front_owner: initials, or "none" for nobody's, a take of their own with
+    no reporter); without an answer they are the first reporter found's, as on a transcript one reporter wrote,
+    and as the invoice counts them on it."""
     known = [m.initials for m in marks if m.initials]
     if not marks:
         return []
-    fill = known[0] if known else ""
+    fill = ("" if front == "none" else front) if front else known[0] if known else ""
     takes: list[Take] = []
     witness = ""           # the witness on the stand, as far as the running heads tell ("": nobody)
     stepped_down = ""      # the last witness to step down: a running head still naming them doesn't start them again

@@ -18,10 +18,10 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..models import Attorney, FIELD_LABELS
-from ..settings import (AGREEMENT_FALLBACKS, DETAIL_ITEMS, INDEX_RULES, INDEX_SHARED, OUTPUT_FOLDERS, OUTPUTS, SPEEDS,
-                        ReporterProfile, TEXT_PLACEHOLDERS, TEXT_PLACES, TEXT_WHEN, Settings, default_invoice_texts,
-                        reporter_key)
-from .widgets import check_row, open_path, open_url, refill_combo, rounded
+from ..settings import (AGREEMENT_FALLBACKS, AI_TICKS, DETAIL_ITEMS, INDEX_RULES, INDEX_SHARED, OUTPUT_FOLDERS, OUTPUTS,
+                        SPEEDS, ReporterProfile, TEXT_PLACEHOLDERS, TEXT_PLACES, TEXT_WHEN, Settings,
+                        default_invoice_texts, reporter_key)
+from .widgets import check_row, open_path, open_url, refill_combo, rounded, show_save_error
 from .zoom import z
 
 
@@ -42,10 +42,13 @@ class SettingsDialog(QDialog):
     and saves it to disk. Cancel leaves the settings, and a picked but unsaved signature image,
     untouched.
     """
-    def __init__(self, settings: Settings, parent=None):
-        """settings: the Settings object to edit in place."""
+    def __init__(self, settings: Settings, parent=None, session_answers: list | None = None):
+        """settings: the Settings object to edit in place. session_answers: the window's answers about rows that
+        may be one firm given for now only (Remember unticked), listed under Firms you answered marked "for now";
+        after Save, `self.session_answers` holds those not forgotten."""
         super().__init__(parent)
         self.s = settings
+        self.session_answers = [list(r) for r in session_answers or []]
         self.setWindowTitle("Settings")
         self.setMinimumWidth(z(560))
         lay = QVBoxLayout(self)
@@ -360,6 +363,28 @@ class SettingsDialog(QDialog):
                                 "With a joint invoice, the minute agreements and the MOFR are made once for the\n"
                                 "whole case too, unless Settings → Options says otherwise.")
         f.addRow("Days of one case", self.i_joint)
+        # the answers about rows that may be one firm ("Smith Law" and "Smith Law Group"), kept and for now: one
+        # forgotten is asked about again the next time both appear
+        self._firm_answers = [list(r) for r in settings.firm_answers]
+        box = QVBoxLayout()
+        self.i_firms = QListWidget()
+        self.i_firms.setSelectionMode(QListWidget.ExtendedSelection)
+        self.i_firms.setMaximumHeight(z(120))
+        box.addWidget(self.i_firms)
+        row = QHBoxLayout()
+        self.i_forget = QPushButton("Forget")
+        self.i_forget.setToolTip("Forget the answers selected: after Save, the jobs open now are read again with\n"
+                                 "the two rows apart, and you're asked again (there, and the next time both appear).\n"
+                                 "\"for now\" marks an answer given with Remember unticked: kept until the app closes.")
+        self.i_forget.clicked.connect(lambda: self._forget_firms(False))
+        self.i_forget_all = QPushButton("Forget all")
+        self.i_forget_all.clicked.connect(lambda: self._forget_firms(True))
+        row.addWidget(self.i_forget)
+        row.addWidget(self.i_forget_all)
+        row.addStretch(1)
+        box.addLayout(row)
+        f.addRow("Firms you answered", box)
+        self._fill_firms()
         self.i_turn: dict[str, QLineEdit] = {}
         for name in SPEEDS:
             e = QLineEdit(settings.turnaround(name))
@@ -463,8 +488,15 @@ class SettingsDialog(QDialog):
         self.a_status.setObjectName("muted")
         self.a_status.setWordWrap(True)
         test.clicked.connect(self._test_ai)
+        self.a_ticks = QComboBox()
+        for key, label in AI_TICKS.items():
+            self.a_ticks.addItem(label, key)
+        self.a_ticks.setCurrentIndex(max(0, self.a_ticks.findData(settings.ai_ticks)))
+        self.a_ticks.setToolTip("A transcript lists who appeared, not who ordered, so the AI's tick is trusted only\n"
+                                "from e-mails and pasted text unless you say otherwise.")
         f.addRow("", self.a_use)
         f.addRow("", self.a_text)
+        f.addRow("The AI may tick who ordered:", self.a_ticks)
         f.addRow("Model", self.a_model)
         f.addRow("", a_note)
         f.addRow("Ollama URL", self.a_host)
@@ -526,7 +558,7 @@ class SettingsDialog(QDialog):
     def _store_signature(self):
         """Applies a pick or removal made in this dialog: moves the prepared picture to signature.png (or
         deletes it) and records it in the settings. Does nothing if the signature was not touched, and leaves
-        the settings as they were if the file cannot be moved or deleted.
+        the settings as they were (saying so) if the file cannot be moved or deleted.
         """
         from pathlib import Path
         from ..signature import signature_path
@@ -538,7 +570,9 @@ class SettingsDialog(QDialog):
                 Path(self._sig_new).replace(final)  # in one step: the old picture stays if this fails
             else:
                 final.unlink(missing_ok=True)
-        except OSError:
+        except OSError as e:
+            QMessageBox.warning(self, "Signature", "The signature picture couldn't be "
+                                f"{'stored' if self._sig_new else 'removed'}, so the one you had stays.\n\n{e}")
             return
         self.s.signature_image = str(final) if self._sig_new else ""
 
@@ -767,10 +801,39 @@ class SettingsDialog(QDialog):
         if d:
             edit.setText(d)
 
+    def _fill_firms(self) -> None:
+        """Invoice → Firms you answered: one line per answer kept, "Smith Law  =  Smith Law Group (Sam Poe)"
+        (same firm) or "≠" (not the same), then those given for now only, marked "for now"; rows saved by 2.2.0
+        (without the names) show the keys compared."""
+        self.i_firms.clear()
+        for r, kept in [(r, True) for r in self._firm_answers] + [(r, False) for r in self.session_answers]:
+            a, b = (r[3] or r[0], r[4] or r[1]) if len(r) >= 5 else (r[0], r[1])
+            self.i_firms.addItem(f"{a}  {'=' if r[2] else '≠'}  {b}   ({'same firm' if r[2] else 'not the same'}"
+                                 f"{'' if kept else ', for now'})")
+        if not self._firm_answers and not self.session_answers:
+            item = QListWidgetItem("None yet: you're asked when two rows may be one firm")
+            item.setFlags(Qt.NoItemFlags)
+            self.i_firms.addItem(item)
+        self.i_forget.setEnabled(bool(self._firm_answers or self.session_answers))
+        self.i_forget_all.setEnabled(bool(self._firm_answers or self.session_answers))
+
+    def _forget_firms(self, everything: bool) -> None:
+        """Forget / Forget all: the answers go when Settings are saved (the ones for now too)."""
+        rows = {self.i_firms.row(it) for it in self.i_firms.selectedItems()}
+        kept = len(self._firm_answers)
+        if everything:
+            self._firm_answers, self.session_answers = [], []
+        else:
+            self._firm_answers = [r for n, r in enumerate(self._firm_answers) if n not in rows]
+            self.session_answers = [r for n, r in enumerate(self.session_answers) if n + kept not in rows]
+        self._fill_firms()
+
     def accept(self):
         """Copies every control into the Settings object, saves it to disk and closes. A blank file name
         pattern or invoice number format keeps the old one. Reporter lines that cannot be read are left out,
-        with a warning that lists them."""
+        with a warning that lists them. The file is written even over a settings file that couldn't be read
+        (Settings.save(force=True)); when it can't be written the user is told, and the dialog closes all the
+        same."""
         s, p = self.s, self.s.profile
         p.name, p.title = self.p_name.text().strip(), self.p_title.text().strip()
         p.address1, p.address2 = self.p_addr1.text().strip(), self.p_addr2.text().strip()
@@ -816,6 +879,7 @@ class SettingsDialog(QDialog):
         s.invoice_detail_items = [k for k, cb in self.i_items.items() if cb.isChecked()]
         s.invoice_turnaround = {k: e.text().strip() for k, e in self.i_turn.items()}
         s.invoice_texts = self.i_texts.rows()
+        s.firm_answers = [list(r) for r in self._firm_answers]
         s.invoice_number_format = self.i_number.text().strip() or s.invoice_number_format
         s.invoice_filename_pattern = self.i_pattern.text().strip() or s.invoice_filename_pattern
         s.records_dir = self.i_records.text().strip()
@@ -832,9 +896,16 @@ class SettingsDialog(QDialog):
                                 "them as initials = name, e.g. ds = Dana):\n\n" + "\n".join(bad[:10]))
         s.show_yin = self.o_yin.isChecked()
         s.use_ai, s.ai_for_text = self.a_use.isChecked(), self.a_text.isChecked()
+        s.ai_ticks = self.a_ticks.currentData() or s.ai_ticks
         s.ollama_model, s.ollama_host = self.a_model.currentText().strip(), self.a_host.text().strip()
         s.ai_timeout = self.a_timeout.value()
-        s.save()
+        try:
+            s.save(force=True)  # (the user's own Save: written even over a settings file that couldn't be read)
+        except OSError as e:
+            # the settings are changed all the same (the window follows them, and they are saved again when
+            # it closes): the dialog closes rather than keeping them half applied behind a Cancel
+            show_save_error(self, e, "Could not save the settings",
+                            "\n\nYour changes are kept for now and saved again when the app closes.")
         super().accept()
 
 
@@ -1800,7 +1871,12 @@ table has <b>one row per firm</b> (or city office, or a party without an attorne
 on the title page is named in its row ("Alex B. Counsel, Dana Smith"), with the firm's address, so a firm is one
 party, with one minute agreement and one invoice. An e-mail from one of its attorneys, or the same firm on
 another day's transcript, joins its row. Two rows that only may be one firm ("Smith Law" and "Smith Law Group")
-are asked about: <b>Same firm</b> or <b>Not the same</b>, and the answer is kept.</li>
+are asked about: <b>Same firm</b> or <b>Not the same</b>, and the answer is kept unless you untick <i>Remember</i>
+(then it holds until you close the app). Settings → Invoice → <i>Firms you answered</i> lists them, those for now
+marked <i>for now</i>: <b>Forget</b> one, or <b>Forget all</b>, and after Save the jobs open now are read again
+with the two rows apart and asked about again. With the AI helper on, its tick of who ordered is taken from
+e-mails and pasted text only (a transcript lists who appeared, not who ordered); Settings → AI → <i>The AI may
+tick who ordered</i> changes that.</li>
 <li><b>Pick the rate sheet and the speeds</b> under Order. Its two parts say what is whose: the
 <i>invoice</i> offers every speed ticked, each at its own price; the <i>minute agreement form</i> names one
 speed at one rate per page. Settings → Invoice picks that speed (Expedited, else the slowest offered); choose
@@ -1822,6 +1898,8 @@ that says what was saved can <b>print</b> it.</li>
 <li>The first time, fill in <b>Settings → My info</b> (your name, contact details, initials and signature)
 and <b>Settings → Defaults</b> (rate sheet, copies) once, and they are used on every form.</li>
 <li>Several documents for one order can be added together; what they say is combined.</li>
+<li>Only one window runs at a time: opening the app again (or a PDF with "Open with") brings the open window
+forward and adds the documents there.</li>
 <li>In the job list, ✓ marks a job already made and ⚠ one with something to check: a field missing, no
 attorney ticked, Whose pages… or Excerpts… to choose, or a Generate that failed. Hover over the job to see
 what. Right-click a document to move it to a job of its own.</li>

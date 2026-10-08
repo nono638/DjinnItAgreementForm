@@ -6,15 +6,19 @@ The transcript layout helpers here (strip_line_numbers, title_page_count) are
 also used by runsheet.py and batch.py. A title page's APPEARANCES are read by
 appearances.py; the rules for telling two entries are one firm or person
 (dedupe_attorneys, same_entry, merge_entry) are also used by merge.py and batch.py.
+find_dates is shared as well (merge.same_value, fill.date_ranges, batch.py, runsheet.py), and so
+are DELIVERY_WORDS and looks_like_transcript (extract_llm.py), so that the rules and
+the AI's answer are read alike.
 """
 from __future__ import annotations
 
 import difflib
 import re
+import unicodedata
 from datetime import date, timedelta
 
 from .ingest import Ingested
-from .models import Attorney, Extraction, SRC_PDF, SRC_REGEX, firm_key, join_names
+from .models import Attorney, Extraction, SRC_PDF, SRC_REGEX, firm_key, join_names, to_int
 from .settings import Profile
 from .takes import body_pages
 
@@ -163,13 +167,19 @@ def guess_year(month: int, day: int, today: date | None = None) -> int | None:
 
 
 DATE_JOIN_WORDS = r"(,|and|&|-|through|thru|to)"  # between the days of a list: "9/14, 9/15 and 9/16"
+# What follows a small fraction, so that "1/2 day" and "3/4 page" are read as no date (see find_dates)
+_FRACTION_UNIT = re.compile(r"\s*(?:day|hour|page|half|inch|of)s?\b", re.I)
 
 
 def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, str]]:
     """Returns (start, end, M/D/YYYY) for every date in text, in order ('Sept. 14, 2026', '9/14/26').
 
     allow_yearless (for e-mails): also '9/14' and 'March 3' without a year. Such a day takes the year of
-    a dated day right after it in a list ('9/14 and 9/15/2025'), else the year from guess_year.
+    a dated day right after it in a list ('9/14 and 9/15/2025'), else the year from guess_year. A small
+    fraction (1/2 to 7/8) before a unit is no date ('a 1/2 day hearing', '2/3 of the transcript'), while
+    'the 9/28 hearing' is one. Nor is a lowercase 'may' or 'march' that is a verb ('the judge may 3 days later'):
+    without a year, those need their capital ('May 3') or 'on', 'for', 'from', 'of' or 'dated' before
+    them ('on may 3'). Other months may be lowercase ('sept 14 and sept 15').
     """
     found = []
     for m in re.finditer(MONTH_RE + r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b", text, re.I):
@@ -182,9 +192,12 @@ def find_dates(text: str, allow_yearless: bool = False) -> list[tuple[int, int, 
             found.append((m.start(), m.end(), v))
     if allow_yearless:
         bare = [(m.start(), m.end(), int(m.group(1)), int(m.group(2)))
-                for m in re.finditer(r"(?<![\d/.$-])(\d{1,2})/(\d{1,2})(?![\d/%-])", text)]
+                for m in re.finditer(r"(?<![\d/.$-])(\d{1,2})/(\d{1,2})(?![\d/%-])", text)
+                if not (0 < int(m.group(1)) < int(m.group(2)) <= 8 and _FRACTION_UNIT.match(text, m.end()))]
         bare += [(m.start(), m.end(), MONTHS[m.group(1)[:3].lower()], int(m.group(2))) for m in re.finditer(
-            MONTH_RE + r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!,?\s+\d{4})", text, re.I)]
+            MONTH_RE + r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!,?\s+\d{4})", text, re.I)
+            if m.group(1)[0].isupper() or m.group(1).lower() not in ("may", "mar", "march")
+            or re.search(r"(?i)\b(?:on|for|from|of|dated)\s+$", text[max(0, m.start() - 8):m.start()])]
         # From the last to the first, so that in "9/14, 9/15 and 9/16/2025" every day gets the year 2025.
         for start, end, mo, d in sorted(bare, reverse=True):
             after = min((f for f in found if f[0] >= end), default=None)
@@ -227,6 +240,16 @@ def strip_line_numbers(text: str) -> tuple[str, bool]:
     for i, m in hits:
         lines[i] = lines[i][m.end():]
     return "\n".join(lines), True
+
+
+# A transcript's line numbers on lines of their own, as PDF text often comes out: "1\n2\n3\n"
+_BARE_LINE_NOS = re.compile(r"(?m)^\s*1\s*\n\s*2\s*\n\s*3\s*\n")
+
+
+def looks_like_transcript(text: str) -> bool:
+    """The text has a transcript's numbered lines, in front of the text or on lines of their own. Used where
+    the document's kind isn't known, such as a .txt transcript the AI reads (extract_llm)."""
+    return strip_line_numbers(text)[1] or bool(_BARE_LINE_NOS.search(text))
 
 
 # A line number followed by one space, as text recognition (OCR) reads a numbered page: "9 COUNSEL & COUNSEL"
@@ -305,6 +328,23 @@ def is_reporter(profile: Profile | None, name: str = "", email: str = "") -> boo
         bool(profile.email and email and email.lower() == profile.email.lower())
 
 
+# A number with the letters OCR mistakes for digits: an index number or a date ('712345/2O21', '7l2345-2021',
+# '5/22/2O26'), or the year after a month and day ('June 3, 2O26'). Only numbers: a word such as 'OIL/LIO' has
+# too few digits (see _fix_ocr_digits).
+_OCR_NUMBER = re.compile(r"(?<![\w/-])[\dOIl]{1,7}[/-][\dOIl]{2,4}(?:[/-][\dOIl]{2,4})?(?![\w/-])|"
+                         r"(?<=\d, )[\dOIl]{4}(?!\w)|(?<=\d )[\dOIl]{4}(?!\w)")
+
+
+def _fix_ocr_digits(m: re.Match) -> str:
+    """O -> 0 and I/l -> 1 in a number _OCR_NUMBER matched, when it has three digits at least and not more
+    than two such letters; anything else comes back as it was."""
+    s = m.group(0)
+    letters = sum(c in "OIl" for c in s)
+    if sum(c.isdigit() for c in s) < 3 or letters == 0 or letters > 2:
+        return s
+    return s.replace("O", "0").replace("I", "1").replace("l", "1")
+
+
 def norm_index(num, yr) -> str | None:
     """An index number as 'num/year' ('712345', '24' -> '712345/2024'); None unless the year is 1950-2100."""
     yr = int(yr)
@@ -312,15 +352,35 @@ def norm_index(num, yr) -> str | None:
     return f"{int(num)}/{yr}" if 1950 <= yr <= 2100 else None
 
 
-# Words that show a delivery speed was asked for. The rules read the stricter phrases in _order_terms; the AI's
-# answer is only kept when one of these is in the text, as a whole word ("irregular" and "abnormal" ask for no
-# speed).
+# A US state on an address line, before a ZIP code: its name or two-letter abbreviation (capitals)
+_STATE_RE = re.compile(
+    r"\b(?:New\s+York|New\s+Jersey|Connecticut|Pennsylvania|Massachusetts|Florida|California|N\.?Y\.?|N\.?J\.?|"
+    r"AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|"
+    r"OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b\.?")
+
+
+def _zip_plus_4(text: str, m: re.Match) -> bool:
+    """The number-year pair m matched is a ZIP+4 code: five digits, a dash and four ('10007-2015'), with a state
+    right before it ('New York, New York 10007-2015', 'Kew Gardens, N.Y. 11415-2010', ', NY 10001-1234'). A state
+    further back on the line proves nothing ('Supreme Court of New York, Queens County, 712345/2021'), nor does
+    a capital word that happens to be a state's code before an index number ('THE MINUTES IN 712345/2021')."""
+    if len(m.group(1)) != 5 or "/" in m.group(0):
+        return False
+    line_start = text.rfind("\n", 0, m.start()) + 1
+    return bool(re.search(_STATE_RE.pattern + r"\s*,?\s*$", text[line_start:m.start()]))
+
+
+# What asks for a delivery speed, as the rules read an e-mail (_order_terms) and as the AI's answer is checked
+# (extract_llm): one table, so that both agree. The phrases are strict: "please reply immediately" and "my daily
+# routine" ask for no speed; "immediate copy", "daily copy", "expedited" and "at your regular rate" do.
 DELIVERY_WORDS = {
-    "Regular": r"\b(?:regular|standard|normal)\b",
-    "Expedited": r"\b(?:expedit\w*|rush|asap|urgent)\b",
-    "Daily": r"\b(?:daily|overnight|next[- ]day)\b",
-    "Immediate": r"\b(?:immediate\w*|same[- ]day|hourly)\b",
+    "Expedited": r"(?i)\b(expedit\w*|rush)\b",
+    "Daily": r"(?i)\b(daily\s+(copy|delivery|transcript)|overnight|next[- ]day)\b",
+    "Immediate": r"(?i)\b(immediate(ly)?\s+(copy|delivery|transcript)|same[- ]day|hourly)\b",
+    "Regular": r"(?i)\b(regular|standard|normal)\s+(delivery|turnaround|rate|copy)\b",
 }
+# How sure the rules are of a speed read with DELIVERY_WORDS
+_SPEED_CONF = {"Expedited": 0.8, "Daily": 0.75, "Immediate": 0.75, "Regular": 0.7}
 
 
 class RegexExtractor:
@@ -340,6 +400,9 @@ class RegexExtractor:
         self.title_case = title_case
         self.own_emails = {e.lower() for e in re.findall(EMAIL_RE, self.profile.email or "")}
         self.own_phones = {re.sub(r"\D", "", self.profile.phone or "")[-10:]} - {""}
+        # per-document facts, set by extract() (a field method called on its own sees no document)
+        self.kind = ""
+        self.is_invoice = self.is_transcript = self.is_caption_doc = False
 
     def tc(self, s: str) -> str:
         """tidy_name with this extractor's title_case setting."""
@@ -356,13 +419,22 @@ class RegexExtractor:
         ex = Extraction()
         text, numbered = strip_line_numbers(self._clean(ing.text))
         self.kind = ing.kind
-        self.is_invoice = bool(re.search(r"(?im)^\s*invoice\b", text))
-        # a transcript numbers its lines: 1, 2, 3 on lines of their own, or in front of the text
-        self.is_transcript = (numbered or bool(re.search(r"(?m)^\s*1\s*\n\s*2\s*\n\s*3\s*\n", text))) \
-            and not self.is_invoice
+        # an invoice says so on its first page: a line that starts "Invoice", and its number, "Bill To"/"To:" or
+        # an amount. On an e-mail's page (a From:, Subject: or Sent: line) only its number or "Bill To" count:
+        # the e-mail's own To: header and the prices it talks about don't make "Invoice to follow" an invoice
+        page1 = text.split("\f")[0]
+        evidence = r"\binvoice\s*(?:no\.?|number|#)\s*:?\s*\S*\d|^\s*bill\s+to\b"
+        if not re.search(r"(?im)^(?:from|subject|sent)\s*:", page1):
+            evidence += r"|^\s*to\s*:|\$\s*\d|\b(?:total|amount)\b"
+        invoice = bool(re.search(r"(?im)^\s*invoice\b", page1)) and bool(re.search("(?im)" + evidence, page1))
+        # a transcript numbers its lines. Numbers in front of the text win over the invoice's heading
+        # (testimony wrapping onto a line that starts "invoice that you sent"); numbers on lines of their own
+        # don't, since an invoice's item column can read 1, 2, 3 too
+        self.is_transcript = numbered or (not invoice and bool(_BARE_LINE_NOS.search(text)))
+        self.is_invoice = invoice and not self.is_transcript
         self.is_caption_doc = bool(re.search(r"(?i)\bappearances\b|a p p e a r|b e f o r e|\bBEFORE:|-against-|"
                                              r"\bindex\s+n", text))
-        head = text.split("\f")[0][:2500]
+        head = page1[:2500]
         ex.doc_kind = ("invoice" if self.is_invoice else "transcript" if self.is_transcript
                        else "email" if ing.kind == "email" else "text")
 
@@ -391,11 +463,16 @@ class RegexExtractor:
 
     @staticmethod
     def _clean(text: str) -> str:
-        """Straightens curly quotes and dashes, drops replacement characters and trailing blanks, and keeps
-        the page breaks (form feeds)."""
+        """Straightens curly quotes and every kind of dash, undoes ligatures ('Oﬃces' -> 'Offices', NFKC),
+        drops zero-width and replacement characters and trailing blanks, and keeps the page breaks (form
+        feeds). In a number that looks like an index number or a date, the letters OCR reads for digits are
+        put back ('712345/2O21' -> '712345/2021', '7l2345/2021' -> '712345/2021'); words are left alone."""
+        text = unicodedata.normalize("NFKC", text)
         text = text.replace("\xa0", " ").replace("’", "'").replace("‘", "'")
-        text = text.replace("“", '"').replace("”", '"').replace("–", "-").replace("—", "-")
-        text = text.replace("�", "")
+        text = text.replace("“", '"').replace("”", '"')
+        text = re.sub("[\u2010\u2011\u2012\u2013\u2014\u2212]", "-", text)   # hyphens, dashes, minus
+        text = re.sub("[\u200b\u200c\u200d\u2060\ufeff\ufffd]", "", text)   # zero-width, replacement
+        text = _OCR_NUMBER.sub(_fix_ocr_digits, text)
         # split("\n"), not splitlines(): keep the \f page separators
         return "\n".join(l.rstrip(" \t") for l in text.replace("\r", "").split("\n"))
 
@@ -404,22 +481,24 @@ class RegexExtractor:
         """Index numbers ('712345-2024', 'Index No. 712345/24', '712345 of 2024'), written as '712345/2024'.
 
         Confidence: 0.95 when labelled ('Index No. 712345-2024', 'Docket ...'), 0.8 after a bare 'No.',
-        and unlabeled_conf for a lone number-year pair (ZIP+4 codes after a state are skipped).
+        and unlabeled_conf for a lone number-year pair. A ZIP+4 code is not one: a pair right after a
+        state ('New York, New York 10007-2015', 'N.Y. 11415-2010') is skipped.
+        A letter the court writes after the year ('712345/2021E') is left out, as norm_index and the
+        records write index numbers.
         """
         labeled = re.compile(
             r"\b(?:index|ind\.?|docket|file|calendar\s+index)\s*(?:no\.?|number|num\.?|#)?\s*[:.#]?\s*"
-            r"(\d{3,7})\s*(?:[-/]|\s+of\s+)\s*(\d{4}|\d{2})\b", re.I)
+            r"(\d{3,7})\s*(?:[-/]|\s+of\s+)\s*(\d{4}|\d{2})[A-Z]?\b", re.I)
         for m in labeled.finditer(text):
             v = norm_index(m.group(1), m.group(2))
             if v:
                 ex.add("index_no", v, SRC_REGEX, 0.95)
-        for m in re.finditer(r"\bNo\.?\s*:?\s*(\d{4,7})\s*[-/]\s*((?:19|20)\d{2})\b", text):
+        for m in re.finditer(r"\bNo\.?\s*:?\s*(\d{4,7})\s*[-/]\s*((?:19|20)\d{2})[A-Z]?\b", text):
             v = norm_index(m.group(1), m.group(2))
             if v:
                 ex.add("index_no", v, SRC_REGEX, 0.8)
         for m in re.finditer(r"(?<![\d$.,-])(\d{5,7})\s*[-/]\s*((?:19|20)\d{2})(?![\d-])", text):
-            before = text[max(0, m.start() - 6): m.start()]
-            if re.search(r"\b[A-Z]{2}\s*$", before):  # ZIP+4 after a state
+            if _zip_plus_4(text, m):
                 continue
             v = norm_index(m.group(1), m.group(2))
             if v:
@@ -472,18 +551,35 @@ class RegexExtractor:
     def _part(self, head: str, text: str, ex: Extraction) -> None:
         """Part, either numbered ('PART 25', 'Part TR-3') or a letter code ('Part MDP').
 
-        Letter codes must be written in capitals so that 'part of the record' is not read as a part.
+        Letter codes must be written in capitals so that 'part of the record' is not read as a part, and so
+        must the letters in front of a number ('Part TR-3': 'part of 25 pages' is no 'Part OF25'). A lowercase
+        'part 12' counts only when labelled ('part: 12', 'part no. 12') or, in an e-mail, when 'of' doesn't
+        follow the number ('judge lopez, part 7.' yes; 'send part 2 of the transcript' no). An e-mail's
+        'Part 12' is trusted a little less than a court document's.
         """
-        # numbered parts ("PART 25", "Part: 53", "Part TR-3") - any capitalisation
-        numbered = re.compile(r"\b(?:IAS\s+|TRIAL\s+|TAP\s+)?PART\s*(?:No\.?)?\s*[:#]?\s*"
-                              r"((?:[A-Z]{1,4}[- ]?)?\d{1,3}[A-Z]?)\b", re.I)
+        # numbered parts ("PART 25", "Part: 53", "Part TR-3"): the word, its label and the number
+        numbered = re.compile(r"\b(?:IAS\s+|TRIAL\s+|TAP\s+)?(PART)\s*(No\.?|#|:)?\s*[:#]?\s*"
+                              r"((?:(?-i:[A-Z]{1,4})[- ]?)?\d{1,3}[A-Z]?)\b", re.I)
         # letter parts ("PART MDP", "Part: TAP-A") - the code itself in capitals
         lettered = re.compile(r"\b(?:PART|Part)(?:\s+No\.?)?[ \t]*[:#]?[ \t]*([A-Z]{1,6}(?:-[A-Z0-9]{1,3})?)\b(?![a-z])")
         # capital words that follow PART in ALL-CAPS text without being one ("PART OF THE RECORD")
         not_a_part = {"OF", "THE", "AND", "IN", "TO", "A", "AN", "IS", "IT", "ON", "FOR", "AS", "OR", "BY", "AT", "NO"}
+        is_email = self.kind in ("email", "text")
         for scope, conf in ((head, 0.9), (text, 0.7)):
             for m in numbered.finditer(scope):
-                ex.add("part", m.group(1).upper().replace(" ", ""), SRC_REGEX, conf)
+                word, label, val = m.group(1), m.group(2), m.group(3).upper().replace(" ", "")
+                letters = re.match(r"[A-Z]+", val)
+                if letters and letters.group(0) in not_a_part:
+                    continue
+                if label:
+                    part_conf = conf
+                elif word[0] == "P":
+                    part_conf = conf - 0.15 if is_email else conf
+                elif is_email and not re.match(r"\s+of\b", scope[m.end():m.end() + 4]):
+                    part_conf = 0.5  # "part 7." in a lowercase e-mail
+                else:
+                    continue  # "part 2 of the transcript", "part 12 of the record" in testimony
+                ex.add("part", val, SRC_REGEX, part_conf)
             for m in lettered.finditer(scope):
                 if m.group(1) not in not_a_part:
                     ex.add("part", m.group(1), SRC_REGEX, conf - 0.05)
@@ -493,7 +589,8 @@ class RegexExtractor:
         """Judge from 'HONORABLE X', 'Judge: X', 'X, J.S.C.' or 'before Justice X'.
 
         Informal lowercase mentions ('justice smith', common in e-mails) are accepted at low confidence.
-        Filler words at either end are trimmed, and the top of the first page counts for more.
+        Filler words at either end are trimmed ('Justice Lane Part 12' -> 'Lane'), a possessive goes ('before
+        Judge Lane's part' -> 'Lane'), and the top of the first page counts for more.
         """
         stop = r"(?=\s*(?:,?\s*J\.?S\.?C\.?|,?\s*J\.?C\.?C\.?|\bis\s+presiding|\bpresiding|\n|$|,|;|\())"
         name = r"([A-Z][A-Za-z'\-]*\.?(?:[ \t]+(?:[A-Z]\.|[A-Z][A-Za-z'\-]+)){0,4})"
@@ -506,11 +603,12 @@ class RegexExtractor:
             (rf"\b(?:Justice|Judge)[ \t]+{name}", 0.65, 0),
             (r"\b(?:justice|judge|hon\.?)[ \t]+([a-z][a-z'\-]+)\b", 0.45, re.I),  # informal e-mails
         ]
-        bad = re.compile(r"^(of|the|is|and|for|in|presiding|justice|judge|supreme|court|j|s|c)$", re.I)
+        bad = re.compile(r"^(of|the|is|and|for|in|on|at|presiding|justice|judge|supreme|court|part|ias|tap|trial|"
+                         r"term|index|room|courtroom|no|j|s|c)$", re.I)
         for scope_i, scope in enumerate((head, text)):
             for pat, conf, flags in pats:
                 for m in re.finditer(pat, scope, flags):
-                    raw = m.group(1).strip(" .,")
+                    raw = re.sub(r"'s\b", "", m.group(1), flags=re.I).strip(" .,")  # "Lane's part" -> "Lane"
                     words = raw.split()
                     while words and bad.match(words[-1].strip(".")):
                         words.pop()
@@ -525,9 +623,12 @@ class RegexExtractor:
     def _case_name(self, text: str, ex: Extraction) -> None:
         """Case name from a 'Title:', 'Caption:' or 'Re:' line, 'Matter of ...', a court caption, or
         'X v. Y' anywhere in the text. Lowercase 'smith v jones' is only trusted, weakly, in e-mails.
+        What a subject line adds after the caption is cut off, as _inline_case cuts it: 'Re: Jane Roe v. Sam
+        Poe, Index No. 712345/2021, Part 12' -> 'Jane Roe v. Sam Poe'.
         """
         for m in re.finditer(r"(?im)^\s*(?:title|case(?:\s+name)?|caption|re)\s*:\s*(.+)$", text):
-            val = m.group(1).strip()
+            val = re.split(r"(?i)\s*(?:,|\s-)\s*(?=(?:index|part|judge|justice|minutes|transcripts?|dated|"
+                           r"before|on\s+\d)\b|ind\.)", m.group(1).strip())[0].strip(" ,-")
             if re.search(r"\sv\.?s?\.?\s|\bmatter of\b|\bagainst\b", val, re.I):
                 ex.add("case_name", self._norm_case(val), SRC_REGEX, 0.9)
             else:
@@ -729,23 +830,20 @@ class RegexExtractor:
 
     # ----- delivery, copies, rate
     def _order_terms(self, text: str, ex: Extraction) -> None:
-        """What was ordered, from the wording of an e-mail: delivery speed (expedited, daily, immediate,
-        regular), number of copies ('original and 2 copies') and a rate per page. Each speed found keeps
-        the words that asked for it as its note ('daily copy').
+        """What was ordered, from the wording of an e-mail: delivery speed (the phrases of DELIVERY_WORDS:
+        'expedited', 'daily copy', 'immediate copy', 'regular rate'), number of copies ('original and 2
+        copies') and a rate per page. Each speed found keeps the words that asked for it as its note
+        ('daily copy').
 
         On an invoice it reads the totals it lists per speed ('Regular Rate: $94.50', 'Expedited Rate: ...');
         merge.apply_defaults works the page count out from them.
         """
         if self.kind in ("email", "text") and not self.is_invoice:
             # (the words found go with the speed: the window quotes them when it asks which speed the job is)
-            for speed, pattern, conf in (
-                    ("Expedited", r"(?i)\b(expedit\w*|rush)\b", 0.8),
-                    ("Daily", r"(?i)\b(daily\s+(copy|delivery|transcript)|overnight|next[- ]day)\b", 0.75),
-                    ("Immediate", r"(?i)\b(immediate(ly)?\s+(copy|delivery|transcript)|same[- ]day|hourly)\b", 0.75),
-                    ("Regular", r"(?i)\b(regular|standard|normal)\s+(delivery|turnaround|rate|copy)\b", 0.7)):
+            for speed, pattern in DELIVERY_WORDS.items():
                 m = re.search(pattern, text)
                 if m:
-                    ex.add("delivery", speed, SRC_REGEX, conf, note=" ".join(m.group(0).split()))
+                    ex.add("delivery", speed, SRC_REGEX, _SPEED_CONF[speed], note=" ".join(m.group(0).split()))
             nums = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "a": 1, "an": 1}
             m = re.search(r"(?i)\boriginal\s+(?:and|&|\+)\s+(\d+|one|two|three|four|five|a)\s+cop", text)
             if m:
@@ -765,7 +863,10 @@ class RegexExtractor:
     # ----- pages
     def _pages(self, ing: Ingested, text: str, ex: Extraction) -> None:
         """Estimated pages: the page count of a transcript PDF (noting its page numbers, such as
-        'transcript pages 358-380', when it does not start at 1), or 'N pages' written in an e-mail.
+        'transcript pages 358-380', when it does not start at 1), or 'N pages' written in an e-mail
+        ('about 1,250 pages' -> 1250). A range of pages in an e-mail ('pages 10-25', 'pp. 10 to 25') counts
+        them, 16, at a lower confidence; a single page ('p. 10') is not a count. 'expect 30-40 pages' is an
+        estimate, the larger number: 40.
         A transcript's count leaves out the word index printed after it (see takes.scan_pdf). It is
         counted, not read from the words, so its source is SRC_PDF (the "PDF" badge), not SRC_REGEX.
         """
@@ -778,9 +879,25 @@ class RegexExtractor:
                 note = (note or f"{pages} transcript pages") + \
                     f", not counting {ing.page_count - pages} page(s) after the transcript (word index)"
             ex.add("est_pages", str(pages), SRC_PDF, 0.95, note or "page count of the transcript")
-        for m in re.finditer(r"(?i)\b(?:about|approx\.?|approximately|~|est\.?|estimated)?\s*(\d{1,4})\s+pages?\b", text):
-            if self.kind in ("email", "text"):
-                ex.add("est_pages", m.group(1), SRC_REGEX, 0.7)
+        if self.kind not in ("email", "text"):
+            return
+        num, dash = r"(\d{1,3}(?:,\d{3})+|\d{1,5})", r"\s*(?:-|to|through|thru)\s*"
+        ranges = []
+        # (not a signature's phone number: 'p. 212-555-0100')
+        for m in re.finditer(rf"(?i)\b(?:pp\.?|pages?|p\.)\s*{num}{dash}{num}\b(?!\s*[-.]\s*\d)", text):
+            first, last = to_int(m.group(1)), to_int(m.group(2))
+            if last >= first > 0:
+                ex.add("est_pages", str(last - first + 1), SRC_REGEX, 0.5, f"pages {first}-{last}")
+            ranges.append((m.start(), m.end()))
+        for m in re.finditer(rf"(?i)\b{num}{dash}{num}\s+pages?\b", text):  # an estimate: 'about 30-40 pages'
+            if not any(s <= m.start() < e for s, e in ranges):
+                low, high = to_int(m.group(1)), to_int(m.group(2))
+                if high >= low > 0:
+                    ex.add("est_pages", str(high), SRC_REGEX, 0.7, f"{low}-{high} pages")
+                ranges.append((m.start(), m.end()))
+        for m in re.finditer(rf"(?i)\b(?:about|approx\.?|approximately|~|est\.?|estimated)?\s*{num}\s+pages?\b", text):
+            if not any(s <= m.start() < e for s, e in ranges):
+                ex.add("est_pages", str(to_int(m.group(1))), SRC_REGEX, 0.7)
 
     # ----- attorneys
     def _attorneys(self, text: str) -> list[Attorney]:
@@ -975,13 +1092,15 @@ def dedupe_attorneys(atts: list[Attorney], profile: Profile | None = None) -> li
     """Merges entries that are the same firm or person, so that every firm is one entry (one row, one party),
     and drops the reporter's own entry.
 
-    Entries match (same_entry) on the same e-mail; two entries with firms on the same firm (same_firm: also
-    'Counsel & Counsel, LLP' and 'COUNSEL & COUNSEL'), whoever they name; an entry without a firm joins one
-    with a firm when it names one of its attorneys, writes from its e-mail domain, or from a domain that
-    spells the firm's name (a public service such as gmail.com says nothing about a firm); two entries without a firm on a shared name, or the same e-mail domain when one
-    has no name. The first of two matching entries is kept: the attorneys of the other are added to its names
-    (a fuller spelling of a name replaces 'Mr. Counsel'), its blank fields are filled in, and it stays ticked
-    if either one was. Matching goes on until no two entries left match (A matching C only once B joined it).
+    Entries match (same_entry) as the user answered about them (firm_answer), else on the same e-mail; two
+    entries with firms on the same firm (same_firm: also 'Counsel & Counsel, LLP' and 'COUNSEL & COUNSEL'),
+    whoever they name; an entry without a firm joins one with a firm when it names one of its attorneys,
+    writes from its e-mail domain, or from a domain that spells the firm's name (a public service such as
+    gmail.com says nothing about a firm); two entries without a firm on a shared name, or the same e-mail
+    domain when one has no name. The first of two matching entries is kept: the attorneys of the other are
+    added to its names (a fuller spelling of a name replaces 'Mr. Counsel'), its blank fields are filled in,
+    and it stays ticked if either one was. Matching goes on until no two entries left match (A matching C only
+    once B joined it).
     """
     out: list[Attorney] = []
     for a in atts:
@@ -1063,19 +1182,21 @@ def near_firm(a: str, b: str) -> bool:
 
 
 # The user's answers about two entries that may be one firm or attorney (maybe_same_entry: asked when unsure):
-# {frozenset of their two Attorney.key()s: True (the same) or False (not)}. Set from Settings.firm_answers by
-# use_firm_answers when the settings are loaded or changed.
+# {frozenset of their two Attorney.key()s: True (the same) or False (not)}. Set by use_firm_answers from
+# Settings.firm_answers and the window's answers for now only, when the settings are loaded or changed and when
+# the user answers.
 _ANSWERS: dict[frozenset, bool] = {}
 
 
 def use_firm_answers(rows) -> None:
-    """Takes the user's answers (Settings.firm_answers: [[key, key, same], ...]) for same_entry and
-    maybe_same_entry; anything else in the list is left out. A new dict is put in place in one step: Generate all
-    reads the answers on another thread, which must never see them half filled."""
+    """Takes the user's answers ([[key, key, same, name, name], ...]: Settings.firm_answers, and the window's
+    answers for now only) for same_entry and maybe_same_entry. The two names are only for showing the answer
+    (rows saved by 2.2.0 have none); anything else in the list is left out. A new dict is put in place in one
+    step: Generate all reads the answers on another thread, which must never see them half filled."""
     global _ANSWERS
     answers: dict[frozenset, bool] = {}
     for r in rows or []:
-        if isinstance(r, (list, tuple)) and len(r) == 3 and all(isinstance(k, str) and k for k in r[:2]) \
+        if isinstance(r, (list, tuple)) and len(r) >= 3 and all(isinstance(k, str) and k for k in r[:2]) \
                 and isinstance(r[2], bool) and r[0] != r[1]:
             answers[frozenset(r[:2])] = r[2]
     _ANSWERS = answers

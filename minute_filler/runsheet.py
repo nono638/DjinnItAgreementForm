@@ -37,6 +37,7 @@ from pathlib import Path
 from .dates import us_date
 from .extract_regex import find_dates, norm_index, strip_line_numbers, tidy_name, title_page_count
 from .fill import safe_filename, unique_path
+from .log import error as log_error
 from .models import CaseInfo
 from .settings import Settings
 from .takes import TITLE_ONLY, body_pages, find_takes, reporter_label, title_reporters
@@ -139,14 +140,16 @@ class Found:
 
 # ------------------------------------------------------------------ transcripts -> rows
 
-def rows_from(ing, day: date | None, s: Settings) -> list[Row]:
+def rows_from(ing, day: date | None, s: Settings, front: str = "") -> list[Row]:
     """The run sheet rows of one transcript PDF: a row per take. ing: the ingested PDF (its page marks,
-    page count and text); day: the day the transcript is of. The reporters are named as reporter_label says."""
+    page count and text); day: the day the transcript is of; front: whose the pages before the first initials
+    are, as the invoice counts them (batch.Job.front_owner: initials, or "none"; see takes.find_takes). The
+    reporters are named as reporter_label says."""
     if not ing.marks:  # no text to read the initials from (a scan): one row for the whole transcript
         return [Row(day, "", ing.page_count, ing.first_page_no, note=NOT_FOUND)]
     title_text, _ = strip_line_numbers(ing.text)
     names = title_reporters("\n".join(title_text.split("\f")[:title_page_count(title_text)]))
-    takes = find_takes(ing.marks, title_page_count(title_text))
+    takes = find_takes(ing.marks, title_page_count(title_text), front)
     p = s.profile
     rows = []
     for t in takes:
@@ -257,12 +260,30 @@ def meta_sheet(wb) -> str | None:
     return next((n for n in (META, OLD_META) if n in wb.sheetnames), None)
 
 
-def read_info(path: Path) -> Found | None:
-    """What a workbook says about its case, or None when it isn't a run sheet (or can't be read)."""
+class SheetUnreadable(OSError):
+    """A workbook couldn't be opened just now: held by another program (Dropbox syncing it, an antivirus scan).
+    Not the same as "not a run sheet": find_sheets and add_takes raise it rather than start
+    "... - Run Sheet (2).xlsx" beside the trial's own run sheet. Its message names the file, for the window."""
+
+
+def read_info(path: Path, strict: bool = False) -> Found | None:
+    """What a workbook says about its case, or None when it isn't a run sheet. A workbook that can't be opened
+    just now (OSError: held by another program) is None too (and logged), unless strict: then SheetUnreadable,
+    for a caller who must not take "can't read it now" for "no run sheet". One that openpyxl can't open for good
+    (damaged, password-protected, no zip at all) is not a run sheet: None, strict or not, so a case's
+    "712345-2021 Roe v Poe exhibit list.xlsx" doesn't hold up its run sheet for good."""
     from openpyxl import load_workbook
+    # (the log never names the file: its name is often the case's, and the log goes out with problem reports)
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
-    except Exception:
+    except OSError as e:
+        if strict:
+            raise SheetUnreadable(f"{path.name} could not be read ({e}). If it is being synced or scanned, "
+                                  f"try again in a moment.") from e
+        log_error("could not open a workbook just now", e)
+        return None
+    except Exception as e:  # (zipfile.BadZipFile, openpyxl's InvalidFileException, a KeyError inside...)
+        log_error("could not open a workbook: not a run sheet", e)
         return None
     try:
         if meta_sheet(wb):
@@ -281,7 +302,8 @@ def read_info(path: Path) -> Found | None:
                 # only text: a date cell ("2026-06-02") is not an index number
                 text = " ".join([path.stem] + [c for row in top[:3] for c in row if isinstance(c, str)])
                 return Found(path, path.stem, index_numbers(text), ours=False)
-    except Exception:
+    except Exception as e:  # (a workbook openpyxl can open but not read through: not a run sheet)
+        log_error("could not read through a workbook: not a run sheet", e)
         return None
     finally:
         wb.close()
@@ -306,7 +328,11 @@ def matches(found: Found, case_name: str, index_no: str) -> str:
 
 def find_sheets(case: CaseInfo, folders: list[Path]) -> list[Found]:
     """The run sheets in these folders that may be this case's: same index number first, then this app's own
-    before others, then the newest. Excel's lock files, half-saved files and backups are skipped."""
+    before others, then the newest. Excel's lock files, half-saved files and backups are skipped, and so is a
+    workbook openpyxl can't open for good (read_info: not a run sheet). One that can't be opened just now (see
+    SheetUnreadable) is skipped too, unless its name says it may be the case's
+    ("June 2026 712345-2021 Jane Roe v. Sam Poe - Run Sheet.xlsx"): then the error is raised, as adding the takes
+    to a new run sheet would split the trial over two."""
     out, seen = [], set()
     for folder in folders:
         try:
@@ -319,7 +345,14 @@ def find_sheets(case: CaseInfo, folders: list[Path]) -> list[Found]:
                     or OLD_BACKUP in f.name or key in seen:
                 continue
             seen.add(key)
-            info = read_info(f)
+            try:
+                info = read_info(f, strict=True)
+            except SheetUnreadable as e:
+                if matches(Found(f, f.stem, index_numbers(f.stem)), case.get("case_name"), case.get("index_no")):
+                    raise
+                # (its cause, not the error: that one's message starts with the file's name)
+                log_error("could not open a workbook just now: skipped, not named for the case", e.__cause__ or e)
+                continue
             if info:
                 info.why = matches(info, case.get("case_name"), case.get("index_no"))
                 if info.why:
@@ -362,16 +395,18 @@ def new_path(case: CaseInfo, rows: list[Row], s: Settings) -> Path:
 def add_takes(case: CaseInfo, opts: RunSheetOpts, s: Settings, folders: list[Path]) -> Path:
     """Adds opts.rows to this case's run sheet (see choose) or a new one, and returns its path. folders: where
     else to look besides the run sheets folder (the transcript's own folder). Sets opts.path, created, added,
-    skipped and added_pages. ValueError when there are no rows or the chosen file isn't a run sheet."""
+    skipped and added_pages. ValueError when there are no rows or the chosen file isn't a run sheet;
+    SheetUnreadable when the case's run sheet can't be opened just now (nothing is started in its place)."""
     if not opts.rows:
         raise ValueError(NO_RUNSHEET)
     with _LOCK:  # one change at a time: the window and a batch may add to the same run sheet
         path = choose(case, s, [runsheets_folder(s), *folders], opts.target)
         if path and not path.exists():  # chosen, then moved or deleted: a new one in its place
             path = None
-        info = read_info(path) if path else None
+        info = read_info(path, strict=True) if path else None
         if path and not info:
-            raise ValueError(f"{path.name} is not a run sheet (no Date, Reporter and Pages columns)")
+            raise ValueError(f"{path.name} is not a run sheet: it has no Date, Reporter and Pages columns, or it "
+                             "is damaged or has a password")
         if info and not info.ours:
             _append_theirs(path, opts)
         else:

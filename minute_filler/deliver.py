@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 
 from .fill import agreement_case, agreement_orderers, fill
@@ -153,8 +154,8 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
     case as it is now, so the job can be opened again from the Records window. `math`, when given, gets a
     (FirmInvoice, number) pair for each invoice made, to spell out its math (invoice_math.explain). With
     Settings.invoice_detailed_copy each invoice that doesn't show the granular detail gets a copy that does
-    ("... (detailed).pdf", the same number; it is among the files returned, and in `detailed` when given, but
-    not recorded again). A copy that can't be made is logged and left out: it doesn't stop the run.
+    ("... (detailed).pdf", the same number and date; it is among the files returned, and in `detailed` when given,
+    but not recorded again). A copy that can't be made is logged and left out: it doesn't stop the run.
     `cases`: the case of each invoice set, in the same order (a joint invoice's sets each name their own days,
     see batch.joint_invoice_sets); default: `case` for every set.
     `ordered`: the pages each attorney ordered, whoever wrote them (batch.Job.ordered_pages: by Attorney.key(),
@@ -206,8 +207,11 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
         if "invoice" in outputs:
             # one per attorney, for the pages it ordered; for each reporter billed
             for f in [f for opts, c in pairs if opts.pages > 0 for f in firm_invoices(c, s, opts)]:
+                # the invoice's date, given to its detailed copy too: made a moment later, past midnight, the
+                # copy would be dated a day after it
+                day = date.today()
                 path, number = make_invoice(f.case, f.atty, s, s.folder_for("invoice", out_dir), f.opts, ledger,
-                                            dated, f.quotes)
+                                            dated, f.quotes, today=day)
                 if invoiced is not None:
                     invoiced.append(f.opts.skip_key(f.atty))
                 if math is not None:
@@ -217,7 +221,8 @@ def generate(case: CaseInfo, s: Settings, out_dir: Path, outputs: list[str] | se
                 if s.invoice_detailed_copy and not f.opts.detail:
                     try:  # only an aside: the invoice is made and recorded, and the others must still be made
                         copy = render(f.case, f.atty, settings_for(s, f.opts), f.quotes, number,
-                                      path.with_name(f"{path.stem} (detailed).pdf"), replace(f.opts, detail=True))
+                                      path.with_name(f"{path.stem} (detailed).pdf"), replace(f.opts, detail=True),
+                                      when=day)
                     except Exception as e:
                         log_error("could not make the detailed copy of an invoice", e)
                     else:

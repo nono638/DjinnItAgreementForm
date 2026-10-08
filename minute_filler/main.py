@@ -1,6 +1,7 @@
 """Entry point: python -m minute_filler.main  (or the packaged .exe).
 
 Opens the window, with any files or folders given on the command line ("Open with", dropped on the exe).
+One window at a time: when one is open already, a launch hands it its files and quits (gui/single.py).
 Without a window: --selftest OUTDIR files... checks a build, and --batch OUTDIR [--outputs ...] files...
 makes the forms of a whole folder (see selftest and batch).
 """
@@ -11,10 +12,10 @@ from pathlib import Path
 
 
 def selftest(out_dir: str, files: list[str]) -> int:
-    """Headless check of a build: reads each file and fills its agreement on both forms (clean and original),
-    checks the libraries a build can lose without anything else failing (fuzzy_search, regex_search,
-    heic_photos, update_check, printing, math_pdf, moving_picture: True each, else the error), then writes
-    selftest.json into out_dir.
+    """Headless check of a build: reads each file and fills its minute agreement on each of the three forms (ucs,
+    clean and original: fill.FORMS), checks the libraries a build can lose without anything else failing (fuzzy_search,
+    regex_search, heic_photos, update_check, printing, math_pdf, single_instance, moving_picture: True each,
+    else the error), then writes selftest.json into out_dir.
     The default settings are used; the saved ones are not touched."""
     import json
     from minute_filler.extract_regex import RegexExtractor
@@ -63,6 +64,21 @@ def selftest(out_dir: str, files: list[str]) -> int:
         report["math_pdf"] = to_pdf("<p>Copy: 2 × 1 page × $1.00 = $2.00</p>", out / "math.pdf").exists()
     except Exception as e:
         report["math_pdf"] = f"{type(e).__name__}: {e}"
+    try:  # one window at a time needs Qt's local sockets (QtNetwork) in the build
+        import uuid
+        from PySide6.QtCore import QCoreApplication
+        from minute_filler.gui.single import SingleInstance
+        app = QCoreApplication.instance() or QCoreApplication(["selftest"])  # noqa: F841
+        name = f"YinItAgreementForm-selftest-{uuid.uuid4().hex}"  # (never the window's own, nor another selftest's)
+        one = SingleInstance(name)
+        got: list = []
+        one.files_received.connect(got.extend)
+        other = SingleInstance(name)
+        report["single_instance"] = one.claim() and not other.claim() and other.send(["a.pdf"]) \
+            and (app.processEvents() or got == ["a.pdf"])
+        one.close()
+    except Exception as e:
+        report["single_instance"] = f"{type(e).__name__}: {e}"
     try:  # the swirling yin-yang while documents are read is a WebP: needs Qt's imageformats plugin for it
         from PySide6.QtCore import QCoreApplication
         from PySide6.QtGui import QImageReader
@@ -76,7 +92,7 @@ def selftest(out_dir: str, files: list[str]) -> int:
         try:
             case = merge([RegexExtractor(s.profile).extract(ingest_file(f))], s)
             pdfs = []
-            for choice in ("clean", "original"):
+            for choice in ("ucs", "clean", "original"):
                 s.form_choice = choice
                 pdfs += [p.name for p in fill_all(case, s, out / choice)]
             report["results"].append({"file": f, "fields": {k: v.value for k, v in case.fields.items()},
@@ -161,8 +177,50 @@ def _tell_user_about_crashes(app) -> None:
     app._crash_notifier = notifier  # keep it alive
 
 
+GATHER_MS = 400  # files from launches this close together are one drop (see _take_launches)
+
+
+def _take_launches(app, win, single, files: list[str]) -> None:
+    """The files this launch was given and those later launches hand over (gui/single.py) go to the window as
+    drops. Launches close together are gathered into one drop: "Open with" on two transcripts starts two
+    launches, and one drop of both makes a job per case and date, where two drops of one would put the second
+    day into the first day's job. Files that come while a question is on screen (a modal dialog) wait until it
+    is answered: dropped then, they could be lost by its answer (New job's "Clear all jobs?")."""
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtWidgets import QApplication
+
+    gathered: list[str] = list(files)
+    timer = QTimer(win)
+    timer.setSingleShot(True)
+    timer.setInterval(GATHER_MS)
+
+    def arrived(paths: list[str]) -> None:
+        """Another launch: bring this window forward, and take its files with the others coming now."""
+        win.setWindowState((win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        gathered.extend(paths)
+        timer.start()
+
+    def drop() -> None:
+        if QApplication.activeModalWidget() is not None:
+            timer.start()  # try again once the question is answered
+            return
+        paths = list(dict.fromkeys(gathered))
+        gathered.clear()
+        if paths:
+            win.add_files(paths)
+
+    timer.timeout.connect(drop)
+    single.deliver(arrived)
+    if gathered:
+        timer.start()
+
+
 def main() -> int:
-    """Runs --selftest or --batch, else the window; returns the exit code."""
+    """Runs --selftest or --batch, else the window (or, when a window is open already, hands it the files and
+    returns 0); returns the exit code."""
     from minute_filler import log
     log.setup()
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
@@ -183,18 +241,31 @@ def main() -> int:
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
-    from minute_filler.gui.main_window import MainWindow
-    from minute_filler.gui.theme import apply_theme
-    from minute_filler.settings import Settings
-
     try:  # own taskbar icon/grouping instead of python.exe's
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YinItAgreementForm")
     except Exception:
         pass
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("YinItAgreementForm")
+    files = [a for a in sys.argv[1:] if Path(a).exists()]  # "Open with" / files or a folder dragged onto the exe
+    # One window at a time, decided before the window's code is even loaded (it takes a second or more), so
+    # that a launch right after this one finds it
+    try:
+        from minute_filler.gui.single import SingleInstance, hand_over
+        single = SingleInstance(parent=app)
+        if hand_over(single, [str(Path(f).resolve()) for f in files]):
+            log.log.info("another copy is open: handed it the files and quit")
+            return 0
+    except Exception as e:  # (a build without Qt's local sockets: run, as a copy on its own)
+        log.error("could not check for another copy", e)
+        single = None
+
+    from minute_filler.gui.main_window import MainWindow
+    from minute_filler.gui.theme import apply_theme
+    from minute_filler.settings import Settings
+
     _tell_user_about_crashes(app)
     app.setStyle("Fusion")
     icon = app_icon()
@@ -206,13 +277,18 @@ def main() -> int:
     apply_theme(app, settings.theme)
     win = MainWindow(settings, app)
     win.show()
-    files = [a for a in sys.argv[1:] if Path(a).exists()]  # "Open with" / files or a folder dragged onto the exe
-    if files:
-        win.add_files(files)
+    if single is None:
+        if files:
+            win.add_files(files)
+    else:
+        _take_launches(app, win, single, files)
     code = app.exec()
+    if single is not None:
+        single.close()
     from PySide6.QtCore import QThreadPool
     from minute_filler.gui.dialogs import _BACKGROUND
-    if QThreadPool.globalInstance().activeThreadCount() or any(t.isRunning() for t in _BACKGROUND):
+    if QThreadPool.globalInstance().activeThreadCount() or win.ai_pool.activeThreadCount() \
+            or any(t.isRunning() for t in _BACKGROUND):
         # Settings are saved. Don't linger (unseen, for minutes) until the AI model answers.
         import os
         os._exit(code)

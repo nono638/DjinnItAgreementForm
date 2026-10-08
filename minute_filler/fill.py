@@ -5,18 +5,23 @@ Forms (Settings.form_choice):
   "clean"    - the app's re-typeset form with named fields and extra lines
   "original" - the 1999 scan with fields added on top
 
-Lines the UCS form or the original has no field for (forms/*_map.py OVERLAYS: the signature lines, and on the
-original also the fax lines, the date of agreement and the case name's second and third lines) get a text
-field added, so every value can still be changed in a PDF viewer. A signature picture takes the place of the
-reporter's signature field there.
+Lines the UCS form or the original has no field for (forms/*_map.py OVERLAYS: the signature lines and a second
+line for the dates, and on the original also the fax lines, the date of agreement and the case name's second and
+third lines) get a text field added, so every value can still be changed in a PDF viewer. A signature picture
+takes the place of the reporter's signature field there.
+
+The dates are written with three or more days in a row as a range ("9/28/2026–10/2/2026", date_ranges); on the
+UCS form and the original, dates that still don't fit their line go on to the second one, split between two dates
+(_spill_dates).
 
 Each attorney's agreement shows as its Estimated Number of Pages the pages that attorney ordered, whoever wrote
 them (agreement_case, from batch.Job.ordered_pages); with no count (no transcript and no pages typed), the
 field as it is. A firm that ordered no pages of the day gets no agreement (agreement_orderers).
 
-Also helpers that the MOFR, invoices and run sheets share: writing form fields (set_text) and adding new
-ones (add_text_field), file names (output_name, safe_filename, unique_path) and saving (save_output, which
-labels every PDF the app makes so it is never read back as an input, and flattens it when Settings say so).
+Also helpers that the MOFR, invoices and run sheets share: the dates as ranges (date_ranges), writing form fields
+(set_text) and adding new ones (add_text_field), file names (output_name, safe_filename, unique_path) and saving
+(save_output, which labels every PDF the app makes so it is never read back as an input, and flattens it when
+Settings say so).
 lock_pdf saves a copy with the fields flattened (File → Lock finished PDFs).
 """
 from __future__ import annotations
@@ -24,8 +29,9 @@ from __future__ import annotations
 import copy
 import dataclasses
 import re
+import threading
 import unicodedata
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pymupdf
@@ -33,12 +39,14 @@ import pymupdf
 from . import signature
 from .dates import us_date
 from .forms import original_map, ucs_map
-from .models import CaseInfo, Attorney, PROC_TYPES
+from .models import CaseInfo, Attorney, PROC_TYPES, SRC_DEFAULT
 from .rates import speed_key
 from .settings import Settings
 
 FIELD_FONT = "helv"
 MAX_FS, MIN_FS = 10.0, 5.5
+DATES_FLOOR = 7.0  # the dates line of the UCS and original forms shrinks to this before it spills onto a second line
+RANGE_DAYS = 3     # days in a row that become a range on the forms ("9/28/2026–9/30/2026"); two stay listed
 FORM_SPEEDS = ("regular", "expedited", "daily")  # the speeds with a box of their own on the form
 
 
@@ -61,9 +69,18 @@ def form_path(choice: str) -> Path:
     return forms_dir() / FORMS.get(choice, FORMS[DEFAULT_FORM])[0]
 
 
+_FONTS = threading.local()  # one Font per thread: the batch's thread measures too, and a Font has no lock
+
+
 def text_width(s: str, fs: float) -> float:
-    """Width of `s` in points, in the fields' font at size `fs`."""
-    return pymupdf.get_text_length(s, fontname=FIELD_FONT, fontsize=fs)
+    """Width of `s` in points, in the fields' font at size `fs`. Measured with the font itself:
+    pymupdf.get_text_length measures a text wrong once it has a letter outside Latin-1 (the en dash of
+    "10/12/2026–10/16/2026" makes it 14 points short at size 10), so too large a size was chosen and the last
+    date was cut off."""
+    font = getattr(_FONTS, "font", None)
+    if font is None:
+        font = _FONTS.font = pymupdf.Font(FIELD_FONT)
+    return font.text_length(s, fontsize=fs)
 
 
 def fit_size(s: str, rect: pymupdf.Rect, max_fs: float = MAX_FS) -> float:
@@ -104,6 +121,36 @@ def wrap_fit(s: str, width: float, lines: int, max_fs: float = MAX_FS) -> tuple[
     return wrap(s, width, lines, MIN_FS), MIN_FS
 
 
+def date_ranges(text: str) -> str:
+    """The dates as the forms list them: days in a row (RANGE_DAYS or more) become a range with an en dash,
+    "9/28/2026–10/2/2026", and a gap keeps the list, "9/28/2026–9/30/2026, 10/5/2026"; two days in a row stay
+    "9/28/2026, 9/29/2026". The UCS form's field is 100 points wide: four dates written out no longer fit it, and
+    the MOFR's line gives out at six (five from October on). Only a text that is nothing but dates (and commas,
+    ";", "&" or "and") is rewritten, and only when it holds such a run: "6/3/2026 (a.m. session)" is kept as
+    typed. The case's own Dates field, the invoice, the records and the file names keep every day written out (the
+    records are searched by date)."""
+    from .extract_regex import find_dates
+    found = find_dates(text or "")
+    if len(found) < RANGE_DAYS:
+        return text
+    rest = text
+    for start, end, _ in reversed(found):
+        rest = rest[:start] + rest[end:]
+    if re.sub(r"(?i)[\s,;&]|\band\b", "", rest):
+        return text  # more than a list of dates: left as typed
+    days = sorted({date(int(y), int(m), int(d)) for _, _, s in found for m, d, y in [s.split("/")]})
+    runs: list[list[date]] = []
+    for day in days:
+        if runs and day - runs[-1][-1] == timedelta(days=1):
+            runs[-1].append(day)
+        else:
+            runs.append([day])
+    if not any(len(r) >= RANGE_DAYS for r in runs):
+        return text
+    return ", ".join(f"{us_date(r[0])}–{us_date(r[-1])}" if len(r) >= RANGE_DAYS else
+                     ", ".join(us_date(d) for d in r) for r in runs)
+
+
 def split_address(addr: str) -> list[str]:
     """An address as the form's two lines: the first line, then the rest joined with commas."""
     lines = [l.strip(" ,") for l in re.split(r"[\r\n]+", addr or "") if l.strip(" ,")]
@@ -114,11 +161,12 @@ def split_address(addr: str) -> list[str]:
 
 def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str, str | bool]:
     """What goes on the form, by the keys of forms/*_map.py ('judge', 'proc_trial', 'delivery_daily',
-    'atty_email'...). Boxes are True/False. With atty None the attorney's lines stay blank."""
+    'atty_email'...). Boxes are True/False. With atty None the attorney's lines stay blank. The dates are
+    listed as date_ranges says (days in a row as a range)."""
     g = case.get
     v: dict[str, str | bool] = {
         "court": g("court"), "county": g("county"), "part": g("part"), "judge": g("judge"),
-        "index_no": g("index_no"), "dates": g("dates"),
+        "index_no": g("index_no"), "dates": date_ranges(g("dates")),
         "proc_other": g("proc_other"), "proc_other_check": bool(g("proc_other").strip()),
         "rate": g("rate").lstrip("$"), "copies": g("copies"), "est_pages": g("est_pages"),
         "delivery_date": g("delivery_date"), "agreement_date": g("agreement_date"),
@@ -257,10 +305,57 @@ def _fill_clean(doc: pymupdf.Document, v: dict) -> None:
             set_text(w, "" if isinstance(val, bool) else str(val), fixed.get(name))
 
 
+def _spill_dates(v: dict, first: pymupdf.Rect, second: pymupdf.Rect, fixed: dict[str, float]) -> None:
+    """The dates on a mapped form: left on their own line when they fit it at DATES_FLOOR or larger (set_text then
+    picks the size); else split between dates over that line and the one added under it (dates_2), at the largest
+    size both fit at. "9/28/2026, 9/30/2026, 10/2/2026, 10/5/2026" is 107 points at the smallest size and the
+    UCS line 100 wide: on one line it was cut off. The text is split only between two dates (_date_breaks), and
+    each line keeps it as typed."""
+    text = str(v.get("dates", ""))
+    if not text or fit_size(text, first) >= DATES_FLOOR:
+        return
+    # (first line, second line) for each place the text may be split, the most on the first line first
+    splits = [(re.sub(r"(?i)(?:[\s,;&]|\band\b)+$", "", text[:i]), text[i:].strip())
+              for i in reversed(_date_breaks(text))]
+    splits = [(a, b) for a, b in splits if a and b]
+    if not splits:
+        return
+    fs = min(MAX_FS, max(MIN_FS, first.height * 0.78))
+    fits = lambda text, rect, size: text_width(text, size) <= rect.width - 4
+    while fs > MIN_FS:
+        for a, b in splits:
+            if fits(a, first, fs) and fits(b, second, fs):
+                v["dates"], v["dates_2"] = a, b
+                fixed["dates"] = fixed["dates_2"] = fs
+                return
+        fs -= 0.5
+    # not even over two lines at the smallest size: as many as fit on the first, the rest on the second (which
+    # keeps the overflow, as wrap does)
+    v["dates"], v["dates_2"] = next(((a, b) for a, b in splits if fits(a, first, MIN_FS)), splits[-1])
+    fixed["dates"] = fixed["dates_2"] = MIN_FS
+
+
+def _date_breaks(text: str) -> list[int]:
+    """Where a dates text may go on to a second line: after the last comma, ";", "&" or "and" between two dates,
+    never inside a date ("September 28, 2026") or a range ("9/28/2026–10/2/2026"). A text with fewer than two dates
+    is split after a comma outside its date ("6/3/2026 (a.m. session), the p.m. session")."""
+    from .extract_regex import find_dates
+    found = find_dates(text)
+    if len(found) < 2:
+        return [m.end() for m in re.finditer(",", text) if not any(s <= m.start() < e for s, e, _ in found)]
+    out = []
+    for (_, end, _), (start, _, _) in zip(found, found[1:]):
+        seps = list(re.finditer(r"(?i)[,;&]|\band\b", text[end:start]))  # (a dash between them: a range)
+        if seps:
+            out.append(end + seps[-1].end())
+    return out
+
+
 def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
     """Fills a form whose field names are mapped to our keys (forms/*_map.py). Its boxes are text
     fields, so a ticked one gets an "X"; lines it has no field for (fmap.OVERLAYS: signatures etc.) get a text
-    field added, blank ones too, so a value can be typed in later.
+    field added, blank ones too, so a value can be typed in later. Dates that don't fit their line go on over
+    the line added under it (_spill_dates).
     case_fs: the largest font size for the case name."""
     page = doc[0]
     # the original's fields are named "Text-<id>"; fields not in the map end up under None and are skipped
@@ -271,6 +366,8 @@ def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
             v[k] = form_text(val)
     _spread(v, v.get("case_name_raw", ""), ["case_name_1", "case_name_2", "case_name_3"],
             widgets["case_name_1"].rect.width, fixed, max_fs=case_fs)
+    if "dates_2" in fmap.OVERLAYS:
+        _spill_dates(v, widgets["dates"].rect, pymupdf.Rect(fmap.OVERLAYS["dates_2"]), fixed)
     for src, dst in fmap.MERGE_INTO.items():
         if v.get(src):
             v[dst] = ", ".join(x for x in (v.get(dst, ""), v[src]) if x)
@@ -322,9 +419,10 @@ def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool 
     pattern: another file name pattern (MOFR, invoice) than the agreement's; extra: more placeholders."""
     from .extract_regex import find_dates
     pattern = s.filename_pattern if pattern is None else pattern
-    day = case.get("dates").split(",")[0].strip().replace("/", "-")
-    found = list(dict.fromkeys(d for _, _, d in find_dates(case.get("dates")))) if dated else []
-    if len(found) > 1:
+    found = list(dict.fromkeys(d for _, _, d in find_dates(case.get("dates"))))
+    # the first day read as a date: a typed 'September 28, 2026' is '9-28-2026', not 'September 28'
+    day = found[0].replace("/", "-") if found else case.get("dates").split(",")[0].strip().replace("/", "-")
+    if dated and len(found) > 1:
         first, last = min(found, key=_date_key), max(found, key=_date_key)
         day = f"{first.replace('/', '-')} to {last.replace('/', '-')}"
     today = date.today()
@@ -366,13 +464,23 @@ def mark(doc: pymupdf.Document, kind: str) -> None:
 
 def save_output(doc: pymupdf.Document, kind: str, path: Path, flatten: bool = False) -> Path:
     """Saves a PDF this app made: labels it (see mark), optionally flattens the fields, never overwrites
-    (adds " (2)" etc.), closes it and returns where it went."""
+    (adds " (2)" etc.), closes it and returns where it went. When the save fails, the error is raised and the file
+    half written is deleted; when even that fails, the error says where it was left (`left_behind`)."""
     mark(doc, kind)
     if flatten:
         doc.bake()
     path.parent.mkdir(parents=True, exist_ok=True)
     out = unique_path(path)
-    doc.save(out, garbage=3, deflate=True)
+    try:
+        doc.save(out, garbage=3, deflate=True)
+    except Exception as e:
+        # the disk full, or the file taken meanwhile: a file half written is no PDF, and an invoice's number
+        # would stay with it (invoice.make_invoice gives the number back only when nothing is left on disk)
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            e.left_behind = out  # (held by an antivirus scan, say: make_invoice tries once more, then keeps the number)
+        raise
     doc.close()
     return out
 
@@ -403,9 +511,10 @@ def unique_path(p: Path) -> Path:
 def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, dated: bool = False) -> Path:
     """Fills the agreement form chosen in Settings for one attorney (None = blank attorney lines), saves
     it in out_dir and returns its path. A blank agreement date on `case` is set to today when Settings
-    say so."""
+    say so: as a default, not as typed by the user (agreement_case shares the job's fields, and a value marked
+    as the user's would be kept through every re-merge of the job)."""
     if s.agreement_today and not case.get("agreement_date"):
-        case.set("agreement_date", us_date())
+        case.set("agreement_date", us_date(), SRC_DEFAULT)
     v = build_values(case, atty, s)
     v["case_name_raw"] = " ".join(case.get("case_name").split())
     choice = s.form_choice if s.form_choice in FORMS else DEFAULT_FORM
@@ -414,8 +523,8 @@ def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, date
         _fill_mapped(doc, v, original_map, case_fs=9)
     elif choice == "ucs":
         _fill_mapped(doc, v, ucs_map, case_fs=10)
-        if not s.include_instructions and doc.page_count > 1:
-            doc.delete_pages(1, doc.page_count - 1)
+        if not s.include_instructions and doc.page_count > ucs_map.INSTRUCTION_PAGES:
+            doc.delete_pages(doc.page_count - ucs_map.INSTRUCTION_PAGES, doc.page_count - 1)
     else:
         _fill_clean(doc, v)
     if s.signature():

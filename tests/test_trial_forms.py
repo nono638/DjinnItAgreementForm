@@ -1,18 +1,19 @@
 """One minute agreement per firm, and one MOFR, for the days of a case that share an invoice
 (Settings.forms_per_case, batch.form_groups and case_forms): the user's trial of 4 days and 4 firms, one of them
 absent the first day and ordering nothing of a day split with Excerpts... Each firm's agreement lists the days it
-ordered and its own pages, the same as its invoice; the MOFR lists every day; the rest (case, copies, proceedings,
-delivery date) is taken from all the days. Generate all again makes the forms but no invoice. With the setting
-off, or an invoice for each day, the forms are one set per day as before; so are they for a day held for
-Excerpts... or with nobody ticked, and a run of some of the days lists only those. Generate all's count and its
-preview agree with what is made; a settings file from before has the setting on. All names and numbers are made
-up."""
+ordered (days in a row as a range: fill.date_ranges) and its own pages, the same as its invoice; the MOFR lists
+every day; the rest (case, copies, proceedings, delivery date) is taken from all the days. Generate all again
+makes the forms but no invoice. With the setting off, or an invoice for each day, the forms are one set per day as
+before; so are they for a day held for Excerpts... or with nobody ticked, and a run of some of the days lists only
+those. Generate all's count and its preview agree with what is made; a settings file from before has the setting
+on. All names and numbers are made up."""
 import pymupdf
 import pytest
 
 from minute_filler.batch import (_date_key, case_forms, expand_paths, files_to_make, fill_jobs, form_groups, group,
                                  read_docs)
 from minute_filler.deliver import ledger_for
+from minute_filler.fill import date_ranges
 from minute_filler.models import Attorney
 from minute_filler.settings import Settings
 
@@ -97,7 +98,12 @@ def test_one_agreement_per_attorney_for_the_whole_trial(trial, s):
         row, inv = agreements[name], invoices[name]
         assert (row.dates, row.pages) == (dates, pages) == (inv.dates, inv.pages)
         values = field_values(row.file_path)
-        assert dates in values and f"| {pages} |" in values
+        # the records keep every day written out; the form lists days in a row as a range ("9/30/2026–10/2/2026"),
+        # going on to the second line (dates_2) when it doesn't fit on the first
+        with pymupdf.open(row.file_path) as doc:
+            f = {w.field_name: w.field_value for w in doc[0].widgets()}
+        shown = ", ".join(x for x in (f["4 Datess of Minutes Requested"], f.get("dates_2", "")) if x)
+        assert shown == date_ranges(dates) and f"| {pages} |" in values
     # one file per firm, named for its span of days; the files are listed under the days they cover
     robins = agreements["Robin Example"].file_path
     assert "(9-30-2026 to 10-2-2026)" in robins and "(9-28-2026 to 10-2-2026)" in agreements["Alex B. Counsel"].file_path
@@ -193,7 +199,7 @@ def test_generate_all_counts_and_previews_what_it_makes(trial, s, make_window, m
     from minute_filler.gui.main_window import MainWindow
     from minute_filler.gui.preview import PreviewDialog
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
-    monkeypatch.setattr(MainWindow, "_run_sheet_for", lambda self, j: "")  # (a new run sheet, without asking)
+    monkeypatch.setattr(MainWindow, "_run_sheet_for", lambda self, j, button="Generate": "")  # (a new one, unasked)
     s.outputs = ["agreement", "invoice", "runsheet"]
     s.use_ai = s.open_after = False
     win = make_window(s, preview=True)

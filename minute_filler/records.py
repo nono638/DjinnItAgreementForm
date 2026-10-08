@@ -20,7 +20,8 @@ Invoices made in another reporter's name (Invoice.reporter: "ds") are numbered o
 A record deleted goes to the trash (its `deleted` time is set): it is left out of every list, total and copy,
 and can be restored for 30 days (TRASH_DAYS); after that it is deleted for good. The files themselves are
 never touched. An invoice's number stays taken even then (the used_numbers table), so it is never given to
-another invoice.
+another invoice. A number is entered there the moment it is taken, before its invoice is drawn
+(Ledger.reserve_invoice_no), so two copies of the app making invoices at once never get the same one.
 
 Databases made by older versions get the newer columns when opened (_migrate); their old rows leave them blank.
 
@@ -54,9 +55,11 @@ from .invoice_calc import fmt, money
 from .log import error as log_error
 from .rates import parse_amount
 
-# One writer at a time: the CSV copies are rewritten whole, and an invoice's number is taken and its row
-# added in one step (the batch runs on another thread than the window).
+# One writer at a time: the CSV copies are rewritten whole (the batch runs on another thread than the window).
 _MIRROR_LOCK = threading.Lock()
+# This app's threads take invoice numbers one at a time (invoice.make_invoice holds it from taking the number to
+# adding the row). It only queues threads of this copy of the app: what keeps two copies from one number is the
+# row reserve_invoice_no enters in used_numbers before the invoice is drawn.
 NUMBER_LOCK = threading.RLock()
 # Opening a database makes its tables and adds missing columns: two threads doing that at once (the batch and the
 # window) would both try to add the same column
@@ -384,8 +387,8 @@ class Ledger:
                         reporter: str = "") -> tuple[str, int, int]:
         """(number, year, seq): the next number for this year, e.g. '2026-0007'. pattern: the number's format
         ({year}, {yy}, {seq}); a number already taken is skipped. reporter: another reporter's initials, whose
-        numbers are counted apart (Settings.number_format gives them their own pattern). Hold NUMBER_LOCK until
-        add_invoice, or two invoices may get the same number."""
+        numbers are counted apart (Settings.number_format gives them their own pattern). Only looks: an invoice
+        takes its number with reserve_invoice_no."""
         year = (today or date.today()).year
         seq = self._next_seq(year, reporter)
         taken = {r[0] for r in self._rows("SELECT invoice_no FROM invoices UNION SELECT invoice_no FROM used_numbers")}
@@ -404,6 +407,35 @@ class Ledger:
                 return no, year, seq
             seq += 1
 
+    def reserve_invoice_no(self, pattern: str = "{year}-{seq:04}", today: date | None = None,
+                           reporter: str = "") -> tuple[str, int, int]:
+        """(number, year, seq) as next_invoice_no gives them, as the records are at this moment, with the number
+        entered in used_numbers at once, in one step: another copy of the app (or a thread) asking meanwhile
+        waits, then gets the number after it. Called right before an invoice is drawn; release_invoice_no gives
+        the number back when the invoice can't be made."""
+        with NUMBER_LOCK:
+            db = self._db()
+            db.isolation_level = None  # (transactions by hand: BEGIN IMMEDIATE holds the database for writing)
+            try:
+                db.execute("BEGIN IMMEDIATE")  # another copy of the app reserving a number waits here
+                try:
+                    no, year, seq = self.next_invoice_no(pattern, today, reporter)
+                    db.execute("INSERT INTO used_numbers (invoice_no, year, seq, reporter) VALUES (?, ?, ?, ?)",
+                               (no, year, seq, reporter))
+                    db.execute("COMMIT")
+                except BaseException:
+                    db.execute("ROLLBACK")
+                    raise
+            finally:
+                db.close()
+        return no, year, seq
+
+    def release_invoice_no(self, invoice_no: str) -> None:
+        """Gives back a number taken by reserve_invoice_no whose invoice couldn't be made (it isn't among the
+        invoices): it is given again next time, unless a later number was taken meanwhile."""
+        self._run("DELETE FROM used_numbers WHERE invoice_no = ? AND invoice_no NOT IN "
+                  "(SELECT invoice_no FROM invoices)", (invoice_no,))
+
     # ------------------------------------------------------------------ writing
     def log_activity(self, kind: str, **details) -> None:
         """One file made; details are Activity fields (case_name=..., attorney=..., file_path=...)."""
@@ -416,8 +448,8 @@ class Ledger:
         self._insert("activity", values)
 
     def add_invoice(self, inv: Invoice, year: int = 0, seq: int = 0) -> None:
-        """Enters a new invoice. year/seq: from next_invoice_no; without them the invoice counts as the next
-        one of its year."""
+        """Enters a new invoice. year/seq: from reserve_invoice_no (or next_invoice_no); without them the invoice
+        counts as the next one of its year."""
         year = year or int(inv.created[:4])
         values = asdict(inv)
         values.update(amounts=json.dumps(inv.amounts), year=year, seq=seq or self._next_seq(year, inv.reporter))
