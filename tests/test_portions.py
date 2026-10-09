@@ -1,6 +1,6 @@
 """Excerpts (who ordered which pages): each firm's invoice bills only the days it is ticked on and, of a day
-split in the Excerpts window (Job.portions), only the pages it ordered. Pages ordered together share the original,
-the judge's index and (by default) the index; each firm pays its own copies. Also the index setting, the Parties
+split in the Excerpts window (Job.portions), only the pages it ordered. Pages ordered together share the original
+and the judge's index; each firm pays its own copies and (by default) its own index. Also the index setting, the Parties
 number (and one below the firms ticked), portions kept to be checked when the pages or the attorneys change, the
 rows following a firm renamed or filled in by a merge, the same attorney entered twice, a run stopped part way,
 the files counted for Generate all and the records of each firm. All names and numbers are made up; prices are from the bundled "Sample Rates" sheet (Regular: original
@@ -91,36 +91,43 @@ def test_the_four_days_priced_by_hand(four_days, s):
     firms = {f.atty.name: f for f in firm_invoices(case, s, opts)}
     assert set(firms) == {"Alex B. Counsel", "Dana Smith"}
     a, d = firms["Alex B. Counsel"], firms["Dana Smith"]
-    # Regular, Alex: original (30 + 60/2 + 50/2 = 85 pp.) x 4.30 = 365.50; copy and e-mailed copy 140 pp. x 1.00
-    # each; index and judge's index 85 pp. x 1.00 each: 365.50 + 140 + 140 + 85 + 85 = 815.50
-    # Dana: original (20 + 30 + 40 + 25 = 115 pp.) x 4.30 = 494.50 + 170 + 170 + 115 + 115 = 1064.50
-    assert [q.per_party for q in a.quotes] == [Decimal("815.50"), Decimal("954.00")]  # Expedite: 85 x 5.40 = 459
-    assert [q.per_party for q in d.quotes] == [Decimal("1064.50"), Decimal("1248.00")]  # ... + 154 + 154 + 93.5 x 2
-    # together they pay for one original, a copy of each page each ordered, one index and the judge's
-    whole = 200 * Decimal("4.30") + 2 * (140 + 170) + 200 + 200
+    # Regular, Alex: original (30 + 60/2 + 50/2 = 85 pp.) x 4.30 = 365.50; copy, e-mailed copy and its own index
+    # 140 pp. x 1.00 each; judge's index 85 pp. x 1.00: 365.50 + 140 + 140 + 140 + 85 = 870.50
+    # Dana: original (20 + 30 + 40 + 25 = 115 pp.) x 4.30 = 494.50 + 170 + 170 + 170 + 115 = 1119.50
+    # Expedite, Alex: 85 x 5.40 = 459 + 3 x 140 x 1.10 = 462 + 85 x 1.10 = 93.50: 1014.50
+    assert [q.per_party for q in a.quotes] == [Decimal("870.50"), Decimal("1014.50")]
+    assert [q.per_party for q in d.quotes] == [Decimal("1119.50"), Decimal("1308.50")]  # 621 + 3 x 187 + 126.50
+    # together they pay for one original, a copy, an e-mailed copy and an index of each page each ordered,
+    # and the judge's index
+    whole = 200 * Decimal("4.30") + 3 * (140 + 170) + 200
     assert a.quotes[0].per_party + d.quotes[0].per_party == whole
     assert (a.opts.pages, a.opts.days) == (140, [("6/3/2026", 30), ("6/5/2026", 60), ("6/6/2026", 50)])
     assert (d.opts.pages, d.opts.days) == (170, [("6/4/2026", 20), ("6/5/2026", 60), ("6/6/2026", 90)])
     assert a.case.get("dates") == "6/3/2026, 6/5/2026, 6/6/2026" and a.opts.parties == 2
 
-    s.invoice_index_shared = "each"  # an index for each firm: Alex pays 140 index pages, not 85
+    s.invoice_index_shared = "split"  # one index, shared like the judge's: Alex pays 85 index pages, not 140
     firms = {f.atty.name: f for f in firm_invoices(case, s, opts)}
-    assert firms["Alex B. Counsel"].quotes[0].per_party == Decimal("870.50")
-    assert firms["Dana Smith"].quotes[0].per_party == Decimal("1119.50")
+    assert firms["Alex B. Counsel"].quotes[0].per_party == Decimal("815.50")
+    assert firms["Dana Smith"].quotes[0].per_party == Decimal("1064.50")
 
 
-def test_the_index_of_an_excerpt_is_split_like_the_practice(s):
-    """A 100-page transcript; side B ordered a 10-page excerpt of it. The index is billed by the transcript's
-    pages: A pays 90 pages at the one-sided rate and 10 at the split rate, B the 10 at the split rate."""
+def test_the_index_of_an_excerpt_as_the_practice_is(s):
+    """A 100-page transcript; side B ordered a 10-page excerpt of it (the user's example, 2026-10-08). Each firm
+    pays an index of the pages it ordered, in full: A 100 pages, B 10. The judge's index is split page by page
+    between the firms that ordered each page: A pays for 95 pages of it, B for 5. With "split" (one index,
+    shared like the judge's) A would pay 95 index pages and B 5."""
     sp = s.sheet().find("Regular")  # index $1.00 a page
     a = quote_shares([Share(90, 1, True), Share(10, 2, True)], sp)
     b = quote_shares([Share(10, 2, True)], sp)
-    index = {name: next(l for l in q.lines if l.label == "Index") for name, q in (("A", a), ("B", b))}
-    assert index["A"].amount == Decimal("95.00")  # 90 x $1.00 + 10 x $0.50
-    assert index["B"].amount == Decimal("5.00")   # 10 x $0.50
-    # the judge's index the same way: A pays for 95 pages of it, B for 5
-    judge = {name: next(l for l in q.lines if l.label == "Judge's index") for name, q in (("A", a), ("B", b))}
-    assert (judge["A"].amount, judge["B"].amount) == (Decimal("95.00"), Decimal("5.00"))
+
+    def amount(q, label):
+        return next(l for l in q.lines if l.label == label).amount
+
+    assert (amount(a, "Index"), amount(b, "Index")) == (Decimal("100.00"), Decimal("10.00"))
+    assert (amount(a, "Judge's index"), amount(b, "Judge's index")) == (Decimal("95.00"), Decimal("5.00"))
+    a, b = (quote_shares(x, sp, index_split=True) for x in ([Share(90, 1, True), Share(10, 2, True)],
+                                                              [Share(10, 2, True)]))
+    assert (amount(a, "Index"), amount(b, "Index")) == (Decimal("95.00"), Decimal("5.00"))  # 90 + 10 / 2
 
 
 def test_a_share_is_rounded_up_to_the_cent(s):
@@ -132,15 +139,17 @@ def test_a_share_is_rounded_up_to_the_cent(s):
 
 
 def test_the_index_setting_is_kept_and_checked(tmp_path):
-    """invoice_index_shared defaults to "split"; a value it can't be ("sometimes") loads as "split", "each" as
-    saved."""
-    assert Settings().invoice_index_shared == "split" and Settings().settings_version == 10
+    """invoice_index_shared defaults to "each"; a value it can't be ("sometimes") loads as "each". A file saved
+    before v11 says "each" whatever it said (its "split" was the old default, from a misunderstanding); "split"
+    chosen in a v11 file stays."""
+    assert Settings().invoice_index_shared == "each" and Settings().settings_version == 11
     s = Settings()
-    s.path.write_text(json.dumps({"settings_version": 6, "invoice_index_shared": "sometimes"}), encoding="utf-8")
-    assert Settings.load().invoice_index_shared == "split"
-    s.path.write_text(json.dumps({"settings_version": 7, "invoice_index_shared": "each"}), encoding="utf-8")
-    loaded = Settings.load()
-    assert loaded.invoice_index_shared == "each" and loaded.settings_version == Settings.settings_version
+    for version, saved, loaded in ((6, "sometimes", "each"), (10, "split", "each"), (10, "each", "each"),
+                                   (11, "split", "split"), (11, "sometimes", "each")):
+        s.path.write_text(json.dumps({"settings_version": version, "invoice_index_shared": saved}), encoding="utf-8")
+        got = Settings.load()
+        assert got.invoice_index_shared == loaded, (version, saved)
+        assert got.settings_version == Settings.settings_version
 
 
 # ------------------------------------------------------------------ the days and pages of each firm
@@ -153,8 +162,8 @@ def test_generate_all_makes_an_invoice_per_firm_for_its_own_days_and_pages(four_
     assert set(rows) == {"Alex B. Counsel", "Dana Smith"}
     a, d = rows["Alex B. Counsel"], rows["Dana Smith"]
     assert (a.pages, a.parties, a.dates, a.amounts) == (140, 2, "6/3/2026, 6/5/2026, 6/6/2026",
-                                                        {"Regular": "815.50", "Expedite": "954.00"})
-    assert (d.pages, d.dates, d.amounts["Regular"]) == (170, "6/4/2026, 6/5/2026, 6/6/2026", "1064.50")
+                                                        {"Regular": "870.50", "Expedite": "1014.50"})
+    assert (d.pages, d.dates, d.amounts["Regular"]) == (170, "6/4/2026, 6/5/2026, 6/6/2026", "1119.50")
     made = {a.attorney: a for a in ledger_for(s).activity(kind="invoice")}
     assert made["Alex B. Counsel"].pages == 140 and made["Dana Smith"].dates == "6/4/2026, 6/5/2026, 6/6/2026"
     # every day lists both invoices
@@ -162,7 +171,7 @@ def test_generate_all_makes_an_invoice_per_firm_for_its_own_days_and_pages(four_
     with pymupdf.open(a.file_path) as doc:
         fields = {w.field_name: w.field_value for w in doc[0].widgets()}
         text = doc[0].get_text()
-    assert fields["dates"] == "6/3/2026, 6/5/2026, 6/6/2026" and fields["amount Regular"] == "$815.50"
+    assert fields["dates"] == "6/3/2026, 6/5/2026, 6/6/2026" and fields["amount Regular"] == "$870.50"
     assert "delivered once every party has paid" in text  # some of its pages are shared
 
 
@@ -253,7 +262,7 @@ def test_a_firms_detail_says_which_pages_are_shared(tmp_path, s):
     assert "Original: 10 pp. × $4.30 + 20 pp. × $4.30 ÷ 2 firms" in text
     assert "Copy: 30 pp. × $1.00 + E-mailed copy: 30 pp. × $1.00 = $146.00" in text
     assert "split 2 ways" not in text and "Amounts are your share" in text
-    assert "the original, the index and the judge's index of pages ordered together" in text
+    assert "the original and the judge's index of pages ordered together" in text  # (each pays its own index)
 
 
 # ------------------------------------------------------------------ found in the sweep of who ordered which pages

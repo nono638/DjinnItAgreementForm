@@ -1,4 +1,5 @@
-"""Rate sheet parsing, the template, and how the active sheet drives the form."""
+"""Rate sheet parsing, the template, the bundled sheet's prices (Daily copies, e-mailed copies and indexes at $1.25
+a page) and an unedited copy of the old one brought up to date, and how the active sheet drives the form."""
 from minute_filler.merge import merge
 from minute_filler.models import Extraction
 from minute_filler.rates import BUNDLED_DIR, list_sheets, speed_key
@@ -17,6 +18,39 @@ def test_sample_sheet_is_default():
     assert s.rate_for("Expedited") == "5.40"
     assert sheet.find("Immediate").copy == "1.45"
     assert sheet.updated == "5/2/2024"
+
+
+def test_daily_copies_e_mails_and_indexes_are_1_25_a_page():
+    """The bundled sheet's Daily row: $6.50 a page, and $1.25 (not $1.30) for a copy, an e-mailed copy and an
+    index, read from the sheet like every other price."""
+    from minute_filler.invoice_calc import extra_rate
+    daily = Settings().sheet().find("Daily")
+    assert (daily.original, daily.copy) == ("6.50", "1.25")
+    assert str(extra_rate(daily, "email")) == "1.25" and str(extra_rate(daily, "index")) == "1.25"
+
+
+def test_an_unedited_copy_of_the_old_sample_is_brought_up_to_date(tmp_path):
+    """A user folder seeded by an earlier version holds Sample Rates as it shipped then ($1.30 for Daily): still
+    exactly that (CRLF or LF), it is replaced by the sheet as it ships now; edited, or another sheet, it is
+    left alone."""
+    from minute_filler.rates import OLD_BUNDLED, seed
+    new = (BUNDLED_DIR / "Sample Rates.csv").read_bytes()
+    old = new.replace(b"Daily,$6.50,$1.25,$1.25,$1.25", b"Daily,$6.50,$1.30,$1.30,$1.30")
+    import hashlib
+    assert {hashlib.sha256(x).hexdigest() for x in (old, old.replace(b"\r\n", b"\n"))} == OLD_BUNDLED["Sample Rates.csv"]
+    for i, text in enumerate((old, old.replace(b"\r\n", b"\n"))):
+        d = tmp_path / f"unedited {i}"
+        d.mkdir()
+        (d / "Sample Rates.csv").write_bytes(text)
+        seed(d)
+        assert (d / "Sample Rates.csv").read_bytes() == new
+    d = tmp_path / "edited"
+    d.mkdir()
+    edited = old.replace(b"$4.30", b"$4.35")  # the user's own price: kept, $1.30 and all
+    (d / "Sample Rates.csv").write_bytes(edited)
+    (d / "My Rates.csv").write_bytes(old)  # another sheet, the same bytes: not the sample, kept
+    seed(d)
+    assert (d / "Sample Rates.csv").read_bytes() == edited and (d / "My Rates.csv").read_bytes() == old
 
 
 def test_template_is_blank_and_hidden():

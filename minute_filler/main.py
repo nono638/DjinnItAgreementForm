@@ -59,9 +59,15 @@ def selftest(out_dir: str, files: list[str]) -> int:
         report["printing"] = True
     except Exception as e:
         report["printing"] = f"{type(e).__name__}: {e}"
-    try:  # The math's Save as PDF... lays out HTML with pymupdf.Story
-        from minute_filler.invoice_math import to_pdf
-        report["math_pdf"] = to_pdf("<p>Copy: 2 × 1 page × $1.00 = $2.00</p>", out / "math.pdf").exists()
+    try:  # The math's Save as PDF... lays out HTML with pymupdf.Story: its tables, as explain() makes them
+        from minute_filler.invoice import FirmInvoice, InvoiceOpts
+        from minute_filler.invoice_calc import Quote, QuoteLine
+        from minute_filler.invoice_math import explain, to_pdf
+        from minute_filler.models import CaseInfo
+        from decimal import Decimal
+        q = Quote("Regular", 1, 2, [QuoteLine("Copy", Decimal("1.00"), 2, Decimal("2.00"))])
+        tables = explain([(FirmInvoice(None, CaseInfo(), InvoiceOpts(1, 2), [q]), "")])[0]
+        report["math_pdf"] = "<table" in tables and to_pdf(tables, out / "math.pdf").exists()
     except Exception as e:
         report["math_pdf"] = f"{type(e).__name__}: {e}"
     try:  # one window at a time needs Qt's local sockets (QtNetwork) in the build

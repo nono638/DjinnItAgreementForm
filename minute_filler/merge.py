@@ -187,7 +187,7 @@ def refresh_delivery_date(case: CaseInfo, s: Settings) -> None:
 
 
 def refresh_speed(case: CaseInfo, s: Settings) -> bool:
-    """The agreement form names one speed: the one the user chose for the job (in the Order card, or when
+    """The agreement form names one speed: the one the user chose for the job (under Minute agreement form details, or when
     asked about a speed a document mentions: batch.Job.speed_question), while it is still among the speeds
     offered (or "Other"); else always the one Settings picks (Settings.agreement_speed: by default "Expedited,
     else the slowest offered"). A speed found in a document doesn't change it: an e-mail's "at your regular

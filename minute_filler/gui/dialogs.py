@@ -1,7 +1,7 @@
 """The app's dialogs: Settings (with its invoice text editor), the "please clarify" questions before filling, the
 speed the agreement form names when an e-mail asks for another (SpeedDialog), the run sheet choice, a job's
-invoice Extras, granular detail and whose pages of a transcript of several reporters to bill, another reporter's
-invoice details (ReporterDialog), the Ollama setup help (with a model download), About and the How to use guide
+invoice Peripherals (for that job only), granular detail and whose pages of a transcript of several reporters to
+bill, another reporter's invoice details (ReporterDialog), the Ollama setup help (with a model download), About and the How to use guide
 (GUIDE). The preview before saving and the first-run welcome are in preview.py; the Excerpts window (who ordered
 which pages) is gui/excerpts.py."""
 from __future__ import annotations
@@ -277,7 +277,7 @@ class SettingsDialog(QDialog):
         speeds.addStretch(1)
         f.addRow("Speeds offered", speeds)
         hint = QLabel("The attorney chooses one. With one ticked the invoice bills that speed alone. "
-                      "The same boxes are in the Order card of the main window.")
+                      "The same boxes are in the main window's Invoice panel.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         f.addRow("", hint)
@@ -335,6 +335,11 @@ class SettingsDialog(QDialog):
         self.i_threshold.setValue(settings.invoice_index_threshold)
         self.i_threshold.setSuffix(" pages")
         self.i_threshold.setFixedWidth(z(110))
+        tip = ("Counted on the whole transcript, every reporter's pages, though each invoice charges the index on\n"
+               "its own pages (your 45 of an 83-page transcript get one). A job's Peripherals… can say yes or no\n"
+               "for that job.")
+        self.i_index.setToolTip(tip)
+        self.i_threshold.setToolTip(tip)
         idx.addWidget(self.i_index)
         idx.addWidget(self.i_threshold)
         idx.addStretch(1)
@@ -343,16 +348,18 @@ class SettingsDialog(QDialog):
         for key, label in INDEX_RULES.items():
             self.i_rule.addItem(label, key)
         self.i_rule.setCurrentIndex(max(0, self.i_rule.findData(settings.invoice_index_rule)))
-        self.i_rule.setToolTip("For an invoice covering several days. A job's Extras… can still turn the index\n"
-                               "on or off for that job.")
+        self.i_rule.setToolTip("For an invoice covering several days. Every page of a day's transcripts counts,\n"
+                               "whoever wrote them. A job's Peripherals… can still turn the index on or off for\n"
+                               "that job.")
         f.addRow("Index on several days", self.i_rule)
         self.i_shared = QComboBox()
         for key, label in INDEX_SHARED.items():
             self.i_shared.addItem(label, key)
         self.i_shared.setCurrentIndex(max(0, self.i_shared.findData(settings.invoice_index_shared)))
-        self.i_shared.setToolTip("When several attorneys ordered the same pages: one index, its price split between\n"
-                                 "them like the original's, or an index for each of them. The judge's index is\n"
-                                 "always split.")
+        self.i_shared.setToolTip("When several attorneys ordered the same pages: each pays an index of the pages it\n"
+                                 "ordered (100 pages, B orders 10 of them: A pays an index of 100 pages, B of 10),\n"
+                                 "or one index is split between them like the original. The judge's index is\n"
+                                 "always split, page by page (A pays 95 pages of it, B 5).")
         f.addRow("Index on shared pages", self.i_shared)
         self.i_joint = QComboBox()
         self.i_joint.addItem("One joint invoice for all the days of a case", True)
@@ -588,7 +595,7 @@ class SettingsDialog(QDialog):
 
     def _show_agreement_speed(self, _=None):
         """The line under Agreement form speed: which speed the form gets with the speeds ticked now (those a
-        rate sheet names otherwise, ticked in the Order card, have no box here but count too: Save keeps them)."""
+        rate sheet names otherwise, ticked in the Invoice panel, have no box here but count too: Save keeps them)."""
         from copy import copy
         from ..rates import speed_key
         trial = copy(self.s)
@@ -602,8 +609,8 @@ class SettingsDialog(QDialog):
             " (the fastest offered)" if trial.agreement_speed_fallback == "fastest" else
             " (the slowest offered: the most turnaround days)")
         self.i_agreement_note.setText(
-            f"With {ticked} ticked, every agreement form says {pick}{why}. A speed you choose for one job in the "
-            "Order card comes first; when an e-mail asks for another speed, you are asked which.")
+            f"With {ticked} ticked, every agreement form says {pick}{why}. A speed you choose for one job under "
+            "Minute agreement form details comes first; when an e-mail asks for another speed, you are asked which.")
 
     def _pick_sheet_dir(self):
         """Lets the user choose another rate sheets folder and reloads the sheet list from it."""
@@ -867,7 +874,7 @@ class SettingsDialog(QDialog):
         s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
         s.mofr_division = self.o_division.currentData()
         s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
-        # speeds named otherwise on a rate sheet (ticked in the Order card) have no box here: they stay
+        # speeds named otherwise on a rate sheet (ticked in the Invoice panel) have no box here: they stay
         from ..rates import speed_key
         keep = [x for x in s.invoice_speeds if speed_key(x) not in {speed_key(n) for n in SPEEDS}]
         s.invoice_speeds = keep + [k for k, cb in self.i_speeds.items() if cb.isChecked()]
@@ -1153,6 +1160,9 @@ class SpeedDialog(QDialog):
 
 
 DEFAULTS_TIP = "Your defaults for every invoice are in Settings → Invoice."
+# Peripherals... changes one job only: said at the top and the bottom of it, as it was taken for the settings
+JOB_ONLY_TIP = ("These choices are for this job only. New jobs start from Settings → Invoice, where the {n} pages "
+                "of the automatic index are set.")
 
 
 def _tip(text: str) -> QLabel:
@@ -1163,53 +1173,58 @@ def _tip(text: str) -> QLabel:
     return label
 
 
-def _invoice_buttons(dlg: QDialog, on_defaults) -> QDialogButtonBox:
-    """OK, Cancel and "Use my defaults" (which calls on_defaults and closes the window with OK)."""
+def _invoice_buttons(dlg: QDialog, on_defaults, label: str = "Use my defaults") -> QDialogButtonBox:
+    """OK, Cancel and "Use my defaults" (or `label`), which calls on_defaults and closes the window with OK."""
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    reset = buttons.addButton("Use my defaults", QDialogButtonBox.ResetRole)
+    reset = buttons.addButton(label, QDialogButtonBox.ResetRole)
     reset.clicked.connect(on_defaults)
     buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
     return buttons
 
 
-class InvoiceExtrasDialog(QDialog):
-    """What one job's invoice includes besides the original and the copies: an e-mailed copy for each party,
-    and the index (automatic, always or never). values() gives (email, index), None where it is as Settings
-    say."""
+class InvoicePeripheralsDialog(QDialog):
+    """Peripherals...: what one job's invoice includes besides the original and the copies, for that job only: an
+    e-mailed copy for each party, and the index (automatic, from the threshold's pages of the whole transcript;
+    yes; no). It says it is for this job only, at the top and the bottom: it was taken for the settings. values()
+    gives (email, index), None where it is as Settings say."""
 
     def __init__(self, email: bool | None, index: str | None, s: Settings, days: int = 1, parent=None):
         """email, index: the job's choices (None = Settings); days: how many days the invoice covers."""
         super().__init__(parent)
-        self.setWindowTitle("Invoice extras")
-        self.setMinimumWidth(z(460))
+        self.setWindowTitle("Peripherals for this job")
+        self.setMinimumWidth(z(480))
         self.s = s
         self.default_email = s.invoice_include_email
         self.default_index = "auto" if s.invoice_include_index else "off"
         lay = QVBoxLayout(self)
-        intro = QLabel("For this job's invoice" + (f" (all {days} days of the case)" if days > 1 else "") + ":")
+        intro = QLabel("For this job's invoice only" + (f" (all {days} days of the case on it)" if days > 1 else "")
+                       + ":")
         intro.setObjectName("subtitle")
         lay.addWidget(intro)
-        self.email = QCheckBox("An e-mailed copy for each party (Email column of the rate sheet)")
+        self.email = QCheckBox("An e-mailed copy for each party, for this job (Email column of the rate sheet)")
         self.email.setChecked(self.default_email if email is None else email)
         lay.addWidget(self.email)
         lay.addSpacing(6)
-        lay.addWidget(QLabel("Index (and one for the judge):"))
-        rule = INDEX_RULES.get(s.invoice_index_rule, "").lower()
+        lay.addWidget(QLabel("Index for this job (and one for the judge):"))
+        t = s.invoice_index_threshold
         self.index = QButtonGroup(self)
-        for key, label in (("auto", f"Automatic: from {s.invoice_index_threshold} pages ({rule})"),
-                           ("on", "Always, however short the transcript"), ("off", "Never")):
+        for key, label in (("auto", f"Auto: when the whole transcript has {t} pages or more"),
+                           ("on", "Yes, for this job (however short the transcript)"), ("off", "No, for this job")):
             rb = QRadioButton(label)
             rb.setProperty("key", key)
             rb.setChecked(key == (self.default_index if index is None else index))
             self.index.addButton(rb)
             lay.addWidget(rb)
+        rule = f" Several days: {INDEX_RULES.get(s.invoice_index_rule, '').lower()}." if days > 1 else ""
+        lay.addWidget(_tip(f"Auto counts every reporter's pages of the transcript, not only yours.{rule}"))
         lay.addSpacing(6)
-        lay.addWidget(_tip(DEFAULTS_TIP))
-        lay.addWidget(_invoice_buttons(self, self._defaults))
+        lay.addWidget(_tip(JOB_ONLY_TIP.format(n=t)))
+        lay.addWidget(_invoice_buttons(self, self._defaults, "Same as Settings"))
 
     def _defaults(self):
-        """Use my defaults: the boxes as Settings say, and the window closes with OK (values() gives (None, None))."""
+        """Same as Settings: the boxes as Settings say, and the window closes with OK (values() gives (None,
+        None))."""
         self.email.setChecked(self.default_email)
         for b in self.index.buttons():
             b.setChecked(b.property("key") == self.default_index)
@@ -1836,7 +1851,11 @@ No transcript (only a caption or title page, or an e-mail)? Type the pages in <i
 the invoice bills them (a number read from an e-mail isn't billed until you type it). Several days of one case
 made together with <b>Generate all</b> get one joint invoice per attorney (unless Settings → Invoice says an
 invoice for each day), and an attorney who ordered an excerpt pays only for those pages (<b>Who pays what</b>
-and <b>Who ordered what</b> show who pays for what).</li>
+and <b>Who ordered what</b> show who pays for what). Firms that ordered the same pages split the original and
+the judge's index; each pays for its own copy, e-mailed copy and index (Settings → Invoice → <i>Index on shared
+pages</i> can split the index too). Whether there is an index depends on the
+whole transcript (every reporter's pages): 50 pages or more by default (Settings → Invoice), and
+<b>Peripherals…</b> in the Invoice panel can say yes or no for one job.</li>
 <li><b>MOFR</b>: the Minute Order Form/Receipt, the reporter's parts filled in, with the pages anyone ordered:
 one for the whole case when its days share an invoice (Generate all), listing every day.</li>
 <li><b>Run sheet</b>: an Excel sheet of a shared trial's takes (who wrote which pages), read from the
@@ -1870,7 +1889,7 @@ up, or 5 pages of a short one), the field turns amber and a warning under it say
 other count is in the ▾ list). Each attorney's agreement
 shows the pages
 that attorney ordered, and on a transcript of several reporters your invoice bills only your own pages (the
-Invoice panel's <i>Billed</i> line: "Your pages: 45 of the 83 total transcribed pages"). A number you
+Invoice panel's <i>Billed</i> line: "You wrote 45 of 83 total pages"). A number you
 type in either stays; a typed page count is what your invoice bills, and the day's pages on every agreement
 (an excerpt counts its pages of it). Typing the transcript's own count (or your own pages of it) is no number of
 yours: to bill every page of a transcript of several reporters, choose <i>Whose pages…</i> → <i>The whole
@@ -1886,16 +1905,17 @@ marked <i>for now</i>: <b>Forget</b> one, or <b>Forget all</b>, and after Save t
 with the two rows apart and asked about again. With the AI helper on, its tick of who ordered is taken from
 e-mails and pasted text only (a transcript lists who appeared, not who ordered); Settings → AI → <i>The AI may
 tick who ordered</i> changes that.</li>
-<li><b>Pick the rate sheet and the speeds</b> under Order. Its two parts say what is whose: the
-<i>invoice</i> offers every speed ticked, each at its own price; the <i>minute agreement form</i> names one
-speed at one rate per page. Settings → Invoice picks that speed (Expedited, else the slowest offered); choose
-another for one job under Order (↺ goes back). When an e-mail asks for another speed ("please send a daily
-copy"), the Order card asks which, and so does Generate.</li>
+<li><b>Pick the rate sheet</b> under <b>Minute agreement form details</b>, and the speeds the invoice offers in
+the <b>Invoice</b> panel (<i>Speeds offered</i>): the <i>invoice</i> offers every speed ticked, each at its own
+price; the <i>minute agreement form</i> names one speed at one rate per page. Settings → Invoice picks that speed
+(Expedited, else the slowest offered); choose another for one job under Minute agreement form details (↺ goes
+back). When an e-mail asks for another speed ("please send a daily copy"), that card asks which, and so does
+Generate.</li>
 <li><b>Check Who pays what</b> (under the attorneys): each firm's invoice in short, its pages, how it ordered
 them (alone, or shared with other firms) and what it pays at each speed. It follows every tick at once; its
 link spells out the whole math.</li>
-<li><b>Tick the outputs</b> and click <b>Generate</b> (Ctrl+Enter), or <b>Generate all</b>
-(Ctrl+Shift+Enter) for every ticked job in the list on the left.</li>
+<li><b>Tick the outputs</b> (each says how many files it will make, as you tick) and click <b>Generate</b>
+(Ctrl+Enter), or <b>Generate all</b> (Ctrl+Shift+Enter) for every ticked job in the list on the left.</li>
 <li><b>Look at the preview</b> and click <b>Save</b>, or <b>Go back</b> to change something: nothing is saved
 until then. Its first tab, <b>The math</b>, shows how each invoice's amount is reached. (<i>Don't show previews
 anymore</i> turns it off; Settings → Options turns it back on.) After Generate (not Generate all), the box
@@ -1924,12 +1944,16 @@ scroll them, <b>Files ▾</b> lists every file, and Ctrl+Tab / Ctrl+Shift+Tab go
 <b>Side by side</b> shows everything at once (scroll across with the bar at the bottom, or Shift and the mouse
 wheel), and Ctrl + / Ctrl - zoom it.</li>
 <li>The <b>Who ordered what</b> card shows, for each day and attorney, the pages it ordered and who
-<i>Also ordered</i> them (those share the original and the index).</li>
+<i>Also ordered</i> them (those split the original and the judge's index; each pays its own copies and
+index).</li>
 <li>Your own invoice text (shown always, or only when it applies) is in Settings → Invoice → <i>Invoice
 text</i>; <b>Preview…</b> shows a made-up invoice with it.</li>
-<li><b>The math</b> shows how each amount is reached, stretch by stretch of pages and firm by firm: in the
-preview, or after saving when previews are off (there it can be saved as a PDF for an attorney who asks;
-Settings → Options turns it on or off). Settings → Invoice can also save a
+<li><b>The math</b> shows how each amount is reached, in tables: <i>By invoice</i> (a row for each charge:
+its pages, rate and cost, whether each firm splits it or pays for its own, and what this firm pays) or
+<i>Firms side by side</i> (a column for each firm); the window keeps the one you chose last. It is in the
+preview, behind the links under Who pays what and in the Invoice panel, and after saving when previews are off
+(there it can be saved as a PDF for an attorney who asks; Settings → Options turns it on or off).
+<b>Copy all</b> copies it as text, a line for each charge. Settings → Invoice can also save a
 <i>detailed copy</i> of each invoice, with the same number, ready for when someone asks.</li>
 <li>In <b>Records</b>, type a firm, case or index number to find its invoices, tick <b>Paid</b> when they
 pay, and choose the columns with <b>Columns…</b>. Deleted records stay in the trash for 30 days; the PDFs

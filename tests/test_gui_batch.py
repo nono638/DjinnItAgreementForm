@@ -1,7 +1,7 @@
 """Drives the main window (off screen): several documents become a batch of jobs; outputs that need a
-transcript; the Outputs box (each output's options, parties, Extras... and Customize...) and the Order card's
-Speeds offered; the days of a case on one invoice, billed once by Generate all; Excerpts... (which firm ordered
-which pages) and the prices of each: its rows following a renamed firm (an attorney's name fixed is the same
+transcript; the Outputs box (each output's options and how many files it makes, parties, Peripherals... and
+Customize..., the Speeds offered in the Invoice panel, the Generate button); the days of a case on one
+invoice, billed once by Generate all; Excerpts... (which firm ordered which pages) and the prices of each: its rows following a renamed firm (an attorney's name fixed is the same
 firm), kept to be checked when an attorney is unticked or the pages are typed again, and the days it shows (those
 of the invoice); a document added or an attorney ticked while Generate all runs, and Generate tried again after a
 problem; the granular detail box of each day; File -> Lock finished PDFs; the Invoice panel in a small window;
@@ -140,7 +140,7 @@ def test_outputs_box_options(window, tmp_path):
     window.output_boxes["agreement"].setChecked(True)
     assert window.per_email.isEnabled()
 
-    # Speeds offered (in the Order card): a box per speed of the rate sheet; the ones ticked are saved and priced
+    # Speeds offered (in the Invoice panel): a box per speed of the rate sheet; the ones ticked are saved and priced
     assert set(window.inv_speed_boxes) == {sp.name for sp in window.s.sheet().speeds}
     window.add_files([str(transcript_pdf(tmp_path / "t.pdf", pages=12))])
     wait(window, lambda: len(window.cur.docs) == 1)
@@ -246,7 +246,7 @@ def test_a_day_with_nobody_ticked_is_warned_about(window, tmp_path):
     assert "nobody is ticked on 6/4/2026" in window.inv_info.text()
 
 
-def test_days_of_a_case_share_one_invoice_and_its_extras(window, tmp_path, monkeypatch):
+def test_days_of_a_case_share_one_invoice_and_its_peripherals(window, tmp_path, monkeypatch):
     from minute_filler.gui import dialogs
     window.output_boxes["invoice"].setChecked(True)
     window.add_files([str(transcript_pdf(tmp_path / "a.pdf", pages=30, date="June 3, 2026")),
@@ -254,13 +254,13 @@ def test_days_of_a_case_share_one_invoice_and_its_extras(window, tmp_path, monke
     wait(window, lambda: len(window.jobs) == 2 and all(j.docs for j in window.jobs))
     assert window.inv_info.text().startswith("Generate all: one invoice for 2 days (90 pp.)\nRegular $")
     assert "Generate this job" in window.inv_info.toolTip()
-    assert window.inv_extras_info.text().startswith("E-mailed copy, index from 50 pp.")
-    # Extras… for this job: its other day on the same invoice gets the same choice
-    monkeypatch.setattr(dialogs.InvoiceExtrasDialog, "exec", lambda self: 1)
-    monkeypatch.setattr(dialogs.InvoiceExtrasDialog, "values", lambda self: (False, "off"))
-    window._invoice_extras()
+    assert window.inv_peripherals_info.text() == "E-mailed copy, index\n(a day of 60 pages, 50 or more)"
+    # Peripherals… for this job: its other day on the same invoice gets the same choice
+    monkeypatch.setattr(dialogs.InvoicePeripheralsDialog, "exec", lambda self: 1)
+    monkeypatch.setattr(dialogs.InvoicePeripheralsDialog, "values", lambda self: (False, "off"))
+    window._invoice_peripherals()
     assert [(j.invoice_email, j.invoice_index) for j in window.jobs] == [(False, "off")] * 2
-    assert window.inv_extras_info.text() == "No e-mailed copy, no index (this job)"
+    assert window.inv_peripherals_info.text() == "No e-mailed copy (this job), no index\n(turned off for this job)"
     monkeypatch.setattr(dialogs.InvoiceShowDialog, "exec", lambda self: 1)
     monkeypatch.setattr(dialogs.InvoiceShowDialog, "values", lambda self: ["days"])
     window._invoice_show()
@@ -357,9 +357,9 @@ def test_the_price_line_says_what_generate_all_bills(window, tmp_path, monkeypat
         window.jobs[1].include = False
         return 1
 
-    monkeypatch.setattr(dialogs.InvoiceExtrasDialog, "exec", untick_meanwhile)
-    monkeypatch.setattr(dialogs.InvoiceExtrasDialog, "values", lambda self: (False, "off"))
-    window._invoice_extras()
+    monkeypatch.setattr(dialogs.InvoicePeripheralsDialog, "exec", untick_meanwhile)
+    monkeypatch.setattr(dialogs.InvoicePeripheralsDialog, "values", lambda self: (False, "off"))
+    window._invoice_peripherals()
     assert [(j.invoice_email, j.invoice_index) for j in window.jobs] == [(False, "off"), (None, None)]
 
 
@@ -469,10 +469,11 @@ def test_the_days_of_a_case_bill_each_attorney_for_its_own_days(window, tmp_path
     window.jobs[1].case.attorneys = [counsel(), smith()]
     window._show_case()
     window._refresh_outputs()
-    # Alex: 30 x (4.30 + 4 x 1.00) = 249.00, then (30 x 4.30) + 60 + 60 + 30 + 30 = 309.00; Dana: 309.00
+    # Alex: 30 x (4.30 + 4 x 1.00) = 249.00, then (60 / 2 x 4.30) + 60 + 60 + 60 (its own index) + 30 (half the
+    # judge's) = 339.00; Dana: 339.00. Expedite: 294.00 + 393.00; 393.00
     assert window.inv_info.text().splitlines() == ["Generate all: one invoice for 2 days (90 pp.)",
-                                                   "Alex B. Counsel: Regular $558.00 · Expedite (form) $654.00",
-                                                   "Dana Smith: Regular $309.00 · Expedite (form) $360.00"]
+                                                   "Alex B. Counsel: Regular $588.00 · Expedite (form) $687.00",
+                                                   "Dana Smith: Regular $339.00 · Expedite (form) $393.00"]
     assert window.inv_who.isEnabled()  # Excerpts… shows both days, whoever is ticked on the day shown
 
 
@@ -738,3 +739,188 @@ def test_a_preview_whose_records_cant_be_opened_leaves_the_window_usable(window,
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.No)
     window._preview_batch([], {}, ["agreement"], lambda _shown: None)
     assert not window.filling and window.work == 0
+
+
+# ------------------------------------------------------------------ the Outputs box, 2026-10-08
+
+def test_each_output_says_how_many_files_generate_makes(window, tmp_path):
+    """Under each ticked output's heading, how many files Generate makes of it, kept up to date as attorneys are
+    ticked ("Will generate 2 minute agreement forms"; digits, as "two minute" reads as "two-minute"); hidden while
+    the output is unticked; the invoice's detailed copies too."""
+    for key in ("agreement", "mofr"):
+        window.output_boxes[key].setChecked(True)
+    one_day_two_attorneys(window, tmp_path)
+    count = window.output_counts
+    assert count["agreement"].text() == "Will generate 2 minute agreement forms"
+    assert count["invoice"].text() == "Will generate 2 invoices" and count["mofr"].text() == "Will generate 1 MOFR"
+    window.att.item(1, 0).setCheckState(QtCore.Qt.Unchecked)  # Dana Smith unticked: at once
+    assert count["agreement"].text() == "Will generate 1 minute agreement form"
+    assert count["invoice"].text() == "Will generate 1 invoice"
+    window.output_boxes["mofr"].setChecked(False)
+    assert count["mofr"].isHidden() and not count["agreement"].isHidden()
+    window.s.invoice_detailed_copy = True
+    window._refresh_outputs()
+    assert count["invoice"].text() == "Will generate 1 invoice (and 1 detailed copy)"
+
+
+def test_with_several_jobs_the_counts_say_what_generate_all_makes(window, tmp_path):
+    """Two days of a case, Alex on both: Generate makes the day shown's (1 agreement, 1 invoice); Generate all
+    makes one agreement and one joint invoice for the case (Settings: one for the whole case)."""
+    for key in ("agreement", "invoice"):
+        window.output_boxes[key].setChecked(True)
+    two_days(window, tmp_path)
+    for job in window.jobs:
+        job.case.attorneys = [counsel()]
+    window._show_case()
+    window._refresh_outputs()
+    assert window.output_counts["agreement"].text() == "Will generate 1 minute agreement form\nGenerate all: 1"
+    assert window.output_counts["invoice"].text() == "Will generate 1 invoice\nGenerate all: 1"
+
+
+def test_the_invoice_panel_links_to_the_math(window, tmp_path, monkeypatch):
+    """The Invoice panel has the same link to the whole math as Who pays what, while there are prices."""
+    from minute_filler.gui import preview
+    shown = []
+    monkeypatch.setattr(preview.MathDialog, "exec", lambda dlg: shown.append(dlg.plain) or 0)
+    assert not window.inv_form.isRowVisible(window.inv_math)  # nothing priced yet
+    one_day_two_attorneys(window, tmp_path)
+    assert window.inv_form.isRowVisible(window.inv_math)
+    window.inv_math.linkActivated.emit("math")
+    assert len(shown) == 1 and "Bill to Alex B. Counsel" in shown[0] and "Bill to Dana Smith" in shown[0]
+    window.output_boxes["invoice"].setChecked(False)
+    assert not window.inv_form.isRowVisible(window.inv_math)
+
+
+def test_the_invoice_panel_rows_and_the_generate_button(window, tmp_path):
+    """No "Shows:" before Show granular detail; Peripherals… (not Extras…); and Generate is the main action,
+    styled to stand out (Generate all when there are several jobs)."""
+    labels = [window.inv_form.itemAt(r, QtWidgets.QFormLayout.LabelRole) for r in range(window.inv_form.rowCount())]
+    texts = [w.widget().text() for w in labels if w is not None and w.widget() is not None]
+    assert "Shows:" not in texts and "Includes:" in texts
+    assert window.inv_peripherals.text() == "Peripherals…"
+    assert window.fill_btn.objectName() == "generate" and window.fill_all_btn.objectName() == "generate"
+    two_days(window, tmp_path)
+    assert window.fill_btn.objectName() == "" and window.fill_btn.text() == "Generate this job"
+    from minute_filler.gui.theme import DARK, LIGHT, QSS
+    assert "QPushButton#generate {" in QSS and all(k in t for t in (LIGHT, DARK) for k in ("go", "go_hover"))
+
+
+def test_peripherals_are_for_this_job_only_and_say_so(qt):
+    """Peripherals… (it was Extras…): its title, the index choices for this job (Auto from the whole transcript's
+    pages, the number set in Settings), and a note that new jobs start from Settings."""
+    from minute_filler.gui.dialogs import InvoicePeripheralsDialog
+    s = pat_settings()
+    s.invoice_index_threshold = 60
+    dlg = InvoicePeripheralsDialog(None, None, s)
+    assert dlg.windowTitle() == "Peripherals for this job"
+    radios = [b.text() for b in dlg.index.buttons()]
+    assert radios == ["Auto: when the whole transcript has 60 pages or more",
+                      "Yes, for this job (however short the transcript)", "No, for this job"]
+    notes = " ".join(w.text() for w in dlg.findChildren(QtWidgets.QLabel))
+    assert "for this job only" in notes and "New jobs start from Settings → Invoice, where the 60 pages" in notes
+    assert "Auto counts every reporter's pages of the transcript, not only yours." in notes
+    assert "Same as Settings" in [b.text() for b in dlg.findChildren(QtWidgets.QPushButton)]
+    assert dlg.values() == (None, None)
+    dlg.index.buttons()[2].setChecked(True)
+    assert dlg.values() == (None, "off")
+
+
+# ------------------------------------------------------------------ found by the 2.5.0 sweep
+
+def test_generate_counts_a_day_invoiced_already_as_it_bills_it_again(window, tmp_path):
+    """Generate this job bills a day again when asked, invoiced already or not (Job.billed_keys): its count
+    says so, not "Will generate no invoice" after every Generate. Generate all doesn't bill it again."""
+    from minute_filler.batch import output_counts
+    one_day_two_attorneys(window, tmp_path)
+    window.cur.invoiced = True  # (as Generate leaves it)
+    window._update_status()
+    assert window.output_counts["invoice"].text() == "Will generate 2 invoices"
+    assert output_counts([window.cur], ["invoice"], window.s)["invoice"] == 0  # (Generate all's count)
+
+
+def test_a_keystroke_counts_the_jobs_of_generate_all_once(window, tmp_path, monkeypatch):
+    """With several jobs, the counts under the outputs and the Generate all button come from one count of every
+    job: each keystroke counted them twice (the button through files_to_make), and typing slowed down."""
+    from minute_filler import batch
+    from minute_filler.gui.widgets import plural
+    two_days(window, tmp_path)
+    real, calls = batch.output_counts, []
+    monkeypatch.setattr(batch, "output_counts", lambda jobs, *a, **k: calls.append(len(jobs)) or real(jobs, *a, **k))
+    window._update_status()
+    assert calls.count(2) == 1
+    files = sum(real(window.jobs, window._outputs(), window.s).values())
+    assert window.fill_all_btn.text() == f"Generate all  ({plural(files, 'file')})"
+
+
+def test_with_two_days_the_outputs_box_keeps_four_panels_a_row(window, tmp_path, qt):
+    """What Generate all makes goes on a line of its own under each count: at the end of the line it made the
+    panels wider, and at the window's first size (1320 wide) the Outputs box went from four panels a row to three
+    when MOFR was ticked. Measured with the app's style sheet, as on screen."""
+    from minute_filler.gui.theme import apply_theme
+    apply_theme(qt.QApplication.instance(), "light")
+    for key in ("agreement", "invoice", "mofr"):
+        window.output_boxes[key].setChecked(True)
+    two_days(window, tmp_path)
+    window.resize(1320, 860)
+    window.show()
+    for _ in range(5):
+        QtWidgets.QApplication.processEvents()
+    window._cols_per_row = 0
+    window._place_output_cols()
+    assert window.output_counts["mofr"].text().startswith("Will generate 1 MOFR\nGenerate all: ")
+    assert window._cols_per_row == 4
+
+
+def test_who_pays_what_names_only_what_each_firm_pays_for_its_own(window, tmp_path):
+    """"Each firm also pays for its own ..." says what the invoices charge: a 30-page day has no index, and with
+    the e-mailed copy turned off for the job only the copy is left (it said "copy, e-mailed copy and index"
+    whatever was charged). The tooltips say what Settings charge."""
+    from minute_filler.gui.main_window import _who_splits
+    one_day_two_attorneys(window, tmp_path)
+    assert "Each firm also pays for its own copy and e-mailed copy;" in window.pays.text()
+    window.cur.invoice_email = False
+    window._update_status()
+    assert "Each firm also pays for its own copy;" in window.pays.text()
+    s = pat_settings()
+    assert _who_splits(s)["own"] == "copy, e-mailed copy and index"
+    s.invoice_include_email = False
+    assert _who_splits(s)["own"] == "copy and index"
+    s.invoice_index_shared = "split"  # (the index is then one the firms split)
+    assert _who_splits(s) == {"shared": "the original, the index and the judge's index", "own": "copy"}
+
+
+def test_an_empty_job_still_shows_what_generate_all_makes(window, tmp_path):
+    """The job shown emptied (its only document removed) while other jobs are loaded: its own counts go, but what
+    Generate all makes is still said (the button still counts it)."""
+    from minute_filler.batch import remerge
+    window.output_boxes["agreement"].setChecked(True)
+    two_days(window, tmp_path)
+    job = window.cur
+    window._sync_from_ui()
+    job.docs.clear()  # (as Remove from job does to a day's only document)
+    remerge(job, window.s)
+    window._refresh_jobs()
+    window._show_job()
+    assert job.is_empty() and window.output_counts["agreement"].text() == "Generate all: 1"
+    assert not window.output_counts["agreement"].isHidden()
+
+
+def test_a_held_invoice_says_what_it_waits_for(window, tmp_path, monkeypatch):
+    """An invoice held until Whose pages... is chosen: Generate asks it first and then makes the invoice, so the
+    count says what it waits for, not only "no invoice"."""
+    from minute_filler.batch import Job
+    one_day_two_attorneys(window, tmp_path)
+    monkeypatch.setattr(Job, "ownership_problem", lambda self: "the transcript has pages of two reporters")
+    window._update_status()
+    assert window.output_counts["invoice"].text() == "No invoice until Whose pages… is chosen"
+
+
+def test_the_includes_line_breaks_after_a_comma_not_before_a_last_word(window):
+    """Two days indexed together (Settings: the days' pages added up): "(130 total pages over 2 days, 50 or
+    more)" is broken after its comma, not with "more)" alone on the last line."""
+    from minute_filler.gui.main_window import _lines
+    from minute_filler.invoice import InvoiceOpts
+    window.s.invoice_index_rule = "total"
+    opts = InvoiceOpts(130, 1, days=[("6/3/2026", 60), ("6/4/2026", 70)])
+    assert _lines(window._peripherals_text(opts)).splitlines() == [
+        "E-mailed copy, index", "(130 total pages over 2 days,", "50 or more)"]

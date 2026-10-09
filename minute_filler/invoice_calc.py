@@ -5,24 +5,28 @@ For one speed, with N ordering parties (quote):
     original          pages x Original rate                 (one original, shared)
     copies            pages x Copy rate  x N                (one copy per party)
     e-mailed copies   pages x Email rate x N                (optional)
-    index             pages x Index rate                    (optional, from the threshold, e.g. 50 pages;
-                                                             x N when Settings.invoice_index_shared is "each")
-    judge's index     pages x Index rate                    (with the index)
+    index             pages x Index rate x N                (optional, from the threshold, e.g. 50 pages; one per
+                                                             party, as Settings.invoice_index_shared "each" says,
+                                                             else one, shared: "split")
+    judge's index     pages x Index rate                    (with the index; one, shared)
 
     total = the sum;  each party pays total / N, rounded up to the cent
 
 An invoice can cover several days (a transcript each). Original and copies are charged on all their pages; the
 index and the judge's index on the pages of the days that get one (see index_days: by default, all of them once
-any day reaches the threshold).
+any day reaches the threshold). Whether a day gets one is judged on every page of its transcripts, whoever
+wrote them (quote's `judged`): the user's 45 pages of an 83-page transcript get an index, charged on the 45.
 
 When the parties did not all order the same pages (a day ordered by one firm, another by two; see
 invoice.DayOrder), each firm gets its own invoice priced by quote_shares: for each stretch of pages it ordered
-with n firms in all, it pays the original / n, its own copy and e-mailed copy in full, the index / n ("split")
-or in full ("each"), and the judge's index / n. Its total is rounded up to the cent. When every firm orders
-every page, that is the same as quote's per-party amount.
+with n firms in all, it pays the original / n, its own copy and e-mailed copy in full, its own index in full
+("each", the reporters' practice) or / n ("split"), and the judge's index / n. Its total is rounded up to the
+cent. When every firm orders every page, that is the same as quote's per-party amount. (100 pages, A orders
+them all and B 10 of them: A pays an index of 100 pages and 95 of the judge's, B an index of 10 and 5 of the
+judge's.)
 
-The speeds priced are those of Settings.invoice_speeds (see offered). A job's Extras... can turn the e-mailed
-copies and the index on or off for its own invoice (quotes_for); otherwise the invoice settings decide.
+The speeds priced are those of Settings.invoice_speeds (see offered). A job's Peripherals... can turn the
+e-mailed copies and the index on or off for its own invoice (quotes_for); otherwise the invoice settings decide.
 
 Money is kept in Decimal and rounded to cents (a firm's share is worked out exactly first, as a fraction).
 """
@@ -129,11 +133,14 @@ def index_days(days: list[int], mode: str = "auto", rule: str = "any", threshold
 
 
 def quote(days: int | list[int], sp: Speed, parties: int = 1, include_email: bool = True,
-          index: str | bool = "auto", rule: str = "any", threshold: int = 50, index_shared: str = "split") -> Quote:
+          index: str | bool = "auto", rule: str = "any", threshold: int = 50, index_shared: str = "each",
+          judged: list[int] | None = None) -> Quote:
     """Prices one speed for the pages of one day (an int) or of each day (a list). index: "auto" (see
-    index_days), "on", "off"; True/False are "auto"/"off". index_shared: "split" (one index, its price split
-    between the parties like the original) or "each" (an index for each party), as
-    Settings.invoice_index_shared says. See the module docstring for the arithmetic."""
+    index_days), "on", "off"; True/False are "auto"/"off". judged: the pages each day's index is judged on,
+    every page of its transcripts whoever wrote them (default: the days' own pages; the index is still charged
+    on the days' own pages). index_shared: "each" (an index for each party) or "split" (one index, its price
+    split between the parties like the original), as Settings.invoice_index_shared says. See the module
+    docstring for the arithmetic."""
     days = [days] if isinstance(days, int) else list(days)
     index = {True: "auto", False: "off"}.get(index, index)
     pages = sum(days)
@@ -149,7 +156,8 @@ def quote(days: int | list[int], sp: Speed, parties: int = 1, include_email: boo
     line("Copy", money(sp.copy), parties)
     if include_email:
         line("E-mailed copy", extra_rate(sp, "email", "e-mail"), parties)
-    indexed = sum(p for p, on in zip(days, index_days(days, index, rule, threshold)) if on)
+    on = index_days(days if judged is None else judged, index, rule, threshold)
+    indexed = sum(p for p, x in zip(days, on) if x)
     if indexed:
         idx = extra_rate(sp, "index")
         line("Index", idx, parties if index_shared == "each" else 1, indexed)
@@ -160,7 +168,7 @@ def quote(days: int | list[int], sp: Speed, parties: int = 1, include_email: boo
 @dataclass(frozen=True)
 class Share:
     """A stretch of pages one firm ordered: how many, how many firms ordered them together (n), and whether
-    its day gets an index (see index_days, judged on each day's full pages)."""
+    its day gets an index (see index_days, judged on every page of the day's transcripts: invoice.index_pages)."""
     pages: int
     n: int = 1
     indexed: bool = False
@@ -171,11 +179,11 @@ def _decimal(f: Fraction) -> Decimal:
     return Decimal(f.numerator) / Decimal(f.denominator)
 
 
-def quote_shares(shares: list[Share], sp: Speed, include_email: bool = True, index_split: bool = True,
+def quote_shares(shares: list[Share], sp: Speed, include_email: bool = True, index_split: bool = False,
                  days: list[int] | None = None) -> Quote:
     """One firm's price for one speed, from the stretches of pages it ordered (see the module docstring):
-    the original / n, its own copy and e-mailed copy, the index / n (index_split) or whole, the judge's index
-    / n. The lines show the pages charged, those shared counting 1/n each (the original of 40 pages alone and
+    the original / n, its own copy and e-mailed copy, its own index whole (or / n: index_split), the judge's
+    index / n. The lines show the pages charged, those shared counting 1/n each (the original of 40 pages alone and
     50 shared by two: 65 pages), and their parts, the pages by how many firms ordered them ([(40, 1), (50, 2)]).
     The amount is worked out exactly (Quote.due) and rounded up to the cent (Quote.per_party). days: the pages
     the firm ordered on each day, for the invoice."""
@@ -189,9 +197,8 @@ def quote_shares(shares: list[Share], sp: Speed, include_email: bool = True, ind
         if rate and count:
             amount = Fraction(rate) * count
             q.due += amount
-            shown = _decimal(count)
-            shown = shown.quantize(Decimal(1)) if count.denominator == 1 else shown.quantize(CENT, ROUND_HALF_UP)
-            shown = Decimal(format(shown.normalize(), "f"))  # 32.5 pages, not 32.50 (and 40, not 4E+1)
+            # to the cent, without trailing zeros: 32.5 pages, not 32.50 (and 40, not 40.00 or 4E+1)
+            shown = Decimal(format(_decimal(count).quantize(CENT, ROUND_HALF_UP).normalize(), "f"))
             by_n: dict[int, int] = {}
             for x in part:
                 by_n[max(1, x.n)] = by_n.get(max(1, x.n), 0) + x.pages
@@ -224,13 +231,13 @@ def offered(sheet: RateSheet, speeds: list[str], chosen: str) -> list[Speed]:
 
 
 def quotes_for(days: int | list[int], parties: int, sheet: RateSheet, s, chosen: str,
-               email: bool | None = None, index: str | None = None) -> list[Quote]:
+               email: bool | None = None, index: str | None = None, judged: list[int] | None = None) -> list[Quote]:
     """One Quote per speed the invoice offers (Settings.invoice_speeds; `chosen`, the job's own speed, when
     none of them is on the sheet), for the pages of one day or of each day. The job's own choices: email
     (True/False: an e-mailed copy) and index ("auto", "on" or "off"); None = as the invoice settings in `s`
-    say."""
+    say. judged: the pages each day's index is judged on (see quote)."""
     email = s.invoice_include_email if email is None else email
     if index is None:
         index = "auto" if s.invoice_include_index else "off"
     return [quote(days, sp, parties, email, index, s.invoice_index_rule, s.invoice_index_threshold,
-                  s.invoice_index_shared) for sp in offered(sheet, s.invoice_speeds, chosen)]
+                  s.invoice_index_shared, judged) for sp in offered(sheet, s.invoice_speeds, chosen)]

@@ -1,9 +1,11 @@
 """Builds minute_filler/templates/Invoice Template.xlsx: a spreadsheet for making transcript invoices by
 hand, with the app's arithmetic (minute_filler/invoice_calc.quote, as Settings have it by default) for an
-invoice where every party ordered every page: one original, index and judge's index, each split between the
-parties (the index one per party when Setup says so, as Settings.invoice_index_shared "each" does), a copy and
-an e-mailed copy for each, and each party's share rounded up to the cent. (Pages ordered
-by some of the parties only - the app's Excerpts... - are not in it.) All its data is fictional.
+invoice where every party ordered every page: one original and one judge's index, each split between the
+parties, an index for each party (one, split, when Setup's IndexEach is FALSE, as Settings.invoice_index_shared
+"split" does), a copy and an e-mailed copy for each, and each party's share rounded up to the cent. Whether there
+is an index is decided on the whole transcript (Job: the whole transcript's pages, every reporter's), and it is
+charged on the Pages billed, as in the app. (Pages ordered by some of the parties only - the app's Excerpts... -
+are not in it.) All its data is fictional.
 
     .venv/Scripts/python.exe tools/make_invoice_template.py
 
@@ -94,7 +96,7 @@ def build() -> Workbook:
         ("E-mailed copy for each party", True, "EmailCopies", True),
         ("Index + judge's index", True, "Indexes", True),
         ("...from this many pages", 50, "IndexFrom", True),
-        ("Index for each party (FALSE: one, split)", False, "IndexEach", True),
+        ("Index for each party (FALSE: one, split)", True, "IndexEach", True),
         ("", "", None, False),
         ("TURNAROUND WORDING", None, None, False),
         *[(sp, next(v for k, v in INVOICE_TURNAROUND.items() if speed_key(k) == speed_key(sp)), None, True)
@@ -138,6 +140,8 @@ def build() -> Workbook:
         ("Pages", 30, "Pages", True),
         ("Ordering parties", 1, "Parties", True),
         ("Speed (when not offering every speed)", "Regular", "Speed", True),
+        # whether there is an index is decided on the whole transcript, as the app does (invoice.index_pages)
+        ("Whole transcript's pages (blank: Pages)", "", "TranscriptPages", True),
         ("", "", None, False),
         ("CASE", None, None, False),
         ("Title", "Smith v. Jones", "CaseTitle", True),
@@ -182,8 +186,9 @@ def build() -> Workbook:
             f"=Pages*B{i}",                                            # one original, shared
             f"=Pages*C{i}*Parties",                                    # a copy for each party
             f"=IF(EmailCopies,Pages*D{i}*Parties,0)",
-            # one, shared (one per party when Setup's IndexEach is TRUE)
-            f"=IF(AND(Indexes,Pages>=IndexFrom),Pages*E{i}*IF(IndexEach,Parties,1),0)",
+            # one per party (Setup's IndexEach TRUE, the default; one, shared, when FALSE), when the whole
+            # transcript has the pages for one: 45 of an 83-page transcript get one
+            f"=IF(AND(Indexes,MAX(Pages,N(TranscriptPages))>=IndexFrom),Pages*E{i}*IF(IndexEach,Parties,1),0)",
             f"=IF(I{i}>0,Pages*E{i},0)",                               # one, shared
             f"=SUM(F{i}:J{i})",
             f"=ROUNDUP(ROUND(K{i}/Parties,6),2)",  # rounded up to the cent (ROUND first: no float dust)
@@ -195,9 +200,10 @@ def build() -> Workbook:
     for c in "BCDEFGHIJKLM":
         ws.column_dimensions[c].width = 13
     ws.row_dimensions[1].height = 32
-    ws["A7"] = ("Each party pays one share of the original, the index and the judge's index (the index in full "
-                "when Setup says each party gets one), plus their own copy and e-mailed copy, rounded up to the "
-                "cent. Every party orders every page.")
+    ws["A7"] = ("Each party pays one share of the original and the judge's index, plus its own copy, e-mailed copy "
+                "and index (one share of a single index when Setup's IndexEach is FALSE), rounded up to the cent. "
+                "Every party orders every page. The index comes once the whole transcript (Job: every reporter's "
+                "pages) has Setup's number of pages; it is charged on your Pages.")
     ws["A7"].font = MUTED
     name(wb, "CalcSpeeds", "Calculation!$A$2:$A$5")
     name(wb, "CalcEach", "Calculation!$L$2:$L$5")

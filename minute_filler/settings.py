@@ -4,9 +4,9 @@ Settings holds every choice (the defaults are what a new user gets) and load() b
 The tables here name the choices the window and the Settings dialog offer: the outputs (OUTPUTS), the speeds
 (SPEEDS) and which one the agreement form names when its first choice isn't offered (AGREEMENT_FALLBACKS),
 which days of an invoice get an index (INDEX_RULES), who pays the index of pages several firms ordered together
-(INDEX_SHARED), what "Show granular detail" adds to an invoice (DETAIL_ITEMS), and where the
-invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN, default_invoice_texts), when the AI may
-tick who ordered (AI_TICKS), and the folders the outputs go to when they have none of their own (OUTPUT_FOLDERS,
+(INDEX_SHARED), what "Show granular detail" adds to an invoice (DETAIL_ITEMS), how the math of the invoices is
+laid out (MATH_LAYOUTS), where the invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN,
+default_invoice_texts), when the AI may tick who ordered (AI_TICKS), and the folders the outputs go to when they have none of their own (OUTPUT_FOLDERS,
 see Settings.folder_for).
 
 A settings.json that load() can't read (locked by a sync, damaged) is never written over on the app's own: the
@@ -308,8 +308,13 @@ INDEX_RULES = {
 }
 # Who pays for the index of pages several firms ordered together: key -> label (see invoice_calc)
 INDEX_SHARED = {
-    "split": "Split between the firms",
     "each": "Each firm pays its own",
+    "split": "Split between the firms",
+}
+# How the math of the invoices is laid out (invoice_math.explain, gui.preview.MathView): key -> label
+MATH_LAYOUTS = {
+    "invoice": "By invoice",
+    "firms": "Firms side by side",
 }
 # What "Show granular detail" can add to an invoice: key -> label
 DETAIL_ITEMS = {
@@ -352,8 +357,8 @@ TEXT_WHEN = {
 }
 TEXT_PLACEHOLDERS = ("{case} {index} {dates} {pages} {total_pages} {parties} {number} {name} {bill_to} "
                      "{transcript} (\"transcript\" or \"transcripts\") {is} (\"is\" or \"are\") "
-                     "{shared} (\"the original, the index and the judge's index\", what firms ordering the same pages "
-                     "split)")
+                     "{shared} (\"the original and the judge's index\", what firms ordering the same pages split; "
+                     "with Index on shared pages split, \"the original, the index and the judge's index\")")
 
 
 def default_invoice_texts(payment: str = INVOICE_PAYMENT_TEXT, footer: str = INVOICE_FOOTER) -> list[dict]:
@@ -423,7 +428,7 @@ class Settings:
     # Output
     form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
     include_instructions: bool = True  # keep the UCS form's instructions page (page 2)
-    settings_version: int = 10        # bumped when from_dict must change something in older files
+    settings_version: int = 11        # bumped when from_dict must change something in older files
     output_dir: str = ""              # blank = next to the first input file, else Documents\Minute Agreements
     output_dirs: dict = field(default_factory=dict)  # a folder for one output (key of OUTPUTS); none = as above
     filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
@@ -438,17 +443,20 @@ class Settings:
     mofr_filename_pattern: str = MOFR_FILENAME_PATTERN
 
     # Invoices (they need pages to bill: a transcript's, or a number typed in Est. number of pages)
-    # the speeds ticked under "Speeds offered" in the Order card: the invoice lists them so the attorney can choose
+    # the speeds ticked under "Speeds offered" in the Invoice panel: the invoice lists them so the attorney can choose
     # (one alone: a single-speed invoice), and the agreement form names one of them (agreement_speed)
     invoice_speeds: list = field(default_factory=lambda: ["Regular", "Expedited"])
     invoice_include_email: bool = True  # each party also gets an e-mailed copy (Email column of the rate sheet)
     invoice_include_index: bool = True  # long transcripts get an index (Index column), plus one for the judge
-    invoice_index_threshold: int = 50  # pages from which an index is charged (see invoice_index_rule)
+    # pages from which an index is charged (see invoice_index_rule), every page of the transcript counted, whoever
+    # wrote it (invoice.index_pages)
+    invoice_index_threshold: int = 50
     invoice_index_rule: str = "any"   # one of INDEX_RULES: which days of a several-day invoice get an index
-    # one of INDEX_SHARED: the index of pages ordered by several firms is split between them (the practice:
-    # 100 pages, B orders 10 of them -> A pays 90 at the full rate and 10 at the split rate, B 10 at the split
-    # rate), or each pays its own
-    invoice_index_shared: str = "split"
+    # one of INDEX_SHARED: who pays the index of pages several firms ordered. "each" is the practice (the user,
+    # 2026-10-08): each firm pays an index of the pages it ordered, and only the judge's index is split, page by
+    # page. 100 pages, B orders 10 of them -> A pays an index of 100 pages and 95 of the judge's, B an index of
+    # 10 and 5 of the judge's. "split" shares the index like the judge's.
+    invoice_index_shared: str = "each"
     invoice_joint: bool = True        # Generate all bills the days of one case on one invoice (False: one per day)
     invoice_detail_items: list = field(default_factory=lambda: list(DETAIL_ITEMS))  # what granular detail adds
     # also save a copy of each invoice with granular detail ("... (detailed).pdf": the same number, not recorded
@@ -503,6 +511,7 @@ class Settings:
     preview_before_saving: bool = True  # Generate shows the files as pictures first; saved only on Save
     welcomed: bool = False            # the first-run "Welcome" questions were shown (once, while there is no name)
     show_math: bool = True            # after Generate makes invoices, a window spells out how each amount was reached
+    math_layout: str = "invoice"      # one of MATH_LAYOUTS: the math's tables, as last chosen in its window
     opened_year: str = ""             # the year the app was last opened in ("2026")
     new_year_day: str = ""            # the day it was first opened in a new year: the New Year yin-yang shows all day
 
@@ -757,8 +766,10 @@ class Settings:
         """Writes the rate sheets of the settings file these settings were imported from (import_from) into the
         rate sheet folder, once the user has said yes to the import. A sheet already there with other prices is
         kept, and the file's is saved next to it as "Name (imported)" ("Name (imported 2)" when that is taken by
-        yet other prices), and used when it is the one the settings name."""
-        from .rates import sheets_dir
+        yet other prices), and used when it is the one the settings name. A bundled sheet the file holds as an
+        earlier version shipped it, never edited (rates.OLD_BUNDLED: Sample Rates with Daily copies at $1.30), is
+        the sheet as it ships now: else that old copy came back as "Sample Rates (imported)", and was used."""
+        from .rates import BUNDLED_DIR, is_old_bundled, sheets_dir
         folder = sheets_dir(self.rate_sheets_dir)
 
         def same(target: Path, text: str) -> bool:
@@ -770,6 +781,12 @@ class Settings:
 
         for name, text in getattr(self, "_imported_sheets", {}).items():
             first = folder / Path(name).name  # (the name only: never a path out of the folder)
+            # (export_to read the sheet as text: its line ends are "\n", whatever they were on disk)
+            if any(is_old_bundled(first.name, t.encode("utf-8")) for t in (text, text.replace("\n", "\r\n"))):
+                try:
+                    text = (BUNDLED_DIR / first.name).read_text(encoding="utf-8-sig")
+                except OSError:
+                    continue  # (the bundled sheet can't be read: the one in the folder stays as it is)
             target, n = first, 1
             while target.exists() and not same(target, text):
                 target = first.with_name(f"{first.stem} (imported{'' if n == 1 else f' {n}'}).csv")
@@ -823,8 +840,8 @@ class Settings:
         # v4 added outputs; unknown ones are dropped. Lists and tables keep only entries of the right kind.
         s.outputs = [o for o in s.outputs if isinstance(o, str) and o in OUTPUTS]
         s.invoice_speeds = [x for x in s.invoice_speeds if isinstance(x, str)]  # none: the job's own speed
-        if data.get("invoice_choice") is False:  # v5: "offer every speed" off billed the speed chosen under
-            s.invoice_speeds = []                 # Order alone, which is what no speed ticked does now
+        if data.get("invoice_choice") is False:  # v5: "offer every speed" off billed the speed chosen for the
+            s.invoice_speeds = []                 # form alone, which is what no speed ticked does now
         s.invoice_turnaround = {k: v for k, v in s.invoice_turnaround.items()
                                 if isinstance(k, str) and isinstance(v, str)}
         s.invoice_index_threshold = max(1, s.invoice_index_threshold)
@@ -841,10 +858,13 @@ class Settings:
         if s.invoice_index_rule not in INDEX_RULES:
             s.invoice_index_rule = "any"
         # v7: "Show granular detail" moved from the settings to each job (batch.Job.invoice_detail, off for every
-        # new job; an old invoice_detail setting is ignored) and invoice_index_shared was added, so there is nothing
-        # to convert: a missing or unknown value is "split"
-        if s.invoice_index_shared not in INDEX_SHARED:
-            s.invoice_index_shared = "split"
+        # new job; an old invoice_detail setting is ignored) and invoice_index_shared was added. v11: its "split"
+        # default came from a misunderstanding (each firm pays its own index, the user said on 2026-10-08): a file
+        # saved before says "each" once; "split" chosen since stays
+        if s.invoice_index_shared not in INDEX_SHARED or (version < 11 and s.invoice_index_shared == "split"):
+            s.invoice_index_shared = "each"
+        if s.math_layout not in MATH_LAYOUTS:
+            s.math_layout = "invoice"
         s.invoice_detail_items = [k for k in s.invoice_detail_items if isinstance(k, str) and k in DETAIL_ITEMS]
         s.excerpt_hidden_speeds = [k for k in s.excerpt_hidden_speeds if isinstance(k, str)]
         # an answer about two firms: [key, key, same, name, name]; a row saved by 2.2.0 ([key, key, same]) gets

@@ -212,7 +212,7 @@ class Job:
     # the next run leaves them out (see unbill)
     invoiced_keys: list = field(default_factory=list)
     parties: int = 0             # ordering parties on the invoice; 0 = the attorneys ticked (see ticked_keys)
-    # The invoice's own choices (Extras and Customize); None = as Settings say.
+    # The invoice's own choices (Peripherals and Customize); None = as Settings say.
     invoice_email: bool | None = None  # an e-mailed copy for each party
     invoice_index: str | None = None   # the index: "auto", "on" or "off"
     invoice_show: list | None = None   # what granular detail shows (keys of settings.DETAIL_ITEMS)
@@ -683,13 +683,14 @@ class Job:
 
     def invoice_opts(self) -> InvoiceOpts:
         """The invoice's pages (of each day), ordering parties (the ticked attorneys unless set), who ordered
-        which pages, the attorneys invoiced already by a run that stopped part way, and the job's own Extras
+        which pages, the attorneys invoiced already by a run that stopped part way, and the job's own Peripherals
         and granular detail choices."""
         return InvoiceOpts(self.invoice_pages(), self.parties or max(1, len(self.ticked_keys())),
                            days=self.invoice_days(), email=self.invoice_email, index=self.invoice_index,
                            show=self.invoice_show, detail=self.invoice_detail, orders=self.invoice_orders(),
                            skip=self.billed_keys(), my_pages=self.invoice_pages(),
-                           total_pages=self.transcript_pages(), reporters=self.reporters_text())
+                           total_pages=self.transcript_pages(), reporters=self.reporters_text(),
+                           typed=self.pages_typed())
 
     def reporter_pages(self, docs: list[Doc] | None = None) -> dict[str, int]:
         """How many pages of the job's transcripts (or of these of them) each reporter wrote, by initials
@@ -882,7 +883,7 @@ class Job:
         for a run sheet, or Excerpts... rows to check for the invoice."""
         out = self.problems() if {"agreement", "mofr"} & set(outputs) else []
         if {"agreement", "mofr"} & set(outputs) and self.speed_question():  # (the speed they name)
-            out.append(f"{self.speed_question()}: choose the speed (Order card)")
+            out.append(f"{self.speed_question()}: choose the speed (Minute agreement form details)")
         if "invoice" in outputs and self.invoice_hold():
             out.append(self.invoice_hold())
         elif "invoice" in outputs and not self.invoice_pages():
@@ -926,7 +927,7 @@ class Job:
         return "no transcript PDF, and no pages typed in Est. number of pages"
 
     def file_count(self, outputs) -> int:
-        """How many agreements and MOFRs generate() makes for this job (files_to_make counts the invoices and
+        """How many agreements and MOFRs generate() makes for this job (output_counts counts the invoices and
         run sheets, which the days of a case share, and the forms made once for several days: case_forms)."""
         per = {"agreement": self.form_count(), "mofr": 1}
         return sum(per.get(o, 0) for o in outputs)
@@ -982,7 +983,7 @@ _ORIGIN_SKIP = ("agreement_date", "delivery_date")
 
 def job_origin(job: Job) -> dict:
     """Where a job came from, kept with the record of each file made from it (deliver.generate adds the case):
-    the documents read (their paths; pasted text has none) and the invoice's own choices (Extras, Excerpts...,
+    the documents read (their paths; pasted text has none) and the invoice's own choices (Peripherals, Excerpts...,
     Whose pages...)."""
     return {"sources": [d.path for d in job.docs if d.path],
             "job": {**{k: getattr(job, k) for k in _ORIGIN_CHOICES},
@@ -1498,7 +1499,7 @@ def joint_invoice(group: list[Job]) -> tuple[CaseInfo, InvoiceOpts]:
     """The case and choices for one invoice covering a group of days (see invoice_groups): the first day's
     case with every date and every attorney ticked on any day, the pages of each day and who ordered them
     (each attorney's invoice then bills only its own days and pages, see invoice.firm_invoices). Each of the
-    Extras, the granular detail shown and the parties comes from the earliest day that has one of its own, so a
+    Peripherals, the granular detail shown and the parties comes from the earliest day that has one of its own, so a
     choice isn't lost when an earlier day joins the group; the granular detail is on when any day has it on."""
     first = group[0]
     if len(group) == 1:
@@ -1513,6 +1514,7 @@ def joint_invoice(group: list[Job]) -> tuple[CaseInfo, InvoiceOpts]:
     opts.orders = [o for job in group for o in job.invoice_orders()]
     opts.my_pages, opts.total_pages = opts.pages, sum(j.transcript_pages() for j in group)
     opts.reporters = reporters_text(day_reporters(opts.orders))
+    opts.typed = any(j.pages_typed() for j in group)
 
     def own(name: str):
         """The job choice `name` of the earliest day that has one (None: none has, as Settings say)."""
@@ -1901,29 +1903,48 @@ def case_forms(group: list[Job], s: Settings, outputs) -> list[tuple[CaseForm, l
     return out
 
 
-def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
-    """How many files fill_jobs will make for these jobs: the days of one case share a run sheet, and (as
-    Settings.invoice_joint says) the invoices, one for each attorney ticked on any of its days who ordered
-    pages and was not invoiced yet (and the set of each other reporter Whose pages... bills, see
-    joint_invoice_sets). Days already invoiced (Job.invoiced), and days whose invoice is held
-    (Excerpts... rows to check, or Whose pages... to choose: Job.invoice_hold), get none. With
-    Settings.invoice_detailed_copy an invoice without the granular detail counts twice (its detailed copy). The
-    days whose agreements and MOFR are made once for all of them (form_groups) count those of case_forms."""
+def output_counts(jobs: list[Job], outputs, s: Settings | None = None, again: bool = False) -> dict[str, int]:
+    """How many files fill_jobs will make for these jobs, by output: {"agreement": 2, "mofr": 1, "invoice": 2,
+    "detailed": 0, "runsheet": 1}. The days of one case share a run sheet, and (as Settings.invoice_joint says)
+    the invoices, one for each attorney ticked on any of its days who ordered pages and was not invoiced yet (and
+    the set of each other reporter Whose pages... bills, see joint_invoice_sets). Days already invoiced
+    (Job.invoiced), and days whose invoice is held (Excerpts... rows to check, or Whose pages... to choose:
+    Job.invoice_hold), get none. again: a day already invoiced counts as one not invoiced yet, as Generate this
+    job bills it again (Job.billed_keys); Generate all doesn't. "detailed": with Settings.invoice_detailed_copy,
+    the detailed copy of each invoice without the granular detail. The days whose agreements and MOFR are made
+    once for all of them (form_groups) count those of case_forms. The window says them under each output
+    (MainWindow._show_counts)."""
     s = s or Settings()
+    out = dict.fromkeys(("agreement", "mofr", "invoice", "detailed", "runsheet"), 0)
     trials = form_groups(jobs, s) if set(FORMS) & set(outputs) else []
     in_trial = {id(j) for g in trials for j in g}
-    count = sum(j.file_count([o for o in outputs if not (o in FORMS and id(j) in in_trial)]) for j in jobs)
-    count += sum(len(case_forms(g, s, outputs)) for g in trials)
+    for j in jobs:
+        for o in outputs:
+            if o in FORMS and id(j) not in in_trial:
+                out[o] += j.file_count([o])
+    for g in trials:
+        for form, _ in case_forms(g, s, outputs):
+            out[form.kind] += 1
     if "invoice" in outputs:
-        groups = invoice_groups([j for j in jobs if not j.invoiced and not j.invoice_hold()], s)
+        groups = invoice_groups([j for j in jobs if (again or not j.invoiced) and not j.invoice_hold()], s)
         for g in groups:
             if not group_problem(g):
                 for case, opts in joint_invoice_sets(g):  # (each reporter billed)
-                    count += invoice_count(case, opts) * (2 if s.invoice_detailed_copy and not opts.detail else 1)
+                    n = invoice_count(case, opts)
+                    out["invoice"] += n
+                    if s.invoice_detailed_copy and not opts.detail:
+                        out["detailed"] += n
     cases: list[Ident] = []
     for j in jobs:
         if "runsheet" in j.makeable(outputs):
             i = ident(j.case)
             if not i or not any(same_case(i, k) for k in cases):
                 cases.append(i)
-    return count + len(cases)
+    out["runsheet"] = len(cases)
+    return out
+
+
+def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
+    """How many files fill_jobs will make for these jobs: output_counts added up (an invoice's detailed copy is a
+    file too)."""
+    return sum(output_counts(jobs, outputs, s).values())

@@ -1,12 +1,14 @@
 """Main window: drop zone, job list and paste box on the left, the current job's editable fields on the right,
 and the Outputs box at the bottom: the Generate buttons and a panel per output with its options (greyed out
-while the output is unticked). The Order card has two parts: the speeds the invoice offers, each at its price,
-and the one speed and rate the agreement form names (the Settings rule's, Settings.agreement_speed, or the
-job's own choice; when an e-mail asks for another speed, the user is asked which). Under the attorneys, "Who
-pays what" shows each firm's invoice in short as things are ticked. The Invoice panel's Extras... and Customize...
-set what the current job's invoice shows, Excerpts... which firm ordered which pages of each day of the case
-(its own window, gui/excerpts.py), and Whose pages... whose pages of a transcript of several reporters are
-billed (the user's own, by default; other reporters' on invoices in their name); with Generate all, the days
+while the output is unticked) and how many files Generate makes of it, kept up to date (_show_counts). The
+"Minute agreement form details" card holds the rate sheet and the one speed and rate the agreement form names
+(the Settings rule's, Settings.agreement_speed, or the job's own choice; when an e-mail asks for another speed,
+the user is asked which), among the speeds the invoice offers (ticked in the Invoice panel, each at its price).
+Under the attorneys, "Who pays what" shows each firm's invoice in short as things are ticked; it and the Invoice
+panel link to the whole math. The Invoice panel's Peripherals... (the e-mailed copy and the index, for this job
+only) and Customize... set what the current job's invoice shows, Excerpts... which firm ordered which pages of
+each day of the case (its own window, gui/excerpts.py), and Whose pages... whose pages of a transcript of
+several reporters are billed (the user's own, by default; other reporters' on invoices in their name); with Generate all, the days
 of one case share one invoice per attorney (batch.joint_invoice). The Run sheet box is ticked by how many
 reporters wrote a case's transcripts until the user clicks it (_auto_runsheet); New job is greyed out while
 there is nothing to clear. File -> Lock finished PDFs saves copies whose fields can no longer be changed.
@@ -52,7 +54,7 @@ from ..batch import (BATCH_EXT, HELD, NOT_INVOICED, Job, case_reporters, expand_
                      firm_questions, group, ident, input_folders, job_from_origin, job_origin, join_entries,
                      out_dir_for, read_loaders, remerge, same_case, split_forgotten)
 from ..extract_llm import OllamaExtractor
-from ..extract_regex import maybe_same_entry, use_firm_answers
+from ..extract_regex import use_firm_answers
 from ..dates import quick_date
 from ..deliver import backup_folder, backup_records, generate, ledger_for
 from ..ingest import ingest_file, ingest_pil, ingest_text
@@ -78,8 +80,8 @@ ORDER_COLS = ["Day", "Attorney", "Pages ordered", "Printed page numbers", "Also 
 ORDER_TIPS = {  # the headings' tooltips
     "Pages ordered": "The pages of the day this attorney ordered: every page, or an excerpt (Excerpts…)",
     "Printed page numbers": "The page numbers printed on those pages of the transcript",
-    "Also ordered": "The other attorneys who also ordered some of the same pages, and which (they share the "
-                    "original and the index)",
+    "Also ordered": "The other attorneys who also ordered some of the same pages, and which (they split part "
+                    "of the cost of those pages, the original among it: see Who pays what)",
     "Your pages billed": "How many of those pages its invoice bills: on a transcript of several reporters only "
                          "yours (or those chosen under Whose pages…)",
 }
@@ -88,7 +90,9 @@ NOBODY_DAY = "⚠ nobody ticked on this day: no invoice for the case until you t
 
 
 SPEEDS_TIP = ("The speeds the invoice offers, each at its own price (the attorney chooses one). One ticked:\n"
-              "the invoice bills that speed alone. They are kept for the next job too.")
+              "the invoice bills that speed alone. They are kept for the next job too.\n"
+              "The minute agreement form names one of them (Minute agreement form details → Speed), so they\n"
+              "can be ticked while Invoice is unticked too.")
 EST_PAGES_TIP = ("Counted from the transcript PDF: every page, whoever wrote it (without the word index).\n"
                  "It is read four ways (the pages up to the index, the line numbers, the printed page numbers,\n"
                  "the index from the end); when two of them agree on another count, or the index would take\n"
@@ -101,26 +105,85 @@ EST_PAGES_TIP = ("Counted from the transcript PDF: every page, whoever wrote it 
                  "agreement (an excerpt counts its pages of it). No transcript (a caption page only)?\n"
                  "Type the pages here and the invoice bills them (a number read from an e-mail isn't billed).")
 AGREEMENT_SPEED_TIP = ("The one speed written on the minute agreement form (and the MOFR), at its one rate per page,\n"
-                       "out of the speeds offered. Settings → Invoice picks it (first choice Expedited, else the\n"
-                       "slowest offered); choose another here for this job (↺ goes back to the Settings rule).\n"
+                       "out of the speeds offered (ticked in the Invoice panel). Settings → Invoice picks it\n"
+                       "(first choice Expedited, else the slowest offered); choose another here for this job\n"
+                       "(↺ goes back to the Settings rule).\n"
                        "When an e-mail asks for another speed, you are asked which.")
-PARTIES_TIP = ("How many parties ordered: the original and the index are split between them,\n"
-               "and each gets their own copy (normally the number of ticked attorneys).\n"
+# (the tips below say what firms ordering the same pages split, and what each pays for its own, as
+# Settings.invoice_index_shared says: format them with _who_splits)
+PARTIES_TIP = ("How many parties ordered: they split {shared},\n"
+               "and each pays for its own {own} (normally the number of ticked attorneys).\n"
                "No. of copies on the forms follows it.")
 WHO_TIP = ("Excerpts: one attorney ordered the whole transcript and another only pages 20 to 40?\n"
            "A table of every day of the case on that invoice: type each run of pages and tick the firms\n"
-           "that ordered it, with the prices as you go. Pages ordered together share the original and the index.")
+           "that ordered it, with the prices as you go. Pages ordered together split {shared}.")
 WHOSE_TIP = ("Several reporters wrote this transcript (the initials at the foot of the pages change).\n"
              "The invoice bills your own pages. Tick another reporter here to also make invoices in their name\n"
              "for their pages, or bill the whole transcript.")
 
 
 PAYS_TIP = ("What each firm's invoice comes to, as things stand: its pages, how it ordered them (alone, or\n"
-            "shared with other firms: they split the original and the index) and what it pays at each speed\n"
+            "shared with other firms: they split {shared}) and what it pays at each speed\n"
             "the invoice offers, with what that comes to a page (its copy, the e-mailed copy and the index\n"
             "counted in). It follows every tick at once; the link spells out the whole math.")
 
+
+def _who_splits(s) -> dict[str, str]:
+    """What firms ordering the same pages split, and what each pays for its own, as Settings say, for the
+    tooltips above: {"shared": "the original and the judge's index", "own": "copy, e-mailed copy and index"}
+    (no e-mailed copy, or no index, when Settings → Invoice charges none)."""
+    from ..invoice import own_words, shared_words
+    return {"shared": shared_words(s), "own": own_words(s)}
+
+
+def _own_words(firms, s) -> str:
+    """What each firm pays for its own on these invoices (invoice.firm_invoices), from the lines they charge:
+    "copy, e-mailed copy and index", or "copy" for a 30-page day without an index and the e-mailed copy turned
+    off for the job. Settings' index on shared pages "split" makes the index one the firms split, not their own."""
+    have = {l.label for f in firms for q in f.quotes for l in q.lines if l.amount > 0}
+    own = [w for label, w in (("Copy", "copy"), ("E-mailed copy", "e-mailed copy"), ("Index", "index"))
+           if label in have and (label != "Index" or s.invoice_index_shared == "each")]
+    return _and(own) or "copy"
+
 WARN_WIDTH = 72  # the longest line of a warning in the Invoice panel (characters; see MainWindow._warn)
+# the longest line of the Invoice panel's Billed and Includes lines (characters): they are broken into lines
+# here, not word-wrapped by the label, as a word-wrapped label in a row the form shows later (Billed) was given
+# the height of one line less than it needed, its last line cut off
+LINE_WIDTH = 40
+
+
+def _lines(text: str, width: int = LINE_WIDTH) -> str:
+    """Each line of the text broken into lines of at most `width` characters (between words)."""
+    return "\n".join(textwrap.fill(line, width) or line for line in text.split("\n"))
+
+# what each output's count says (MainWindow._show_counts): (one, several)
+COUNT_WORDS = {"agreement": ("minute agreement form", "minute agreement forms"), "invoice": ("invoice", "invoices"),
+               "mofr": ("MOFR", "MOFRs"), "runsheet": ("run sheet", "run sheets")}
+
+
+def _count_text(key: str, counts: dict | None, everyone: dict | None = None, held: str = "") -> str:
+    """The line under an output's heading: "Will generate 2 minute agreement forms", "Will generate 3 invoices
+    (and 3 detailed copies)", "Will fill in 1 run sheet", "Will generate no invoice" ("No invoice until Whose
+    pages… is chosen": held, why the job's invoice waits, Job.invoice_hold). With several jobs, what Generate all
+    makes, on a line of its own ("Generate all: 6 (+6 detailed)"): at the end of the first line it made the
+    panels wider than their other rows, and the Outputs box went from four panels a row to three. Digits, not
+    words: "two minute agreement forms" reads as "two-minute". counts, everyone: batch.output_counts of the job
+    shown (None: an empty job, only Generate all's line) and of every job ticked."""
+    one, many = COUNT_WORDS[key]
+    lines = []
+    if counts is not None:
+        verb = "Will fill in" if key == "runsheet" else "Will generate"
+        n = counts.get(key, 0)
+        text = f"{verb} {n} {one if n == 1 else many}" if n else f"No {one} until {held}" if held else \
+            f"{verb} no {one}"
+        copies = counts.get("detailed", 0) if key == "invoice" else 0
+        if copies:
+            text += f" (and {copies} detailed cop{'y' if copies == 1 else 'ies'})"
+        lines.append(text)
+    if everyone is not None:
+        extra = everyone.get("detailed", 0) if key == "invoice" else 0
+        lines.append(f"Generate all: {everyone.get(key, 0)}" + (f" (+{extra} detailed)" if extra else ""))
+    return "\n".join(lines)
 
 
 def _price_lines(firms, form_speed: str = "") -> tuple[str, bool]:
@@ -161,11 +224,12 @@ def _and(words: list[str]) -> str:
     return " and ".join(words) if len(words) < 3 else ", ".join(words[:-1]) + " and " + words[-1]
 
 
-def _pay_html(rows, form_speed: str, form_rate: str, days: int = 1, rates: str = "") -> str:
+def _pay_html(rows, form_speed: str, form_rate: str, days: int = 1, rates: str = "", own: str = "copy") -> str:
     """The "Who pays what" card as rich text: the minute agreement form's one speed and rate, then a row per
     invoice: the firm, its pages, how it ordered them and what it pays at each speed the invoice offers
     ("$408.50 ($3.40/pg)"; the agreement form's speed marked "(form)" when there are several), what a page of
-    the original costs alone and shared (rates: invoice_math.page_rates), and a link to the whole math.
+    the original costs alone and shared (rates: invoice_math.page_rates) and what each firm pays for its own
+    (own: "copy, e-mailed copy and index"), and a link to the whole math.
     rows: invoice_math.who_pays; days: how many days the invoices cover (Generate all)."""
     import html
     from ..invoice_calc import fmt
@@ -189,8 +253,8 @@ def _pay_html(rows, form_speed: str, form_rate: str, days: int = 1, rates: str =
     table.append("</table>")
     out.append("".join(table))
     if rates:
-        out.append(f"{html.escape(rates)}. Each firm also pays for its own copy; /pg is everything on its "
-                   "invoice divided by its pages.")
+        out.append(f"{html.escape(rates)}. Each firm also pays for its own {html.escape(own)}; /pg is everything "
+                   "on its invoice divided by its pages.")
     out.append("<a href='math'>How these amounts are worked out…</a>")
     return "<br>".join(out)
 
@@ -909,19 +973,11 @@ class MainWindow(QMainWindow):
         row(f, "proc_other")
         rl.addWidget(c)
 
-        # Order card: the rate sheet, then its two parts, each under its own heading: the speeds the invoice
-        # offers (each at its own price), and the one speed and one rate the minute agreement form names
-        c, cl = card("Order")
+        # Minute agreement form details: the rate sheet, the one speed and one rate the form names (among the
+        # speeds the invoice offers, ticked in the Invoice panel), No. of copies, the pages and the dates
+        c, cl = card("Minute agreement form details")
         colA, colB = two_cols(cl)
         fa, fb = form_in(colA), form_in(colB)
-
-        def subhead(form: QFormLayout, text: str, tip: str) -> None:
-            """A heading across the form, splitting it into parts."""
-            lab = QLabel(text)
-            lab.setObjectName("subhead")
-            lab.setToolTip(tip)
-            lab.setWordWrap(True)
-            form.addRow(lab)
 
         # Rate sheet, with its folder and reload buttons
         sheet_row = QHBoxLayout()
@@ -943,25 +999,12 @@ class MainWindow(QMainWindow):
         lab = QLabel("Rate sheet")
         lab.setObjectName("fieldLabel")
         fa.addRow(lab, sheet_row)
-        # the speeds chosen once: the invoice offers every one ticked, each at its price
-        subhead(fa, "Invoice: offers every speed ticked, each at its own price", SPEEDS_TIP)
-        speeds = QWidget()
-        self.inv_speeds_grid = QGridLayout(speeds)
-        self.inv_speeds_grid.setContentsMargins(0, 0, 0, 0)
-        self.inv_speeds_grid.setHorizontalSpacing(12)
-        self.inv_speeds_grid.setVerticalSpacing(2)
-        self.inv_speed_boxes: dict[str, QCheckBox] = {}
-        lab = QLabel("Speeds offered")
-        lab.setObjectName("fieldLabel")
-        lab.setToolTip(SPEEDS_TIP)
-        fa.addRow(lab, speeds)
-        # ... and the one the minute agreement form names, at its one rate per page
-        subhead(fa, "Minute agreement form: one speed, one rate per page", AGREEMENT_SPEED_TIP)
+        # the one speed the minute agreement form names, at its one rate per page
         speed_row = QHBoxLayout()
         speed_row.setSpacing(6)
         self.delivery = QuietCombo()
-        # (its items are long, "Expedite · $5.40/pg · copy $1.10 · 7 days": sized to them, the Order card's
-        # two columns no longer fitted side by side in a window of an ordinary width)
+        # (its items are long, "Expedite · $5.40/pg · copy $1.10 · 7 days": sized to them, the card's two
+        # columns no longer fitted side by side in a window of an ordinary width)
         self.delivery.setMinimumContentsLength(20)
         self.delivery.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.delivery.setToolTip(AGREEMENT_SPEED_TIP)
@@ -1020,7 +1063,7 @@ class MainWindow(QMainWindow):
         self.pages_help_row = help_box
         self.order_form = fb
         row(fb, "delivery_date")
-        # three buttons a row: six in one row would make the Order card too wide for a small screen
+        # three buttons a row: six in one row would make the card too wide for a small screen
         quick = QGridLayout()
         quick.setHorizontalSpacing(4)
         quick.setVerticalSpacing(4)
@@ -1038,7 +1081,6 @@ class MainWindow(QMainWindow):
         fb.addRow("", quick)
         row(fb, "agreement_date")
         rl.addWidget(c)
-        self._fill_invoice_speeds()
         self._fill_sheet_box()
 
         # Attorneys card
@@ -1102,9 +1144,10 @@ class MainWindow(QMainWindow):
         rl.addWidget(c)
 
         # Who pays what: each invoice in short, right under the ticks that change it, kept up to date as
-        # attorneys, speeds, Parties, Extras or Excerpts change (shown when an invoice is to be made)
+        # attorneys, speeds, Parties, Peripherals or Excerpts change (shown when an invoice is to be made)
         self.pays_card, cl = card("Who pays what (the invoices)")
-        cl.itemAt(0).widget().setToolTip(PAYS_TIP)
+        self.pays_title = cl.itemAt(0).widget()
+        self.pays_title.setToolTip(PAYS_TIP.format(**_who_splits(self.s)))
         self.pays = QLabel("")
         self.pays.setObjectName("payTable")
         self.pays.setTextFormat(Qt.RichText)
@@ -1112,7 +1155,7 @@ class MainWindow(QMainWindow):
         self.pays.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.pays.setOpenExternalLinks(False)
         self.pays.linkActivated.connect(self._show_live_math)
-        self.pays.setToolTip(PAYS_TIP)
+        self.pays.setToolTip(PAYS_TIP.format(**_who_splits(self.s)))
         cl.addWidget(self.pays)
         self._pay_firms: list = []  # the invoices the card shows (invoice.firm_invoices), for its math
         self.pays_card.setVisible(False)
@@ -1163,11 +1206,11 @@ class MainWindow(QMainWindow):
         top.addWidget(title)
         top.addStretch(1)
         self.fill_btn = QPushButton("Generate")
-        self.fill_btn.setObjectName("primary")
+        self.fill_btn.setObjectName("generate")  # (the theme makes it stand out: the one thing to click at the end)
         self.fill_btn.clicked.connect(self.fill)
         top.addWidget(self.fill_btn)
         self.fill_all_btn = QPushButton("Generate all")
-        self.fill_all_btn.setObjectName("primary")
+        self.fill_all_btn.setObjectName("generate")
         self.fill_all_btn.setToolTip("Make the ticked outputs for every ticked job (Ctrl+Shift+Enter)")
         self.fill_all_btn.clicked.connect(self.fill_all_jobs)
         top.addWidget(self.fill_all_btn)
@@ -1180,6 +1223,7 @@ class MainWindow(QMainWindow):
         self._cols_per_row = 0
         self.output_boxes: dict[str, QCheckBox] = {}
         self.output_opts: dict[str, QWidget] = {}  # each output's options, greyed out while it is unticked
+        self.output_counts: dict[str, QLabel] = {}  # how many files Generate makes of each (_show_counts)
         tips = {"agreement": "The UCS Court Reporter Minute Agreement Form, one for each ticked attorney,\n"
                              "with the pages that attorney ordered (whoever wrote them)\n"
                              "(Generate all: one per attorney for all the days of a case on one invoice,\n"
@@ -1207,6 +1251,12 @@ class MainWindow(QMainWindow):
             rule.setObjectName("outputRule")
             rule.setFixedHeight(1)
             col.addWidget(rule)
+            count = QLabel("")
+            count.setObjectName("outputCount")
+            count.setToolTip("What Generate makes of it for this job, as things are ticked now")
+            count.setVisible(False)
+            col.addWidget(count)
+            self.output_counts[key] = count
             body = QWidget()
             form = QFormLayout(body)
             form.setContentsMargins(0, 0, 0, 0)
@@ -1241,17 +1291,37 @@ class MainWindow(QMainWindow):
         self.sign_rep.setChecked(self.s.sign_reporter)
         self.sign_rep.toggled.connect(lambda v: self._set_opt("sign_reporter", v))
         ag.addRow("", self.sign_rep)
-        self.ag_speed = QLabel("")  # the one speed and rate the form names (set in the Order card)
+        self.ag_speed = QLabel("")  # the one speed and rate the form names (set in Minute agreement form details)
         self.ag_speed.setObjectName("muted")
         self.ag_speed.setToolTip("The one speed and rate per page every minute agreement form names (the MOFR\n"
-                                 "names the speed too): set under Order → Minute agreement form")
+                                 "names the speed too): set under Minute agreement form details → Speed")
         ag.addRow("Speed:", self.ag_speed)
 
         # Invoice
         inv = panel("invoice")
+        # the speeds it offers, each at its price: above the options greyed out while Invoice is unticked, as the
+        # minute agreement form names one of them too (Settings.agreement_speed)
+        speeds_box = QWidget()
+        sb = QHBoxLayout(speeds_box)
+        sb.setContentsMargins(0, 0, 0, 0)
+        sb.setSpacing(8)
+        lab = QLabel("Speeds offered:")
+        lab.setToolTip(SPEEDS_TIP)
+        sb.addWidget(lab, 0, Qt.AlignTop)
+        speeds = QWidget()
+        speeds.setToolTip(SPEEDS_TIP)
+        self.inv_speeds_grid = QGridLayout(speeds)
+        self.inv_speeds_grid.setContentsMargins(0, 0, 0, 0)
+        self.inv_speeds_grid.setHorizontalSpacing(12)
+        self.inv_speeds_grid.setVerticalSpacing(2)
+        self.inv_speed_boxes: dict[str, QCheckBox] = {}
+        sb.addWidget(speeds)
+        sb.addStretch(1)
+        col = self._output_cols[-1].layout()
+        col.insertWidget(col.indexOf(self.output_opts["invoice"]), speeds_box)
         self.inv_parties = QSpinBox()
         self.inv_parties.setRange(1, 20)
-        self.inv_parties.setToolTip(PARTIES_TIP)
+        self.inv_parties.setToolTip(PARTIES_TIP.format(**_who_splits(self.s)))
         self.inv_parties.valueChanged.connect(self._invoice_parties_changed)
         parties = QHBoxLayout()
         parties.setSpacing(8)
@@ -1264,12 +1334,8 @@ class MainWindow(QMainWindow):
         # a transcript of several reporters: whose pages are billed (shown only for such a transcript)
         self.inv_pages_row = QHBoxLayout()
         self.inv_pages_row.setSpacing(8)
-        self.inv_pages_info = QLabel("")
-        self.inv_pages_info.setObjectName("muted")
-        # "Your pages: 45 of the 83 total transcribed pages" wraps in the narrow panel, taking the width the
-        # button leaves (a stretch after the button would take half of it, and the lines past the second be cut)
-        self.inv_pages_info.setWordWrap(True)
-        self.inv_pages_info.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        self.inv_pages_info = QLabel("")  # (its lines broken by _lines; a stretch after the button would take
+        self.inv_pages_info.setObjectName("muted")  # half the row's width)
         self.inv_pages_row.addWidget(self.inv_pages_info, 1)
         self.inv_whose = QPushButton("Whose pages…")
         self.inv_whose.setToolTip(WHOSE_TIP)
@@ -1291,22 +1357,36 @@ class MainWindow(QMainWindow):
             row.addStretch(1)
             return row
 
-        self.inv_extras_info = QLabel("")
-        self.inv_extras_info.setObjectName("muted")
-        inv.addRow("Includes:", with_button(
-            self.inv_extras_info, "Extras…", "The e-mailed copy and the index, for this job's invoice only\n"
-            "(your defaults are in Settings → Invoice)", self._invoice_extras))
+        # what it includes besides the original and the copies (and why: "index (83 total pages, 50 or more)");
+        # Peripherals... changes it for this job only. Its lines are broken as the Billed row's are.
+        includes = QHBoxLayout()
+        includes.setSpacing(8)
+        self.inv_peripherals_info = QLabel("")
+        self.inv_peripherals_info.setObjectName("muted")
+        includes.addWidget(self.inv_peripherals_info, 1)
+        self.inv_peripherals = QPushButton("Peripherals…")
+        self.inv_peripherals.setToolTip("The e-mailed copy and the index, for this job's invoice only\n"
+                                   "(new jobs start from Settings → Invoice)")
+        self.inv_peripherals.clicked.connect(self._invoice_peripherals)
+        includes.addWidget(self.inv_peripherals, 0, Qt.AlignTop)
+        inv.addRow("Includes:", includes)
         self.inv_detail = QCheckBox("Show granular detail")
         self.inv_detail.setToolTip("For this job's invoice only (off for every new job): also show what Customize…\n"
                                    "lists, such as the page count, the price per page and the charges in each amount.\n"
                                    "Unticked, the invoice shows each speed's turnaround and amount only.")
         self.inv_detail.toggled.connect(self._invoice_detail_changed)
-        inv.addRow("Shows:", with_button(
+        inv.addRow("", with_button(
             self.inv_detail, "Customize…", "What granular detail shows on this job's invoice\n"
             "(your defaults are in Settings → Invoice)", self._invoice_show))
         self.inv_info = QLabel("")
         self.inv_info.setObjectName("muted")
         inv.addRow("Prices:", self.inv_info)
+        # the whole math of the invoices priced, as under Who pays what (shown while there are prices)
+        self.inv_math = QLabel('<a href="math">How these amounts are worked out…</a>')
+        self.inv_math.setToolTip("The math of each invoice, charge by charge, as things stand now")
+        self.inv_math.linkActivated.connect(self._show_live_math)
+        inv.addRow("", self.inv_math)
+        inv.setRowVisible(self.inv_math, False)
 
         # MOFR
         mo = panel("mofr")
@@ -1340,6 +1420,7 @@ class MainWindow(QMainWindow):
         self.rs_folder.linkActivated.connect(lambda _: self._open_run_sheets_folder())
         col = self._output_cols[-1].layout()
         col.insertWidget(col.count() - 1, self.rs_folder)  # above the stretch
+        self._fill_invoice_speeds()
         self._place_output_cols()
         root.addWidget(foot)
         self._refresh_jobs()
@@ -1898,7 +1979,7 @@ class MainWindow(QMainWindow):
         self.fill_btn.setText("Generate this job" if multi else "Generate")
         self.fill_btn.setToolTip("Make the ticked outputs for the day shown alone: its own agreements, MOFR and "
                                  "invoice (Ctrl+Enter)" if multi else "Make the ticked outputs (Ctrl+Enter)")
-        self.fill_btn.setObjectName("" if multi else "primary")
+        self.fill_btn.setObjectName("" if multi else "generate")  # (Generate all is the one to click then)
         repolish(self.fill_btn)
         self.job_list.blockSignals(True)
         self.job_list.clear()
@@ -1911,8 +1992,9 @@ class MainWindow(QMainWindow):
         self._refresh_job_labels()
         self._size_drop_later()  # measured again once the column's new contents are laid out
 
-    def _refresh_job_labels(self):
-        """Updates each job's line, tooltip and tick, the count above the list and the Generate all button."""
+    def _refresh_job_labels(self, counts: dict | None = None):
+        """Updates each job's line, tooltip and tick, the count above the list and the Generate all button.
+        counts: batch.output_counts of the jobs Generate all makes, when just counted (_show_counts)."""
         self.job_list.blockSignals(True)  # setting the ticks must not look like the user clicking them
         for row, job in enumerate(self.jobs):
             item = self.job_list.item(row)
@@ -1932,7 +2014,8 @@ class MainWindow(QMainWindow):
         if saved:
             text += f"  ·  {saved} saved (✓)"
         self.jobs_label.setText(text)
-        files = files_to_make(chosen, outputs, self.s)  # days of a case share a run sheet, invoices too
+        # days of a case share a run sheet, invoices too
+        files = sum(counts.values()) if counts is not None else files_to_make(chosen, outputs, self.s)
         self.fill_all_btn.setText(f"Generate all  ({plural(files, 'file')})")
         self.fill_all_btn.setEnabled(bool(chosen) and bool(outputs) and not self.filling)
 
@@ -2290,7 +2373,7 @@ class MainWindow(QMainWindow):
         self._apply_speed()
 
     def _show_rate_info(self):
-        """The line under the Order card's Rate field: the copy rate, the speed's other prices and when the
+        """The line under the Rate field (Minute agreement form details): the copy rate, the speed's other prices and when the
         rates changed."""
         sheet = self.s.sheet()
         sp = sheet.find(self.delivery.currentData() or "")
@@ -2403,11 +2486,12 @@ class MainWindow(QMainWindow):
         """Brings the Outputs box and the cards under the attorneys (_refresh_outputs, which also brings the
         Excerpts window along), the status pill, the question about rows that may be one firm and, in a batch,
         the job list up to date."""
-        self._refresh_outputs()
+        self._all_counts = None
+        self._refresh_outputs()  # (it counts what Generate all makes: _all_counts)
         self._show_firm_question()
         self._job_status()
         if len(self.jobs) > 1:
-            self._refresh_job_labels()
+            self._refresh_job_labels(self._all_counts)
 
     def _show_firm_question(self) -> None:
         """The Attorneys card's question when two rows of the job, or of its case's other days, may be one firm or
@@ -2658,7 +2742,7 @@ class MainWindow(QMainWindow):
             reasons = {"invoice": "An invoice needs pages to bill, and the Pages field says 0."
                        if job.transcript_pages() or job.pages_typed() else
                        "An invoice needs pages to bill, and this job has no transcript PDF: type the pages to bill "
-                       "in Est. number of pages (Order card) to make one.",
+                       "in Est. number of pages (Minute agreement form details) to make one.",
                        "runsheet": "A run sheet needs a transcript PDF (the initials on its pages), and this job "
                                    "has none."}
             why = "\n".join(reasons[o] for o in missing if o in reasons)
@@ -3459,13 +3543,14 @@ class MainWindow(QMainWindow):
         self._show_pages_help(job)
         self._show_form_speed()
         self._show_who_pays(*self._show_invoice_prices())  # (the invoices priced once for both)
+        self._show_counts()
         self._show_orders()
         self._place_output_cols()  # the prices may need more room than the panels have
         self._update_header_buttons()
         self._follow_excerpts()
 
     def _show_invoice_prices(self) -> tuple[list | None, int]:
-        """The Invoice panel's parties, extras and prices for the current job. When Generate all bills it with
+        """The Invoice panel's parties, Includes line (Peripherals…) and prices for the current job. When Generate all bills it with
         other days of its case, the first line says so and the prices are the joint invoice's. When the
         attorneys don't all pay the same (they ordered different days or pages), a line per attorney. Returns
         the invoices priced (invoice.firm_invoices; None when there are none to price, the panel saying why)
@@ -3482,15 +3567,15 @@ class MainWindow(QMainWindow):
             self.inv_parties.setValue(opts.parties)
         self.inv_parties.setEnabled(not split)
         self.inv_parties.setToolTip("This day's pages are split between the attorneys under Excerpts…" if split
-                                    else PARTIES_TIP)
+                                    else PARTIES_TIP.format(**_who_splits(self.s)))
         why = self._who_ordered_why(job)
         self.inv_who.setEnabled(not why or split)  # rows that need checking can always be opened, to fix them
         self.inv_who.setText("⚠ Excerpts…" if check else "✓ Excerpts…" if split else "Excerpts…")
-        self.inv_who.setToolTip(check + "\n(click to check it)" if check else why or WHO_TIP)
+        self.inv_who.setToolTip(check + "\n(click to check it)" if check else why or WHO_TIP.format(**_who_splits(self.s)))
         owned = self._show_whose_pages(job)
         with QSignalBlocker(self.inv_detail):
             self.inv_detail.setChecked(job.invoice_detail)  # this job's own (Generate this job uses it)
-        self.inv_extras_info.setText(self._extras_text(opts))
+        self.inv_peripherals_info.setText(_lines(self._peripherals_text(opts)))
         self.inv_info.setToolTip("")
         if not job.invoice_pages() and not owned:
             if not job.docs:
@@ -3550,9 +3635,9 @@ class MainWindow(QMainWindow):
         """The one speed and rate the minute agreement form names: 'Expedite · $5.65 a page'."""
         speed, rate = self.case.get("delivery"), self.case.get("rate")
         if not speed:
-            return "(none: choose one under Order)"
+            return "(none: choose one under Minute agreement form details)"
         if not rate:
-            return f"{speed} · no rate (type it under Order)"
+            return f"{speed} · no rate (type it under Minute agreement form details)"
         return f"{speed} · ${rate.lstrip('$')} a page"
 
     def _show_form_speed(self) -> None:
@@ -3571,19 +3656,47 @@ class MainWindow(QMainWindow):
         on = self.output_boxes["invoice"].isChecked() and bool(job.invoice_pages() or job.ownership_problem())
         self.pays_card.setVisible(on)
         self._pay_firms = list(firms or []) if on else []
+        self.inv_form.setRowVisible(self.inv_math, bool(self._pay_firms))  # (the Invoice panel's link to the math)
         if not on:
             return
+        tip = PAYS_TIP.format(**_who_splits(self.s))  # (as Settings say now)
+        self.pays_title.setToolTip(tip)
+        self.pays.setToolTip(tip)
         if firms:
             text = _pay_html(who_pays(firms), self.case.get("delivery"), self.case.get("rate"), days,
-                             page_rates(firms))
+                             page_rates(firms), _own_words(firms, self.s))
         else:
             why = self.inv_info.text() or "Nothing to bill yet."
             text = html.escape(why).replace("\n", "<br>")
         if text != self.pays.text():  # (set only when it changes: it is worked out at every keystroke)
             self.pays.setText(text)
 
+    def _show_counts(self) -> None:
+        """Under each ticked output's heading, how many files Generate makes of it for the job shown ("Will
+        generate 2 minute agreement forms", batch.output_counts) and, with several jobs, how many Generate all
+        makes; it follows every tick (attorneys, outputs, Excerpts...). Hidden while the output is unticked, and
+        for an empty job when it is the only one. What Generate all makes is kept in _all_counts for the job
+        list's button (_refresh_job_labels), so a keystroke counts every job once, not twice."""
+        from ..batch import output_counts
+        outputs, job = self._outputs(), self.cur
+        shown = not job.is_empty()
+        # (again: Generate this job bills a day invoiced already once more; Generate all doesn't)
+        counts = output_counts([job], outputs, self.s, again=True) if shown else None
+        everyone = None
+        if len(self.jobs) > 1:
+            everyone = output_counts([j for j in self.jobs if j.include and not j.is_empty()], outputs, self.s)
+        self._all_counts = everyone
+        held = ""
+        if shown and "invoice" in outputs and job.invoice_hold():  # (Generate asks first: see invoice_hold)
+            held = "Excerpts… is checked" if job.portions_problem() else "Whose pages… is chosen"
+        for key, label in self.output_counts.items():
+            on = key in outputs and (shown or everyone is not None)
+            label.setText(_count_text(key, counts, everyone, held if key == "invoice" else "") if on else "")
+            label.setVisible(on)
+
     def _show_live_math(self, _link: str = "") -> None:
-        """The card's link: the whole math of the invoices it shows, as things stand (preview.MathDialog)."""
+        """The links of the Who pays what card and the Invoice panel: the whole math of the invoices the card
+        shows, as things stand (preview.MathDialog)."""
         if not self._pay_firms:
             return
         from .preview import MathDialog
@@ -3607,8 +3720,9 @@ class MainWindow(QMainWindow):
         self.pages_warn.setVisible(bool(warning))
 
     def _show_whose_pages(self, job: Job) -> str:
-        """The Invoice panel's Billed row, shown for a transcript of several reporters: "Your pages: 65 of the 153 total
-        transcribed pages" (the whole transcripts' own pages, the word index left out),
+        """The Invoice panel's Billed row, shown for a transcript of several reporters: "You wrote 65 of 153 total
+        pages" (the whole transcripts' own pages, the word index left out; "Billing 153 of 153 total pages (chosen
+        under Whose pages…)" when Whose pages... chose others, "The Pages field: 40 of 153 total pages" when typed),
         and the Whose pages... button. Returns why the invoice is held until Whose pages... says ("" when it
         isn't)."""
         shared = job.shared_transcripts()
@@ -3621,18 +3735,20 @@ class MainWindow(QMainWindow):
         if held:
             text = "Whose pages?"
         elif job.pages_typed():
-            text = f"the Pages field ({job.invoice_pages()}) of the {whole} total transcribed pages"
+            text = f"The Pages field: {job.invoice_pages()} of {whole} total pages"
+        elif mine:
+            text = f"You wrote {job.invoice_pages()} of {whole} total pages"
         else:
-            text = f"{'Your' if mine else 'Chosen'} pages: {job.invoice_pages()} of the {whole} total transcribed pages"
+            text = f"Billing {job.invoice_pages()} of {whole} total pages\n(chosen under Whose pages…)"
         others = [r for r in job.bill_reporters() if r != "me"]
         if others and not held:  # invoices in other reporters' names too (Whose pages... ticked them)
             if "me" not in job.bill_reporters():
                 text = "Not yours"
-            text += "  ·  also " + ", ".join(f"{r.upper()}'s ({job.billed_by(r).invoice_pages()})" for r in others)
+            text += "\nalso " + ", ".join(f"{r.upper()}'s ({job.billed_by(r).invoice_pages()})" for r in others)
             bare = [r.upper() for r in others if not self.s.reporter(r).has_details()]
             if bare:
                 text += f"\n⚠ no invoice details for {', '.join(bare)}: Settings → Run sheet → Invoices for"
-        self.inv_pages_info.setText(text)
+        self.inv_pages_info.setText(_lines(text))
         self.inv_whose.setText("⚠ Whose pages…" if held else "Whose pages…")
         self.inv_whose.setToolTip(held or WHOSE_TIP)
         return held
@@ -3851,26 +3967,32 @@ class MainWindow(QMainWindow):
                     return g
         return [cur]
 
-    def _extras_text(self, opts) -> str:
-        """'E-mailed copy, index from 50 pp.' - what the invoice includes; '(this job)' when it isn't as
-        Settings say."""
+    def _peripherals_text(self, opts) -> str:
+        """What the invoice includes besides the original and the copies, and whether there is an index and why
+        (invoice.index_reason, on every page of the transcripts), why on a line of its own: 'E-mailed copy,
+        index\n(83 total pages, 50 or more)', 'E-mailed copy, no index\n(40 total pages, under 50)', 'No e-mailed
+        copy (this job), index\n(turned on for this job)'. With no pages yet, the rule: 'E-mailed copy, index from
+        50 pages'."""
+        from ..invoice import index_mode, index_reason, indexed_days
         s = self.s
         email = s.invoice_include_email if opts.email is None else opts.email
-        index = ("auto" if s.invoice_include_index else "off") if opts.index is None else opts.index
-        text = ", ".join(("e-mailed copy" if email else "no e-mailed copy",
-                          {"auto": f"index from {s.invoice_index_threshold} pp.", "on": "index",
-                           "off": "no index"}[index]))
-        own = opts.email is not None or opts.index is not None
-        return text[0].upper() + text[1:] + (" (this job)" if own else "")
+        text = ("E-mailed copy" if email else "No e-mailed copy") + (" (this job)" if opts.email is not None else "")
+        if index_mode(opts, s) == "auto" and not opts.pages:
+            return f"{text}, index from {s.invoice_index_threshold} pages"
+        why = f"({index_reason(opts, s)})"  # (on a line of its own)
+        if len(why) > LINE_WIDTH and ", " in why:  # broken after its comma, not with "more)" left on a line alone
+            head, _, tail = why.rpartition(", ")
+            why = f"{head},\n{tail}"
+        return f"{text}, {'index' if any(indexed_days(opts, s)) else 'no index'}\n{why}"
 
-    def _invoice_extras(self):
-        """Extras…: the e-mailed copy and the index for this job's invoice, and the other days on it."""
+    def _invoice_peripherals(self):
+        """Peripherals…: the e-mailed copy and the index for this job's invoice, and the other days on it."""
         from ..batch import joint_invoice
-        from .dialogs import InvoiceExtrasDialog
+        from .dialogs import InvoicePeripheralsDialog
         job = self.cur
         group = self._invoice_group(job)
         opts = joint_invoice(group)[1]
-        dlg = InvoiceExtrasDialog(opts.email, opts.index, self.s, len(group), self)
+        dlg = InvoicePeripheralsDialog(opts.email, opts.index, self.s, len(group), self)
         if dlg.exec():
             email, index = dlg.values()
             for day in self._invoice_group(job):  # as it is now: a read may have ended meanwhile
@@ -3915,7 +4037,7 @@ class MainWindow(QMainWindow):
             self.output_grid.setColumnStretch(col, 1 if col < per_row else 0)  # the panels share the width
 
     def _place_pairs(self) -> None:
-        """Puts the two columns of the Case and Order cards side by side when the form has room for both, else
+        """Puts the two columns of the Case and Minute agreement form details cards side by side when the form has room for both, else
         one above the other, so the form never needs scrolling sideways."""
         scroll = getattr(self, "form_scroll", None)
         if scroll is None:
@@ -3973,8 +4095,8 @@ class MainWindow(QMainWindow):
         self._size_drop_later()
 
     def _fill_invoice_speeds(self):
-        """The Order card's Speeds offered: a box per speed of the current rate sheet with its price
-        ("Regular  $4.30/pg"), cheapest first as on the invoice, ticked for the speeds invoices offer
+        """The Invoice panel's Speeds offered: a box per speed of the current rate sheet with its price
+        ("Regular  $4.30/pg"), cheapest first as on the invoice, two a row, ticked for the speeds invoices offer
         (Settings.invoice_speeds)."""
         from ..rates import speed_key
         while self.inv_speeds_grid.count():
@@ -3988,7 +4110,7 @@ class MainWindow(QMainWindow):
         except Exception:  # a broken rate sheet must not break the window
             speeds = []
         names = [sp.name for sp in speeds]
-        per_row = 2 if len(names) > 3 else 3  # four boxes in a row would make the Order card's column too wide
+        per_row = 2  # (more in a row would make the Invoice panel, and the Outputs box, too wide)
         for i, sp in enumerate(speeds):  # cheapest first: the order of the Speed box and of the invoice
             name = sp.name
             cb = QCheckBox(f"{name}  ${sp.original}/pg" if sp.original else name)

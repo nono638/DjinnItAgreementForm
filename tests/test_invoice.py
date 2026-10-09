@@ -1,5 +1,5 @@
-"""Invoice pricing (same numbers as the reporter's spreadsheet; one index split between the parties, or one for
-each as these tests mostly take it: Settings.invoice_index_shared), the speeds an invoice offers
+"""Invoice pricing (same numbers as the reporter's spreadsheet; an index for each party, the default, or one
+split between them: Settings.invoice_index_shared), the speeds an invoice offers
 (Settings.invoice_speeds: several, one, or none for the job's own speed) and the invoice PDF: the amounts only
 by default or with granular detail, its values as fields that can be changed, locked or flattened, and its
 entry in the records. Invoices for several days are in test_joint_invoice.py."""
@@ -24,7 +24,7 @@ from helpers import ROE, make_case, pat_settings
 def s():
     s = pat_settings(email="pat@example.com")  # with the bundled "Sample Rates" sheet
     s.invoice_speeds = ["Regular", "Expedited", "Daily"]
-    s.invoice_index_shared = "each"  # the numbers below were worked out with an index for each party
+    s.invoice_index_shared = "each"  # (the default) the numbers below were worked out with an index for each party
     return s
 
 
@@ -41,10 +41,10 @@ def test_ten_pages_one_party_matches_the_spreadsheet(s):
     got = amounts(quotes_for(10, 1, s.sheet(), s, "Regular"))
     assert got == {"Regular": (Decimal("63.00"), Decimal("63.00"), Decimal("6.30")),
                    "Expedite": (Decimal("76.00"), Decimal("76.00"), Decimal("7.60")),
-                   "Daily": (Decimal("91.00"), Decimal("91.00"), Decimal("9.10"))}
+                   "Daily": (Decimal("90.00"), Decimal("90.00"), Decimal("9.00"))}  # 10 x (6.50 + 1.25 + 1.25)
 
 
-def test_index_from_fifty_pages_and_split_between_parties(s):
+def test_index_from_fifty_pages_one_for_each_party_or_split(s):
     sp = s.sheet().find("Regular")
     q49 = quote(49, sp, 2)
     assert [l.label for l in q49.lines] == ["Original", "Copy", "E-mailed copy"]
@@ -52,9 +52,10 @@ def test_index_from_fifty_pages_and_split_between_parties(s):
     # 60 x (4.30 + 2x1.00 + 2x1.00 + 2x1.00 index + 1.00 judge's index) = 678.00
     assert [l.label for l in q.lines] == ["Original", "Copy", "E-mailed copy", "Index", "Judge's index"]
     assert q.total == Decimal("678.00") and q.per_party == Decimal("339.00") and q.per_page == Decimal("5.65")
-    # "split" (the default): one index, its price split like the original's
+    assert quote(60, sp, 2) == q  # (the default)
+    # "split": one index, its price split like the original's
     # 60 x (4.30 + 2x1.00 + 2x1.00 + 1.00 index + 1.00 judge's index) = 618.00
-    q = quote(60, sp, 2)
+    q = quote(60, sp, 2, index_shared="split")
     assert next(l for l in q.lines if l.label == "Index").qty == 1
     assert q.total == Decimal("618.00") and q.per_party == Decimal("309.00")
 
@@ -130,13 +131,14 @@ def test_invoice_pdf_and_record(case, s, tmp_path):
     assert f["invoice_no"] == f"{date.today().year}-0001" and f["index_no"] == "712345/2021"
     assert f["bill_to"].splitlines()[:2] == ["Alex Example", "Example Firm LLP"]
     assert f["case"].startswith("Jane Roe v. X.Y.")
-    assert (f["amount Regular"], f["amount Expedite"], f["amount Daily"]) == ("$339.00", "$393.00", "$468.00")
+    # Daily: 60 x (6.50 + 2 x 1.25 copies + 2 x 1.25 e-mailed + 2 x 1.25 indexes + 1.25 judge's) = 915.00, / 2
+    assert (f["amount Regular"], f["amount Expedite"], f["amount Daily"]) == ("$339.00", "$393.00", "$457.50")
     assert "pages" not in f and LOCK_BUTTON not in f  # no Lock fields button any more (1.3.1)
     assert widget_values(paths[1])["bill_to"].startswith("Sam Advocate")
     invs = ledger.invoices()
     assert len(invs) == 2 and invs[0].invoice_no != invs[1].invoice_no
     first = next(i for i in invs if i.firm == "Example Firm LLP")
-    assert first.amounts == {"Regular": "339.00", "Expedite": "393.00", "Daily": "468.00"}
+    assert first.amounts == {"Regular": "339.00", "Expedite": "393.00", "Daily": "457.50"}
     assert first.billed == Decimal("339.00") and first.pages == 60 and first.parties == 2
     assert paths[0].name.startswith("Invoice " + first.invoice_no)
 

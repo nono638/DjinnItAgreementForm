@@ -10,7 +10,7 @@ it. Under the table the same prices by the firms ordering together ("A + B: 15 p
 firm's invoice. Split run cuts a run in two; Remove run (or the Delete key) gives a run's pages to the run above it
 (excerpts.remove: every page stays in one run); Remove this day's excerpts makes a day one run again, Remove all
 excerpts every day of the case. A right-click on a run offers the same. Every change is kept at once (on the days'
-jobs) and the main window follows it; a change made there (an attorney ticked, a speed, Extras...) shows here at
+jobs) and the main window follows it; a change made there (an attorney ticked, a speed, Peripherals...) shows here at
 once too: the window stays open beside it.
 """
 from __future__ import annotations
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from ..excerpts import (
     Day, Run, billed_in, carve, case_days, firms_of, prices, remove, runs_of, store, whole_day,
 )
+from ..invoice import own_words, shared_words
 from ..invoice_calc import fmt
 from ..invoice_math import money_exact
 from .zoom import z
@@ -74,9 +75,9 @@ class ExcerptsWindow(QDialog):
         lay = QVBoxLayout(self)
         intro = QLabel("A row per run of pages. Type a run in the transcript's page numbers (141-170) and the rows "
                        "around it make room; tick the firms that ordered it. Remove run (or Delete) gives a run's "
-                       "pages to the run above; right-click a run for more. Pages several firms ordered share the "
-                       "original and the index; each firm pays its own copy. A run nobody ticks is billed to nobody. "
-                       "Each colour is one set of firms ordering together, as listed under the table.")
+                       f"pages to the run above; right-click a run for more. Pages several firms ordered split "
+                       f"{shared_words(s)}; each firm pays for its own {own_words(s)}. A run nobody ticks is billed "
+                       "to nobody. Each colour is one set of firms ordering together, as listed under the table.")
         intro.setWordWrap(True)
         intro.setObjectName("muted")
         lay.addWidget(intro)

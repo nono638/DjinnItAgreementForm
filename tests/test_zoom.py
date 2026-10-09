@@ -78,8 +78,8 @@ def test_the_window_fits_a_small_screen(window, monkeypatch):
 
 
 def test_the_form_never_scrolls_sideways(window, qt):
-    """The Case and Order cards put their two columns one above the other when the form is too narrow for
-    both (Windows scaling, a zoom): before, the Order card needed 1,050 px and the form scrolled sideways."""
+    """The Case and Minute agreement form details cards put their two columns one above the other when the form is too narrow for
+    both (Windows scaling, a zoom): before, that card (then Order) needed 1,050 px and the form scrolled sideways."""
     window.resize(1320, 860)
     window.show()
     for f in (1.0, 1.4):
@@ -91,7 +91,7 @@ def test_the_form_never_scrolls_sideways(window, qt):
         form = window.form_scroll
         assert form.widget().minimumSizeHint().width() <= form.viewport().width(), f
     stacked = [g.itemAtPosition(0, 1) is None for g, _, _ in window._pairs]
-    assert any(stacked)  # at 140 % the Order card's columns are one above the other
+    assert any(stacked)  # at 140 % the form details card's columns are one above the other
 
 
 def test_ctrl_wheel_steps_once_a_notch_however_finely_it_turns(window, qt, monkeypatch):

@@ -58,7 +58,7 @@ def open_url(url: str) -> None:
 
 class QuietCombo(QComboBox):
     """A combo box the mouse wheel doesn't change until it is clicked: scrolling the window over it scrolls the
-    window. (A wheel over the Order card's speed once changed it, and made that speed the job's own choice.)"""
+    window. (A wheel over the agreement form's Speed once changed it, and made that speed the job's own choice.)"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

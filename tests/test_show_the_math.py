@@ -1,5 +1,7 @@
-"""Show the math: the window that spells out how the amounts of the invoices just made were reached (copied,
-saved as a PDF, turned off), and the detailed copy of each invoice. Also the recap's jokes (April Fools, "But
+"""Show the math: the window that spells out how the amounts of the invoices just made were reached, in tables
+(by invoice, or the firms side by side, the layout switched and kept; copied as text, saved as a PDF, turned
+off), the note under each invoice (the pages the user wrote, the index and why), and the detailed copy of
+each invoice. Also the recap's jokes (April Fools, "But
 who's counting?"), the New Year yin-yang on the first day of the year the app is used, and "The math" as a tab
 of the preview before saving. All names and numbers are made up; prices are from the bundled "Sample Rates"
 sheet (Regular: original $4.30, copy, e-mailed copy and index $1.00 a page)."""
@@ -12,7 +14,7 @@ import pytest
 
 from helpers import ROE, make_case, pat_settings, transcript_pdf
 from minute_filler.deliver import generate, ledger_for
-from minute_filler.invoice import FirmInvoice, InvoiceOpts, firm_invoices
+from minute_filler.invoice import DayOrder, FirmInvoice, InvoiceOpts, Portion, firm_invoices
 from minute_filler.invoice_calc import Share, quote_shares
 from minute_filler.invoice_math import explain, to_pdf
 from minute_filler.models import Attorney
@@ -58,12 +60,12 @@ def test_the_math_of_an_even_split(s):
     case, opts = two_firms()
     f = firm_invoices(case, s, opts)[0]
     html, plain = explain([(f, "2026-0007")])
-    # 60 pp.: original 60 x 4.30 = 258.00; copy and e-mailed copy 2 x 60 x 1.00 = 120.00 each; index and the
-    # judge's 60.00 each: 618.00, 309.00 each
+    # 60 pp.: original 60 x 4.30 = 258.00; copy, e-mailed copy and index 2 x 60 x 1.00 = 120.00 each (one for
+    # each party); the judge's 60.00: 678.00, 339.00 each
     assert plain.splitlines()[0] == "Invoice 2026-0007 · Bill to Alex B. Counsel (Counsel & Counsel) · 60 pages, 2 parties"
     for line in ("Original: 60 pages × $4.30 = $258.00", "Copy: 2 × 60 pages × $1.00 = $120.00",
-                 "E-mailed copy: 2 × 60 pages × $1.00 = $120.00", "Index: 60 pages × $1.00 = $60.00",
-                 "Judge's index: 60 pages × $1.00 = $60.00", "Total: $618.00", "÷ 2 parties = $309.00 each"):
+                 "E-mailed copy: 2 × 60 pages × $1.00 = $120.00", "Index: 2 × 60 pages × $1.00 = $120.00",
+                 "Judge's index: 60 pages × $1.00 = $60.00", "Total: $678.00", "÷ 2 parties = $339.00 each"):
         assert f"    {line}\n" in plain
     assert "rounded" not in plain  # it splits evenly
     assert "<h2>Invoice 2026-0007" in html and "Bill to Alex B. Counsel (Counsel &amp; Counsel)" in html
@@ -71,11 +73,12 @@ def test_the_math_of_an_even_split(s):
 
 def test_the_math_says_when_it_was_rounded_up(s):
     case, opts = two_firms()
-    opts = InvoiceOpts(61, 3, days=[("6/3/2026", 61)])
+    opts = InvoiceOpts(60, 3, days=[("6/3/2026", 60)])
     f = firm_invoices(case, s, opts)[0]
     _, plain = explain([(f, "2026-0008")])
-    # 61 x 4.30 + 3 x 61 x 2 + 61 x 2 = 262.30 + 366 + 122 = 750.30; three ways: 250.10 each, even
-    assert "÷ 3 parties = $250.10 each\n" in plain
+    # 60 x 4.30 + 3 x 60 x 3 (copies, e-mailed copies, indexes) + 60 = 258 + 540 + 60 = 858.00; three ways: 286.00
+    # each, even
+    assert "÷ 3 parties = $286.00 each\n" in plain
     opts = InvoiceOpts(10, 3, days=[("6/3/2026", 10)])  # 43 + 60 + 0 (no index under 50 pages) = 103.00
     _, plain = explain([(firm_invoices(case, s, opts)[0], "2026-0009")])
     assert "÷ 3 parties = $34.34 each (rounded up to the cent)" in plain
@@ -99,13 +102,14 @@ def test_the_lines_of_a_share_add_up_to_the_total_shown():
     window said "Your share: $12.53 (rounded up)". Now a part of a cent is shown as it is."""
     from minute_filler.rates import Speed
     sp = Speed("Regular", "5.45", "0.55", extras={"Index": "0.35", "Email": "0.55"})
-    q = quote_shares([Share(3, 2, True)], sp)  # 1.5 x 5.45 + 3 x 0.55 x 2 + 1.5 x 0.35 x 2 = 12.525
+    # (the index split too, as with Settings.invoice_index_shared "split")
+    q = quote_shares([Share(3, 2, True)], sp, index_split=True)  # 1.5 x 5.45 + 3 x 0.55 x 2 + 1.5 x 0.35 x 2 = 12.525
     f = FirmInvoice(Attorney(name="Dana Smith"), make_case({}), InvoiceOpts(3, 2), [q])
     _, plain = explain([(f, "2026-0011")])
-    for line in ("Original: 3 pages × $5.45 = $16.35 ÷ 2 firms = $8.175",
+    for line in ("Original: 3 pages × $5.45 = $16.35 ÷ 2 firms = $8.175 (each firm splits this cost)",
                  "Copy: 3 pages × $0.55 = $1.65 (each firm pays for its own)",
                  "E-mailed copy: 3 pages × $0.55 = $1.65 (each firm pays for its own)",
-                 "Index: 3 pages × $0.35 = $1.05 ÷ 2 firms = $0.525",
+                 "Index: 3 pages × $0.35 = $1.05 ÷ 2 firms = $0.525 (each firm splits this cost)",
                  "This firm's charges together: $12.525", "This firm pays: $12.53 (rounded up to the cent)"):
         assert f"    {line}\n" in plain
     # whole cents: no "together" line, nothing said about rounding
@@ -129,12 +133,168 @@ def test_the_math_spells_out_an_excerpt_stretch_by_stretch(s):
                  "      40 pages ordered by this firm alone: 40 × $4.30 = $172.00",
                  "      50 pages ordered by 2 firms: 50 × $4.30 = $215.00 ÷ 2 = $107.50",
                  "Copy: 90 pages × $1.00 = $90.00 (each firm pays for its own)",
-                 "This firm pays: $589.50"):
+                 "Index: 90 pages × $1.00 = $90.00 (each firm pays for its own)",
+                 "This firm pays: $614.50"):
         assert f"    {line}\n" in plain
     assert "Bill to Dana Smith · 50 pages (6/3/2026 pp. 41-90)" in plain  # the excerpt it ordered
     assert "Original: 50 pages × $4.30 = $215.00 ÷ 2 firms = $107.50" in plain
-    assert plain.rstrip().endswith("Regular: the 2 firms together pay $847.00 for work that costs $847.00")
-    assert "margin-left" in html and "All the firms together" in html
+    assert plain.rstrip().endswith("Regular: the 2 firms together pay $897.00 for work that costs $897.00")
+    assert "40 pages ordered by this firm alone" in html and "All the firms together" in html
+
+
+def tables(html_text: str) -> list[list[list[str]]]:
+    """The tables of the math's HTML: each a list of rows, each row the text of its cells (a line break in a
+    cell as " / ")."""
+    from html.parser import HTMLParser
+
+    class Cells(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tables, self.cell = [], None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "table":
+                self.tables.append([])
+            elif tag == "tr":
+                self.tables[-1].append([])
+            elif tag in ("td", "th"):
+                self.cell = []
+            elif tag == "br" and self.cell is not None:
+                self.cell.append(" / ")
+
+        def handle_endtag(self, tag):
+            if tag in ("td", "th"):
+                self.tables[-1][-1].append("".join(self.cell).replace("\xa0", " ").strip())
+                self.cell = None
+
+        def handle_data(self, data):
+            if self.cell is not None:
+                self.cell.append(data)
+
+    p = Cells()
+    p.feed(html_text)
+    return p.tables
+
+
+FOUR = (("Dana Smith", "Smith Law"), ("Sam Roe", "Roe & Co."), ("Pat Poe", "Poe LLP"), ("Lee Doe", "Doe PC"))
+
+
+def four_firms(s):
+    """Four firms sharing a day of 59 pages at Expedite, of a transcript of 108 the user wrote 59 of (the math in
+    the user's screenshot of 2026-10-08, with made-up firms), numbered 2026-0030 to 2026-0033."""
+    s.invoice_speeds = ["Expedited"]
+    firms = [Attorney(name=n, firm=f, checked=True) for n, f in FOUR]
+    case = make_case({**ROE, "delivery": "Expedite"}, firms)
+    opts = InvoiceOpts(59, 4, days=[("6/3/2026", 59)], my_pages=59, total_pages=108, orders=[
+        DayOrder("6/3/2026", 59, [Portion(59, [a.key() for a in firms], 4)], total=108)])
+    return [(f, f"2026-00{i + 30}") for i, f in enumerate(firm_invoices(case, s, opts))]
+
+
+def test_the_math_by_invoice_is_a_table_with_a_row_a_charge(s):
+    """Each invoice gets a table: each charge's pages, rate and cost, how it is paid ("Each firm splits this cost"
+    for the original and the judge's index, "Each firm pays for its own" for the copies and the index) and what
+    this firm pays (part of a cent as it is), then what it pays in all. Under the heading: the pages the user wrote
+    of the whole transcript, and why there is an index (the 108 pages, though the user wrote 59)."""
+    made = four_firms(s)
+    html, plain = explain(made)
+    found = tables(html)
+    assert len(found) == 4
+    assert found[0] == [
+        ["Charge", "Pages", "Rate", "Cost", "How it's paid", "This firm pays"],
+        ["Original", "59", "$5.40", "$318.60", "Each firm splits this cost (÷ 4)", "$79.65"],
+        ["Copy", "59", "$1.10", "$64.90", "Each firm pays for its own", "$64.90"],
+        ["E-mailed copy", "59", "$1.10", "$64.90", "Each firm pays for its own", "$64.90"],
+        ["Index", "59", "$1.10", "$64.90", "Each firm pays for its own", "$64.90"],
+        ["Judge's index", "59", "$1.10", "$64.90", "Each firm splits this cost (÷ 4)", "$16.225"],
+        ["This firm's charges together", "$290.575"],
+        ["This firm pays (rounded up to the cent)", "$290.58"]]
+    note = "You wrote 59 of 108 total pages. Index: 108 total pages, 50 or more."
+    assert f"<p class='muted'>{note}</p>" in html
+    assert plain.splitlines()[:2] == ["Invoice 2026-0030 · Bill to Dana Smith (Smith Law) · 59 pages", note]
+    assert "    Judge's index: 59 pages × $1.10 = $64.90 ÷ 4 firms = $16.225 (each firm splits this cost)\n" in plain
+    assert "    Index: 59 pages × $1.10 = $64.90 (each firm pays for its own)\n" in plain
+
+
+def test_the_math_with_the_firms_side_by_side(s):
+    """The other layout: a table for the four firms at each speed, a column each (its name, number and pages):
+    what it pays for each charge, with the pages that is, and what it pays in all. The plain text is the same in
+    both layouts."""
+    made = four_firms(s)
+    html, plain = explain(made, "firms")
+    assert plain == explain(made)[1]
+    (t,) = tables(html)
+    assert t[0] == ["Charge", "Rate", "How it's paid"] + [
+        f"{n} ({f}) / 2026-00{30 + i} · 59 pages" for i, (n, f) in enumerate(FOUR)]
+    assert t[1] == ["Original", "$5.40", "Each firm splits this cost"] + ["$79.65 / 59 pp. ÷ 4"] * 4
+    assert t[2] == ["Copy", "$1.10", "Each firm pays for its own"] + ["$64.90 / 59 pp."] * 4
+    assert t[4] == ["Index", "$1.10", "Each firm pays for its own"] + ["$64.90 / 59 pp."] * 4
+    assert t[5] == ["Judge's index", "$1.10", "Each firm splits this cost"] + ["$16.225 / 59 pp. ÷ 4"] * 4
+    assert t[6:] == [["Charges together", "", ""] + ["$290.575"] * 4,
+                     ["Each firm pays (rounded up to the cent)", "", ""] + ["$290.58"] * 4]
+    assert "<h2>4 invoices side by side</h2>" in html and "<h2>All the firms together</h2>" in html
+
+
+def test_side_by_side_a_charge_a_firm_has_none_of_is_a_dash(s):
+    """Two days of a case (rule "each": only a day of 50 pages or more gets an index): Alex ordered the 60-page
+    day, Dana the 30-page one. Dana's column has no index ("—"), and each firm's note says why."""
+    s.invoice_index_rule = "each"
+    a, b = Attorney(name="Alex B. Counsel", checked=True), Attorney(name="Dana Smith", checked=True)
+    case = make_case({**ROE, "dates": "6/3/2026, 6/4/2026"}, [a, b])
+    opts = InvoiceOpts(90, 1, days=[("6/3/2026", 60), ("6/4/2026", 30)], orders=[
+        DayOrder("6/3/2026", 60, [Portion(60, [a.key()], 1)], total=60),
+        DayOrder("6/4/2026", 30, [Portion(30, [b.key()], 1)], total=30)])
+    made = [(f, "") for f in firm_invoices(case, s, opts)]
+    html, _ = explain(made, "firms")
+    (t,) = tables(html)
+    rows = {r[0]: r[2:] for r in t[1:]}
+    assert rows["Index"] == ["This firm alone", "$60.00 / 60 pp.", "—"]
+    assert rows["Judge's index"] == ["This firm alone", "$60.00 / 60 pp.", "—"]
+    assert rows["Original"] == ["This firm alone", "$258.00 / 60 pp.", "$129.00 / 30 pp."]
+    # (each judged on its own day, as the rule "each" does: not "1 of 2 days have 50 pages or more" for both)
+    assert [f.index_note for f, _ in made] == ["Index: 60 total pages, 50 or more.",
+                                               "No index: 30 total pages, under 50."]
+    assert "Alex B. Counsel: Index: 60 total pages" in html and "Dana Smith: No index: 30 total pages" in html
+
+
+def test_both_layouts_saved_as_a_pdf(s, tmp_path):
+    """Save as PDF saves the layout on screen: its tables, the charges and how each is paid."""
+    made = four_firms(s)
+    for layout in ("invoice", "firms"):
+        out = to_pdf(explain(made, layout)[0], tmp_path / f"{layout}.pdf")
+        with pymupdf.open(out) as doc:
+            text = " ".join(doc[0].get_text().replace("ﬁ", "fi").split())  # (the font's "fi" ligature)
+        assert "Each firm splits this cost" in text and "Each firm pays for its own" in text and "$290.58" in text
+        assert ("side by side" in text) == (layout == "firms")
+
+
+def test_the_math_window_switches_layout_and_keeps_it(s, qt, tmp_path):
+    """The math window opens in the layout last chosen (Settings.math_layout: by invoice at first); a click on the
+    switch shows the other one and saves the choice at once. Copy all puts the plain text on the clipboard (a
+    QMimeData of the tables crashed Python at exit)."""
+    from minute_filler.gui.preview import MathDialog
+    made = four_firms(s)
+    dlg = MathDialog(made, s, None, tmp_path)
+    assert s.math_layout == "invoice" and dlg.view.buttons["invoice"].isChecked() and len(tables(dlg.html)) == 4
+    dlg.view.buttons["firms"].click()
+    assert dlg.view.buttons["firms"].isChecked() and not dlg.view.buttons["invoice"].isChecked()
+    assert dlg.html == explain(made, "firms")[0] and "4 invoices side by side" in dlg.text.toPlainText()
+    assert s.math_layout == "firms" and Settings.load().math_layout == "firms"  # saved at once
+    assert MathDialog(made, s, None, tmp_path).view.layout_key == "firms"  # the next one opens as left
+    dlg._copy()
+    assert qt.QApplication.clipboard().text() == dlg.plain == explain(made)[1]
+
+
+def test_the_previews_math_tab_and_side_column_switch_together(s, qt):
+    """The preview shows the math twice (its tab, and the first column side by side): switched in one, the other
+    follows."""
+    from minute_filler.gui.preview import MathView, PreviewDialog
+    dlg = PreviewDialog([], s, None, math=four_firms(s))
+    side = [v for v in dlg.findChildren(MathView) if v is not dlg.math.view]
+    assert len(side) == 1 and side[0].layout_key == "invoice"
+    dlg.math.view.buttons["firms"].click()
+    assert side[0].layout_key == "firms" and "side by side" in side[0].text.toPlainText()
+    side[0].buttons["invoice"].click()
+    assert dlg.math.view.layout_key == "invoice"
 
 
 def test_all_the_firms_together_counts_each_set_of_invoices(s):
@@ -179,7 +339,7 @@ def test_the_math_saved_as_a_pdf(s, tmp_path):
     html, _ = explain(made * 20)  # long: more than one page
     out = to_pdf(html, tmp_path / "math.pdf")
     with pymupdf.open(out) as doc:
-        assert doc.page_count > 1 and "Original: 60 pages" in doc[0].get_text()
+        assert doc.page_count > 1 and "Each firm splits this cost (÷ 2)" in doc[0].get_text().replace("ﬁ", "fi")
         assert doc.metadata["creator"] == "YinIt math"
     assert to_pdf(html, out) == out  # saved over (the Save box asked)
 
@@ -256,7 +416,7 @@ def made(s):
 def test_the_math_window_copies_saves_and_turns_off(made, s, qt, tmp_path, monkeypatch):
     from minute_filler.gui.preview import MATH_OFF_NOTE, MathDialog
     dlg = MathDialog(made, s, None, tmp_path)
-    assert "Total: $618.00" in dlg.text.toPlainText()
+    assert "Total, the 2 parties together" in dlg.text.toPlainText() and "$678.00" in dlg.text.toPlainText()
     dlg._copy()
     assert qt.QApplication.clipboard().text() == dlg.plain and dlg.plain.startswith("Invoice 2026-0001")
     asked = []

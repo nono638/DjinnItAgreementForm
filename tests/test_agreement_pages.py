@@ -143,7 +143,7 @@ def test_the_window_makes_the_same_agreements(day, s, make_window, qt, monkeypat
     win._refresh_jobs()
     win._show_job()
     assert win.rows["est_pages"].text() == "150" and win.rows["est_pages"].state.source == SRC_PDF
-    assert "Your pages: 120 of the 150 total transcribed pages" in win.inv_pages_info.text()
+    assert "You wrote 120 of 150 total pages" in win.inv_pages_info.text()
     assert "120" not in win.rows["est_pages"].state.alternatives  # (picked, it would be a typed number)
     win.fill()
     assert agreements(s) == {"Alex B. Counsel": 150, "Sam Advocate": 80}

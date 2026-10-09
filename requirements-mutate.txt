@@ -1,0 +1,4 @@
+# Mutation testing (tools/mutate.py), a developer tool: not part of the app, and never in .venv or the build.
+# tools/mutate.py installs this into an environment of its own, in %LOCALAPPDATA%\YinItMutate\venv, the first
+# time it runs and again whenever this file changes. The tests themselves run on .venv's Python.
+cosmic-ray==8.7.0

@@ -1,4 +1,4 @@
-"""The Order card (2.0.0): the speeds are chosen once, and the minute agreement form names one of the speeds the
+"""The speeds and the form's one speed (2.0.0; the Order card then): the speeds are chosen once, and the minute agreement form names one of the speeds the
 invoice offers (Settings.agreement_speed: Expedited, else the slowest offered, as Settings say; a job's own
 choice first, never a document's: see test_speed_rule.py), also when Settings name it as a rate sheet does or an
 older file had a default speed. No. of copies follows the parties ticked (a firm is one) or the Parties number,

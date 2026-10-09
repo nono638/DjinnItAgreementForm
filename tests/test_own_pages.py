@@ -227,7 +227,7 @@ def test_the_invoice_panel_shows_my_pages_and_asks_whose(window, tmp_path, monke
     load(window, transcript_pdf(tmp_path / "Roe 6-3-2026.pdf", 6, initials=[PR, PR, DS, DS, DS, PR]))
     window.output_boxes["invoice"].setChecked(True)
     window._refresh_outputs()
-    assert window.inv_pages_info.text() == "Your pages: 3 of the 6 total transcribed pages"
+    assert window.inv_pages_info.text() == "You wrote 3 of 6 total pages"
     assert window.inv_form.isRowVisible(window.inv_pages_row)
 
     shown = []
@@ -239,7 +239,50 @@ def test_the_invoice_panel_shows_my_pages_and_asks_whose(window, tmp_path, monke
     monkeypatch.setattr(PagesOwnerDialog, "exec", choose)
     assert window._whose_pages(window.cur)
     assert shown and window.cur.invoice_pages() == 6 and window.rows["est_pages"].text() == "6"
-    assert window.inv_pages_info.text() == "Chosen pages: 6 of the 6 total transcribed pages"
+    assert window.inv_pages_info.text() == "Billing 6 of 6 total pages\n(chosen under Whose pages…)"
+
+
+def test_the_whole_transcript_decides_the_index_in_the_window(window, tmp_path):
+    """Pat wrote 45 pages of an 83-page transcript, Dana Smith the rest: the Billed line says so, the 83 pages
+    decide that there is an index (Includes says why), and Pat's invoice charges it on Pat's 45 pages; the math's
+    heading line says it all again. (The user's screenshot of 2026-10-08: 45 pages, no index.)"""
+    load(window, transcript_pdf(tmp_path / "Roe 6-3-2026.pdf", 83, initials=[PR] * 45 + [DS] * 38))
+    window.output_boxes["invoice"].setChecked(True)
+    window._refresh_outputs()
+    assert window.inv_pages_info.text() == "You wrote 45 of 83 total pages"
+    assert window.inv_peripherals_info.text() == "E-mailed copy, index\n(83 total pages, 50 or more)"
+    # Bug: word-wrapped, the Billed line (its row shown only for such a transcript) was given a line's height less
+    # than it needed, its last line cut off. Its lines are broken by the window now: shown, each label is as tall
+    # as its text.
+    window.resize(1320, 860)
+    window.show()
+    from PySide6 import QtWidgets
+    for _ in range(5):
+        QtWidgets.QApplication.processEvents()
+    for label in (window.inv_pages_info, window.inv_peripherals_info):
+        assert label.height() >= label.sizeHint().height(), label.text()
+    firm = window._pay_firms[0]
+    assert {l.label: l.pages for l in firm.quotes[0].lines if "ndex" in l.label} == {"Index": 45, "Judge's index": 45}
+    from minute_filler.invoice_math import about
+    assert about(firm) == "You wrote 45 of 83 total pages. Index: 83 total pages, 50 or more."
+
+
+def test_the_math_names_a_typed_page_count_as_the_pages_field(tmp_path, s):
+    """A Pages number typed in is billed, but it need not be the pages the user wrote: with 40 typed on a
+    transcript Pat wrote 45 pages of 83, the math said "You wrote 40 of the 83 total pages". It says what the
+    Invoice panel says. A number typed above the transcript's count (only its caption page is there) is the whole
+    transcript too: 120 total pages, not 3."""
+    from minute_filler.invoice import firm_invoices
+    from minute_filler.invoice_math import about
+    from minute_filler.models import FieldState, SRC_USER
+    job = job_with(tmp_path, s, [PR] * 45 + [DS] * 38, attorneys=[alex()])
+    job.case.fields["est_pages"] = FieldState("40", SRC_USER, 1.0, [])
+    firm, = firm_invoices(job.case, s, job.invoice_opts())
+    assert about(firm) == "The Pages field: 40 of 83 total pages. Index: 83 total pages, 50 or more."
+    caption = job_with(tmp_path, s, [PR] * 3, name="Roe caption 6-4-2026.pdf", attorneys=[alex()])
+    caption.case.fields["est_pages"] = FieldState("120", SRC_USER, 1.0, [])
+    firm, = firm_invoices(caption.case, s, caption.invoice_opts())
+    assert firm.opts.total_pages == 120 and about(firm) == "Index: 120 total pages, 50 or more."
 
 
 def test_a_held_transcript_with_a_long_name_does_not_widen_the_invoice_panel(window, tmp_path, qt):

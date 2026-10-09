@@ -7,8 +7,11 @@ on the transcript ("141-170"; its place in the day when they aren't known) and t
 (carve). A run removed gives its pages to the run above it (remove), and a day can be one run again
 (whole_day). A run nobody ordered is billed to nobody. What is set is kept on each day as Job.portions (rows of
 (last page, firms)) and the attorneys ticked on it, so the invoices (invoice.firm_invoices) bill it as before:
-pages ordered by several firms are shared between them (the original, the index and the judge's index), each
-firm pays its own copy.
+pages ordered by several firms share the original and the judge's index between them (the index too, when
+Settings.invoice_index_shared says "split"), and each firm pays its own copy (and its own index). Whether a day
+gets an index is judged on every page of it, as Settings.invoice_index_rule says (with "any", another day of the
+invoice reaching the threshold is enough), so a firm that ordered 10 pages of a 100-page day pays an index of its
+10 pages.
 
 prices() works out, as the table is changed, what each run costs each firm that ordered it, what each set of
 firms ordering together pays for its pages ("A + B: 15 pp., each pays ..."), and each firm's invoice.
@@ -20,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 from .batch import Job, joint_invoice, same_entries
-from .invoice import ORDERED_BY_NOBODY, firm_invoices
+from .invoice import ORDERED_BY_NOBODY, firm_invoices, index_mode, index_pages
 from .invoice_calc import Share, index_days, offered, quote_shares
 from .models import Attorney
 from .settings import Settings
@@ -266,10 +269,11 @@ def prices(days: list[Day], runs: list[Run], s: Settings) -> Prices:
         return Prices([])
     sheet = s.sheet()
     speeds = offered(sheet, s.invoice_speeds, case.get("delivery") or s.agreement_speed())
-    mode = opts.index if opts.index is not None else ("auto" if s.invoice_include_index else "off")
     # The index is decided date by date, as the invoices do (invoice.firm_invoices): a job of several days
-    # isn't indexed on its total when no one of its days has the pages for it
-    indexed = index_days([o.pages for _, o in orders], mode, s.invoice_index_rule, s.invoice_index_threshold)
+    # isn't indexed on its total when no one of its days has the pages for it; each day on every page of its
+    # transcripts, whoever wrote them (invoice.index_pages)
+    indexed = index_days(index_pages([o for _, o in orders]), index_mode(opts, s), s.invoice_index_rule,
+                         s.invoice_index_threshold)
     dates: dict[int, list[tuple[int, bool]]] = {}  # id(day) -> (pages, indexed) of each date it bills
     for (d, o), x in zip(orders, indexed):
         dates.setdefault(id(d), []).append((o.pages, x))

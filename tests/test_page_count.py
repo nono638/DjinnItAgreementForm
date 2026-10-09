@@ -175,7 +175,7 @@ def test_the_window_says_what_each_page_number_counts(window, tmp_path):
     assert window.rows["est_pages"].text() == "6"
     assert window.pages_help.text() == "Transcript pages 378–383 · excludes the 2 word-index pages after them"
     assert not window.pages_help.isHidden() and window.pages_warn.isHidden()
-    assert window.inv_pages_info.text() == "Your pages: 3 of the 6 total transcribed pages"
+    assert window.inv_pages_info.text() == "You wrote 3 of 6 total pages"
 
 
 def test_the_window_warns_when_the_count_looks_wrong(window, tmp_path):

@@ -1,9 +1,9 @@
 """The minute agreement form's one speed (2.1): always the Settings rule's (Expedited, else the slowest offered)
 unless the user chose one for the job, never a speed a document mentions: when an e-mail asks for another speed,
-the window asks which (the Order card's question and Keep, and a box at Generate). Every change of what decides
-it applies it again (speeds ticked, the settings, a new job); the mouse wheel passing over the speed box changes
-nothing. The Order card says what is the invoice's and what is the form's; "Who pays what" shows each firm's
-invoice in short as things are ticked; an invoice is made from a page count typed in when there is no transcript,
+the window asks which (Minute agreement form details' question and Keep, and a box at Generate). Every change of
+what decides it applies it again (speeds ticked, the settings, a new job); the mouse wheel passing over the speed box
+changes nothing. The speeds offered are ticked in the Invoice panel, the form's one speed under Minute agreement
+form details; "Who pays what" shows each firm's invoice in short as things are ticked; an invoice is made from a page count typed in when there is no transcript,
 its excerpts named by their place in the day. The documents and names are made up."""
 import os
 import re
@@ -127,7 +127,7 @@ def test_the_mouse_wheel_doesnt_change_the_speed_box_it_passes_over(window, qt):
     assert window.delivery.currentData() == before and window.case.fields["delivery"].source != SRC_USER
 
 
-def test_the_order_card_asks_when_an_email_names_another_speed(window):
+def test_the_form_details_card_asks_when_an_email_names_another_speed(window):
     window.add_text(DAILY)
     wait(window, lambda: window.cur.docs)
     assert not window.speed_ask.isHidden()
@@ -167,11 +167,18 @@ def test_going_back_from_the_speed_question_makes_nothing(window, monkeypatch):
     assert window.case.fields["delivery"].source == SRC_DEFAULT
 
 
-def test_the_order_card_says_whose_speeds_are_whose(window):
+def test_the_speeds_offered_are_the_invoices_and_the_card_is_the_forms(window):
+    """The card that names the form's speed is "Minute agreement form details" (it was "Order"); the speeds the
+    invoice offers are ticked in the Invoice panel, where they stay usable while Invoice is unticked, as the form
+    names one of them."""
     from PySide6.QtWidgets import QLabel
-    heads = [w.text() for w in window.findChildren(QLabel) if w.objectName() == "subhead"]
-    assert heads == ["Invoice: offers every speed ticked, each at its own price",
-                     "Minute agreement form: one speed, one rate per page"]
+    titles = [w.text() for w in window.findChildren(QLabel) if w.objectName() == "section"]
+    assert "Minute agreement form details" in titles and "Order" not in titles
+    panel = window._output_cols[list(window.output_boxes).index("invoice")]
+    assert all(panel.isAncestorOf(cb) for cb in window.inv_speed_boxes.values())
+    window.output_boxes["invoice"].setChecked(False)
+    assert not window.output_opts["invoice"].isEnabled()
+    assert all(cb.isEnabled() for cb in window.inv_speed_boxes.values())
     ticked = [n for n, cb in window.inv_speed_boxes.items() if cb.isChecked()]
     assert ticked == [window.delivery.itemData(i) for i in range(window.delivery.count() - 1)]  # (less Other)
     assert ticked == ["Regular", "Expedite"]  # cheapest first in both, as on the invoice

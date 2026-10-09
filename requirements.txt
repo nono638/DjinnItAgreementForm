@@ -19,3 +19,4 @@ winrt-Windows.Storage.Streams==3.2.1
 # Build / test
 pyinstaller==6.22.3
 pytest==9.1.1
+# (mutation testing, tools/mutate.py: requirements-mutate.txt, installed in an environment of its own)

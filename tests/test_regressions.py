@@ -307,7 +307,7 @@ def test_auto_version_bump_asks_github(tmp_path, monkeypatch):
 
 
 def test_settings_ok_keeps_speeds_named_otherwise_on_a_rate_sheet(qt):
-    """A speed of the user's own rate sheet, ticked under Speeds offered in the Order card, has no box in
+    """A speed of the user's own rate sheet, ticked under Speeds offered in the Invoice panel, has no box in
     Settings → Invoice: saving the Settings must not untick it."""
     from minute_filler.gui.dialogs import SettingsDialog
     s = pat_settings()
@@ -317,17 +317,27 @@ def test_settings_ok_keeps_speeds_named_otherwise_on_a_rate_sheet(qt):
 
 
 def test_the_invoice_spreadsheet_prices_as_the_app_does():
-    """The shipped template charges one index (and judge's index) split between the parties, as the app does by
-    default (a Setup option charges an index to each), and rounds each party's share up to the cent."""
+    """The shipped template charges an index to each party and one judge's index split between them, as the app
+    does by default (a Setup option makes it one index, split), decided on the whole transcript's pages (every
+    reporter's: 45 of 83 get one) and charged on the Pages billed, with every rate of the bundled sheet (Daily:
+    $1.25 a page for copies, e-mailed copies and indexes), and rounds each party's share up to the cent."""
     from openpyxl import load_workbook
     from minute_filler.invoice import TEMPLATE
+    from minute_filler.rates import BUNDLED_DIR, load_sheet, parse_money
     wb = load_workbook(TEMPLATE)
     calc, setup = wb["Calculation"], wb["Setup"]
     index, each = calc["I2"].value, calc["L2"].value
     assert "IF(IndexEach,Parties,1)" in index and each.startswith("=ROUNDUP(") and "ROUND(K2/Parties" in each
+    assert "MAX(Pages,N(TranscriptPages))>=IndexFrom" in index and "TranscriptPages" in wb.defined_names
     names = {n: wb.defined_names[n].attr_text for n in ("IndexEach", "Turnaround")}
     row = int(names["IndexEach"].rsplit("$", 1)[1])
-    assert setup[f"B{row}"].value is False  # one index, split, unless the user says otherwise
+    assert setup[f"B{row}"].value is True  # an index for each party, unless the user says otherwise
+    rates = {r[0].value: [c.value for c in r[1:5]] for r in wb["Rates"].iter_rows(min_row=2) if r[0].value}
+    assert rates["Daily"] == [6.5, 1.25, 1.25, 1.25]
+    sheet = load_sheet(BUNDLED_DIR / "Sample Rates.csv")  # every speed as the sheet has it, not only Daily
+    want = {sp.name: [float(parse_money(x)) for x in (sp.original, sp.copy, sp.extras["Email"], sp.extras["Index"])]
+            for sp in sheet.speeds}
+    assert {k: rates.get(k) for k in want} == want
     first, last = (int(x.rsplit("$", 1)[1]) for x in names["Turnaround"].split(":"))
     assert setup[f"A{first - 1}"].value == "TURNAROUND WORDING" and last - first == 3
 
@@ -609,3 +619,97 @@ def test_the_swirl_follows_the_layout_while_it_lingers(qt):
     d.rezoom()
     assert d._settle.isActive() and d.mood[0] == "working" and d.wanted == "done"
     d.deleteLater()
+
+
+# ------------------------------------------------------------------ the 2.5.0 sweep
+
+OLD_DAILY = (b"Daily,$6.50,$1.25,$1.25,$1.25", b"Daily,$6.50,$1.30,$1.30,$1.30")  # (the sample as 2.4.0 shipped it)
+
+
+def test_importing_settings_from_2_4_keeps_the_sample_sheet_as_it_ships_now(tmp_path):
+    """A settings file exported by 2.4.0 holds Sample Rates as it shipped then (Daily copies, e-mailed copies and
+    indexes at $1.30 a page): importing it brought that copy back as "Sample Rates (imported)" and switched the
+    rate sheet to it. Never edited, it is the sheet as it ships now."""
+    from minute_filler.rates import BUNDLED_DIR, sheets_dir
+    out = Settings().export_to(tmp_path / "settings.json")
+    data = json.loads(out.read_text(encoding="utf-8"))
+    new = (BUNDLED_DIR / "Sample Rates.csv").read_text(encoding="utf-8-sig")
+    data["rate_sheets"]["Sample Rates.csv"] = new.replace(*(x.decode() for x in OLD_DAILY))
+    out.write_text(json.dumps(data), encoding="utf-8")
+    imported = Settings.import_from(out, Settings())
+    imported.write_imported_sheets()
+    assert sorted(p.name for p in sheets_dir().glob("Sample*")) == ["Sample Rates.csv"]
+    assert imported.rate_sheet == "Sample Rates" and imported.sheet().find("Daily").copy == "1.25"
+
+
+def test_bringing_the_sample_sheet_up_to_date_never_leaves_half_of_it(tmp_path, monkeypatch):
+    """The old Sample Rates is replaced in one step: a copy that stopped part way (the disk full) left half a
+    sheet that matched no hash, kept from then on as the user's own. Now it stays as it was, to be brought up to
+    date next time, with nothing left beside it. A sheet no version changed is not read at all (the folder can be
+    on OneDrive)."""
+    from minute_filler import rates
+    new = (rates.BUNDLED_DIR / "Sample Rates.csv").read_bytes()
+    old = new.replace(*OLD_DAILY)
+    d = tmp_path / "sheets"
+    d.mkdir()
+    (d / "Sample Rates.csv").write_bytes(old)
+    (d / "Rate Sheet TEMPLATE.csv").write_bytes(b"Rate,Original\n")
+    copy = rates.shutil.copy2
+
+    def full_disk(src, dst, *a, **k):
+        Path(dst).write_bytes(Path(src).read_bytes()[:40])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(rates.shutil, "copy2", full_disk)
+    rates.seed(d)
+    assert (d / "Sample Rates.csv").read_bytes() == old
+    assert sorted(p.name for p in d.iterdir()) == ["Rate Sheet TEMPLATE.csv", "Sample Rates.csv"]
+    monkeypatch.setattr(rates.shutil, "copy2", copy)
+    read, read_bytes = [], Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: read.append(self.name) or read_bytes(self))
+    rates.seed(d)
+    assert (d / "Sample Rates.csv").read_bytes() == new and "Rate Sheet TEMPLATE.csv" not in read
+
+
+def test_each_firms_index_note_says_what_its_own_invoice_charges(tmp_path):
+    """The math's note under each invoice: with each day judged alone (Settings: "each"), the firm that ordered
+    only the 30-page day is told why its day has none ("30 total pages, under 50"), not "1 of 2 days have 50 pages
+    or more". And a rate sheet with no index price charges none: the note said "Index: ..." all the same."""
+    from minute_filler.invoice import DayOrder, Portion, firm_invoices
+    s = pat_settings()
+    s.invoice_speeds, s.invoice_index_rule = ["Regular"], "each"
+    a = Attorney(name="Ann Able", firm="Able Law", checked=True)
+    b = Attorney(name="Bo Best", firm="Best Law", checked=True)
+    case = make_case({"dates": "6/3/2026, 6/4/2026", "delivery": "Regular"}, [a, b])
+    opts = InvoiceOpts(90, 2, days=[("6/3/2026", 30), ("6/4/2026", 60)],
+                       orders=[DayOrder("6/3/2026", 30, [Portion(30, [a.key()])], total=30),
+                               DayOrder("6/4/2026", 60, [Portion(60, [b.key()])], total=60)])
+    notes = {f.atty.firm: f.index_note for f in firm_invoices(case, s, opts)}
+    assert notes == {"Able Law": "No index: 30 total pages, under 50.", "Best Law": "Index: 60 total pages, 50 or more."}
+    s.invoice_index_rule = "any"  # (the whole invoice decides: the same reason for both)
+    assert {f.index_note for f in firm_invoices(case, s, opts)} == {"Index: a day of 60 pages, 50 or more."}
+    d = tmp_path / "sheets"
+    d.mkdir()
+    (d / "No Index.csv").write_text("Rate,Original,Copy,Email\nRegular,$4.30,$1.00,$1.00\n", encoding="utf-8")
+    s.rate_sheets_dir, s.rate_sheet = str(d), "No Index"
+    s.reload_rates()
+    best = firm_invoices(case, s, opts)[1]
+    assert not [l for l in best.quotes[0].lines if "ndex" in l.label]
+    assert best.index_note == "No index: the rate sheet has no index price."
+
+
+def test_the_excerpts_window_says_what_firms_split_as_settings_do(qt):
+    """The Excerpts window's intro said the firms ordering the same pages share "the original and the index",
+    the old default; it says what Settings → Invoice → Index on shared pages does."""
+    from minute_filler.gui.excerpts import ExcerptsWindow
+    s = pat_settings()
+    windows = [ExcerptsWindow(s, lambda: None)]  # (kept: its labels go with it)
+    text = " ".join(w.text() for w in windows[0].findChildren(qt.QLabel))
+    assert ("split the original and the judge's index; each firm pays for its own copy, e-mailed copy and "
+            "index.") in text
+    s.invoice_index_shared = "split"
+    windows.append(ExcerptsWindow(s, lambda: None))
+    text = " ".join(w.text() for w in windows[1].findChildren(qt.QLabel))
+    for w in windows:
+        w.deleteLater()
+    assert "split the original, the index and the judge's index; each firm pays for its own copy and e-mailed" in text

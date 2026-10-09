@@ -4,7 +4,7 @@ Format (same layout as the reporter's own invoice sheet):
 
     Rate,Original,Copy,Email,Index,Days
     Immediate,$7.60,$1.45,$1.45,$1.45,0
-    Daily,$6.50,$1.30,$1.30,$1.30,1
+    Daily,$6.50,$1.25,$1.25,$1.25,1
     Expedite,$5.40,$1.10,$1.10,$1.10,7
     Regular,$4.30,$1.00,$1.00,$1.00,21
     Rates Last Updated:,5/2/2024
@@ -23,6 +23,7 @@ seeded from the sheets bundled with the app.
 from __future__ import annotations
 
 import csv
+import os
 import re
 import shutil
 from decimal import ROUND_HALF_UP, Decimal
@@ -171,17 +172,48 @@ def sheets_dir(custom: str = "") -> Path:
     return d
 
 
+# Bundled sheets as earlier versions shipped them (SHA-256 of the file, CRLF and LF): a copy in the user folder
+# that is still exactly one of these was never edited, so seed() replaces it with the sheet as it ships now.
+# Sample Rates before 2.5.0 had Daily copies, e-mailed copies and indexes at $1.30 a page; they are $1.25.
+OLD_BUNDLED = {
+    "Sample Rates.csv": {"e5cf39e5e2f794569669abf41c2fdaad81d90b162c90b2641295807cbf0efbdb",
+                         "4bfb2589aca110fcd28f4f73bcca47fc4f0eab03982e288eda11db9f10446234"},
+}
+
+
+def is_old_bundled(name: str, data: bytes) -> bool:
+    """Whether `data` is the bundled sheet `name` ("Sample Rates.csv") exactly as an earlier version shipped it
+    (OLD_BUNDLED): a copy nobody edited, to be read as the sheet as it ships now."""
+    import hashlib
+    return hashlib.sha256(data).hexdigest() in OLD_BUNDLED.get(name, ())
+
+
 def seed(d: Path) -> None:
-    """Copies bundled sheets (and the template) into the user folder without overwriting edits."""
+    """Copies bundled sheets (and the template) into the user folder without overwriting edits: a sheet that is
+    missing is copied, and one still exactly as an earlier version shipped it (OLD_BUNDLED) is brought up to
+    date."""
     if not BUNDLED_DIR.exists():
         return
     for src in BUNDLED_DIR.glob("*.csv"):
         dst = d / src.name
-        if not dst.exists():
-            try:
+        try:
+            if not dst.exists():
                 shutil.copy2(src, dst)
-            except OSError:
-                pass
+                continue
+            # (a sheet no version changed is not read: the folder can be on OneDrive or a network drive, and
+            # this runs each time the sheets are listed)
+            if src.name not in OLD_BUNDLED or not is_old_bundled(src.name, dst.read_bytes()):
+                continue  # (the user's own, or already the sheet as it ships)
+            # copied next to it, then swapped in at once: a copy that stopped part way (the disk full) would match
+            # no hash, and the half-written sheet would be kept as the user's own
+            new = dst.with_name(dst.name + ".new")
+            try:
+                shutil.copy2(src, new)
+                os.replace(new, dst)
+            finally:
+                new.unlink(missing_ok=True)  # (still there only when the swap failed: the sheet open in Excel)
+        except OSError:
+            pass
 
 
 def list_sheets(custom_dir: str = "") -> tuple[list[RateSheet], list[str]]:

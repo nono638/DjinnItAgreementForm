@@ -14,6 +14,7 @@ LIGHT = {
     "regex": "#15803d", "pdf": "#0f766e", "ai": "#6d28d9", "default": "#4d5566", "derived": "#0369a1", "you": "#141a26",
     "sel": "#d3e1fd", "header_bg": "#d5dbe5", "card_title": "#1e3a8a",
     "records": "#0f5f56", "records_bg": "#e3f3ef", "records_border": "#5fae9f", "records_hover": "#cdeae3",
+    "go": "#1d4ed8", "go_hover": "#1e40af", "go_border": "#1e3a8a",
 }
 DARK = {
     "bg": "#0c0e12", "card": "#1f232c", "border": "#4a5262", "text": "#eceef3", "muted": "#b2b9c6",
@@ -23,6 +24,7 @@ DARK = {
     "regex": "#4ade80", "pdf": "#5eead4", "ai": "#c9adff", "default": "#b2b9c6", "derived": "#7dd3fc", "you": "#eceef3",
     "sel": "#29406a", "header_bg": "#171a21", "card_title": "#9cc0ff",
     "records": "#a7f0e1", "records_bg": "#12312d", "records_border": "#2f7d70", "records_hover": "#184139",
+    "go": "#2563eb", "go_hover": "#1d4ed8", "go_border": "#93c5fd",
 }
 
 QSS = """
@@ -42,7 +44,6 @@ QLabel#kpiValue { font-size: 17pt; font-weight: 700; }
 QLabel#kpiValue[tone="ok"] { color: {ok}; }
 QLabel#kpiValue[tone="warn"] { color: {review}; }
 QLabel#problem { color: {review}; font-weight: 600; }
-QLabel#subhead { font-weight: 700; color: {card_title}; padding-top: 6px; padding-bottom: 2px; border-bottom: 1px solid {border}; }
 QLabel#speedAsk { background: {warn_bg}; color: {warn}; border-radius: 6px; padding: 4px 8px; font-weight: 600; }
 QLabel#pagesWarn { background: {warn_bg}; color: {warn}; border-radius: 6px; padding: 3px 8px; font-weight: 600; }
 QLabel#payTable { background: {drop_bg}; border: 1px solid {border}; border-radius: 8px; padding: 6px 10px; }
@@ -70,6 +71,17 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: {accent_hover}; }
 QPushButton#primary:disabled { background: {border}; color: {muted}; }
+/* the main window's Generate (or Generate all): the one thing to click at the end, so it stands out */
+QPushButton#generate {
+  background: {go}; color: #ffffff; border: 1px solid {go_border}; border-radius: 7px; font-weight: 700;
+  padding: 10px 30px; font-size: 12pt;
+}
+QPushButton#generate:hover { background: {go_hover}; }
+QPushButton#generate:disabled { background: {border}; color: {muted}; border: 1px solid {border}; }
+/* a switch of two or more buttons side by side (the math's layout) */
+QPushButton#segment { border-radius: 0; padding: 4px 14px; }
+QPushButton#segment:checked { background: {sel}; color: {accent}; border: 1px solid {accent}; font-weight: 600; }
+QLabel#outputCount { color: {accent}; font-weight: 600; }
 QPushButton#records { background: {records_bg}; color: {records}; border: 1px solid {records_border}; font-weight: 600; }
 QPushButton#records:hover { background: {records_hover}; }
 QToolButton { border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; background: transparent; }

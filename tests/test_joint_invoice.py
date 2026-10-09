@@ -1,5 +1,5 @@
 """Invoices that cover several days of one case: the joint invoice (or one per day, as Settings say), the index
-rule, a job's Extras and what granular detail shows. Also: a day billed once (Job.invoiced) is not billed
+rule, a job's Peripherals and what granular detail shows. Also: a day billed once (Job.invoiced) is not billed
 again, choices kept when jobs or days come together (Excerpts... too), a failed joint invoice, a day with
 nobody ticked holding the joint invoice back, the progress count, the files counted for Generate all, Pages
 typed as 0, and the invoice's field names. Attorneys ordering different days or pages are in test_portions.py;
@@ -91,7 +91,7 @@ def test_prices_by_day(s):
     assert "E-mailed copy" not in [l.label for l in quote([30, 60], sp, 1, include_email=False).lines]
     assert "Index" in [l.label for l in quote(10, sp, 1, index="on").lines]  # a short one, indexed anyway
     assert "Index" not in [l.label for l in quote(90, sp, 1, index="off").lines]
-    # the job's Extras win over the settings
+    # the job's Peripherals win over the settings
     q = quotes_for([10], 1, s.sheet(), s, "Regular", email=False, index="on")[0]
     assert [l.label for l in q.lines] == ["Original", "Copy", "Index", "Judge's index"]
 
@@ -133,7 +133,7 @@ def test_one_selected_day_is_billed_alone(three_days, s):
     assert ledger_for(s).invoices()[0].pages == 60
 
 
-def test_the_first_days_extras_apply_to_the_joint_invoice(three_days, s):
+def test_the_first_days_peripherals_apply_to_the_joint_invoice(three_days, s):
     for job in three_days:
         job.invoice_email, job.invoice_index = False, "off"
     _, opts = joint_invoice(invoice_groups(three_days, s)[0])

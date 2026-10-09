@@ -17,9 +17,11 @@ file). A page is printed at its actual size when the paper is big enough for it 
 else made to fit. Other files (the Excel run sheet) are handed to their own program's Print.
 
 MathDialog spells out the math of the invoices Generate just made, when previews are off (invoice_math.explain):
-a glance and OK. It can also copy the text or save it as a PDF, and its "Don't show this anymore" turns it off
-(Settings -> Options turns it back on). The main window's "Who pays what" opens it too (live=True), on the
-invoices as they would be made now, with no numbers yet.
+a glance and OK. It can also copy it or save it as a PDF, and its "Don't show this anymore" turns it off
+(Settings -> Options turns it back on). The main window's "Who pays what" and its Invoice panel open it too
+(live=True), on the invoices as they would be made now, with no numbers yet. Wherever the math is shown it is a
+MathView: tables in either layout, "By invoice" or "Firms side by side", with a switch between them that is
+remembered (Settings.math_layout).
 
 WelcomeDialog asks a new user the few things the forms can't do without.
 """
@@ -28,11 +30,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QAbstractScrollArea, QMenu, QPushButton, QScrollArea, QStackedWidget, QTabBar, QTabWidget, QTextBrowser,
+    QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QAbstractScrollArea, QMenu, QPushButton, QScrollArea, QStackedWidget, QTabBar, QTabWidget, QTextBrowser,
     QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -44,8 +46,10 @@ PREVIEW_DPI = 110  # the pages' pictures at 100 % zoom: a letter page is about 9
 PRINT_DPI = 300    # the pages as sent to the printer: the usual resolution for printed text
 OFF_NOTE = "Previews are off from now on. Settings → Options turns them back on."
 MATH_OFF_NOTE = "Off from now on. Settings → Options turns it back on."
-# the math's lines: a line each, close together
-MATH_CSS = "p {margin: 0 0 3px 0;} h2 {margin: 14px 0 2px 0;} h3 {margin: 8px 0 3px 0;}"
+# the math's headings and lines close together, and its tables' cells roomy enough to read (their borders are
+# drawn from invoice_math's table attributes; the colours follow the theme's text)
+MATH_CSS = ("p {margin: 0 0 3px 0;} h2 {margin: 14px 0 2px 0;} h3 {margin: 10px 0 4px 0;} "
+            ".muted {color: #8a8f99;} th {font-weight: 600;} td, th {padding: 3px 6px;}")
 
 
 def page_image(page, dpi: int) -> QImage:
@@ -206,9 +210,9 @@ class PreviewDialog(QDialog):
         shown: list[tuple[str, str, list[QImage], str]] = []  # (name, kind, pages, tooltip) of each file
         if math:
             self.math = math_view(math, "How the amounts on " + ("this invoice" if len(math) == 1 else "these invoices")
-                                  + " are reached. The numbers are the ones they get when you click Save.")
+                                  + " are reached. The numbers are the ones they get when you click Save.", s)
             self.texts.append(self.math.text)
-            self._add_tab(self.math, "The math", "math", "How each amount is reached, line by line")
+            self._add_tab(self.math, "The math", "math", "How each amount is reached, charge by charge")
         for f in files:
             page = QWidget()
             col = QVBoxLayout(page)
@@ -300,7 +304,6 @@ class PreviewDialog(QDialog):
     def _side_view(self, shown: list, math: list | None) -> QWidget:
         """Side by side: a column per file (the math first), each headed by its name in its colour, its pages
         under it, scrolled across and down together."""
-        from ..invoice_math import explain
         box = QWidget()
         cols = QHBoxLayout(box)
         cols.setAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -320,13 +323,14 @@ class PreviewDialog(QDialog):
 
         if math:
             col = column("The math", "math", "How each amount is reached")
-            text = QTextBrowser()
-            text.document().setDefaultStyleSheet(MATH_CSS)
-            text.setHtml(explain(math)[0])
-            text.setMinimumWidth(z(SIDE_WIDTH + 60))
-            text.setMinimumHeight(z(560))
-            self.texts.append(text)
-            col.addWidget(text)
+            view = MathView(math, self.s)
+            view.text.setMinimumWidth(z(SIDE_WIDTH + 60))
+            view.text.setMinimumHeight(z(560))
+            self.texts.append(view.text)
+            col.addWidget(view)
+            if self.math is not None:  # the tab and the column show the same layout
+                self.math.view.layout_changed.connect(view.set_layout)
+                view.layout_changed.connect(self.math.view.set_layout)
         for name, kind, images, tip in shown:
             col = column(name, kind, tip)
             for img in images:
@@ -410,21 +414,93 @@ class PreviewDialog(QDialog):
         self.off_note.setText(OFF_NOTE)
 
 
-def math_view(made: list, heading: str) -> QWidget:
-    """The math of invoices (invoice_math.explain), as the preview's "The math" tab shows it: a heading, the
-    text, and Copy all. made: (FirmInvoice, invoice number) for each invoice. The widget returned keeps its
+COPY_TIP = "Put all of it on the clipboard as text, a line for each charge, to paste into an e-mail"
+
+
+class MathView(QWidget):
+    """The math of invoices (invoice_math.explain) as tables, in either layout (settings.MATH_LAYOUTS: a table per
+    invoice, or the firms side by side) with a switch between them. The layout shown first is the one last chosen
+    (Settings.math_layout), and a click on the switch saves the new one at once. made: (FirmInvoice, invoice
+    number) for each invoice; heading: a line above it all. .text is the text box (PreviewDialog zooms it), .html
+    the tables shown and .plain the plain text (the same in both layouts); copy() puts the plain text on the
+    clipboard.
+    layout_changed says when the user switched, so another view of the same math can follow (set_layout)."""
+
+    layout_changed = Signal(str)
+
+    def __init__(self, made: list, s: Settings | None, heading: str = "", parent=None):
+        from ..settings import MATH_LAYOUTS
+        super().__init__(parent)
+        self.made, self.s = made, s
+        self.layout_key = s.math_layout if s is not None and s.math_layout in MATH_LAYOUTS else "invoice"
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 0)
+        if heading:
+            head = QLabel(heading)
+            head.setWordWrap(True)
+            col.addWidget(head)
+        row = QHBoxLayout()
+        row.setSpacing(0)
+        self.switch = QButtonGroup(self)
+        self.buttons: dict[str, QPushButton] = {}
+        tips = {"invoice": "A table for each invoice: a row for each charge, what it costs and what this firm pays",
+                "firms": "A table for each speed with a column for each firm: what each one pays for each charge"}
+        for key, label in MATH_LAYOUTS.items():
+            b = QPushButton(label)
+            b.setObjectName("segment")
+            b.setCheckable(True)
+            b.setAutoDefault(False)
+            b.setChecked(key == self.layout_key)
+            b.setToolTip(tips.get(key, ""))
+            b.clicked.connect(lambda _=False, k=key: self.set_layout(k, chosen=True))
+            self.switch.addButton(b)
+            self.buttons[key] = b
+            row.addWidget(b)
+        row.addStretch(1)
+        col.addLayout(row)
+        self.text = QTextBrowser()
+        self.text.document().setDefaultStyleSheet(MATH_CSS)
+        col.addWidget(self.text, 1)
+        self._show()
+
+    def _show(self) -> None:
+        """Lays the math out in the current layout."""
+        from ..invoice_math import explain
+        self.html, self.plain = explain(self.made, self.layout_key)
+        self.text.setHtml(self.html)
+
+    def set_layout(self, key: str, chosen: bool = False) -> None:
+        """Shows the math in another layout. chosen: the user clicked the switch, so the choice is saved for next
+        time (Settings.math_layout) and layout_changed says so."""
+        if key == self.layout_key:
+            return
+        self.layout_key = key
+        for k, b in self.buttons.items():
+            b.setChecked(k == key)
+        self._show()
+        if chosen:
+            if self.s is not None:
+                self.s.math_layout = key
+                try:
+                    self.s.save()
+                except OSError as e:
+                    log_error("could not save the settings", e)
+            self.layout_changed.emit(key)
+
+    def copy(self) -> None:
+        """Puts the math on the clipboard as plain text (a line for each charge). Not the tables too, as a
+        QMimeData: one given to the clipboard crashed Python as the app closed (PySide6, exit code 139)."""
+        QApplication.clipboard().setText(self.plain)
+
+
+def math_view(made: list, heading: str, s: Settings | None = None) -> QWidget:
+    """The math of invoices as the preview's "The math" tab shows it: a MathView under a heading, and Copy all.
+    made: (FirmInvoice, invoice number) for each invoice. The widget returned keeps the MathView as .view, its
     text box as .text (PreviewDialog zooms it) and the plain text as .plain."""
-    from ..invoice_math import explain
-    html, plain = explain(made)
     w = QWidget()
     col = QVBoxLayout(w)
-    head = QLabel(heading)
-    head.setWordWrap(True)
-    col.addWidget(head)
-    text = QTextBrowser()
-    text.document().setDefaultStyleSheet(MATH_CSS)
-    text.setHtml(html)
-    col.addWidget(text, 1)
+    view = MathView(made, s, heading)
+    col.addWidget(view, 1)
     row = QHBoxLayout()
     note = QLabel("")
     note.setObjectName("muted")
@@ -432,27 +508,27 @@ def math_view(made: list, heading: str) -> QWidget:
     row.addStretch(1)
     copy = QPushButton("Copy all")
     copy.setAutoDefault(False)
-    copy.setToolTip("Put all of it on the clipboard as text, to paste into an e-mail")
-    copy.clicked.connect(lambda: (QApplication.clipboard().setText(plain), note.setText("Copied.")))
+    copy.setToolTip(COPY_TIP)
+    copy.clicked.connect(lambda: (view.copy(), note.setText("Copied.")))
     row.addWidget(copy)
     col.addLayout(row)
-    w.text, w.plain = text, plain
+    w.view, w.text, w.plain = view, view.text, view.plain
     return w
 
 
 class MathDialog(QDialog):
-    """How the amounts of the invoices just made were reached, line by line. OK closes it; Copy all puts it on
-    the clipboard as text; Save as PDF... saves it (starting in `folder`, the invoices' folder); "Don't show
-    this anymore" sets Settings.show_math off at once (and saves the settings). `live`: the invoices not made
-    yet, as the main window's "Who pays what" shows them (no numbers yet, and nothing to turn off)."""
+    """How the amounts of the invoices just made were reached, charge by charge, in tables (a MathView: by
+    invoice, or the firms side by side). OK closes it; Copy all puts it on the clipboard; Save as PDF... saves
+    the layout shown (starting in `folder`, the invoices' folder); "Don't show this anymore" sets
+    Settings.show_math off at once (and saves the settings). `live`: the invoices not made yet, as the main
+    window's Who pays what card and the Invoice panel's link show them (no numbers yet, and nothing to turn
+    off)."""
 
     def __init__(self, made: list, s: Settings, parent=None, folder: Path | None = None, live: bool = False):
         """made: (FirmInvoice, invoice number) for each invoice made (deliver.generate's `math`; the number ""
         when `live`)."""
-        from ..invoice_math import explain
         super().__init__(parent)
         self.s, self.made, self.folder = s, made, folder
-        self.html, self.plain = explain(made)
         self.setWindowTitle("The math")
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         lay = QVBoxLayout(self)
@@ -465,10 +541,9 @@ class MathDialog(QDialog):
                           + " were reached." + ("" if shown else " The invoice itself shows only the amounts."))
         head.setWordWrap(True)
         lay.addWidget(head)
-        self.text = QTextBrowser()
-        self.text.document().setDefaultStyleSheet(MATH_CSS)
-        self.text.setHtml(self.html)
-        lay.addWidget(self.text, 1)
+        self.view = MathView(made, s)
+        self.text = self.view.text
+        lay.addWidget(self.view, 1)
 
         row = QHBoxLayout()
         self.off = QPushButton("Don't show this anymore")
@@ -481,7 +556,7 @@ class MathDialog(QDialog):
         row.addWidget(self.note)
         row.addStretch(1)
         copy = QPushButton("Copy all")
-        copy.setToolTip("Put all of it on the clipboard as text, to paste into an e-mail")
+        copy.setToolTip(COPY_TIP)
         copy.clicked.connect(self._copy)
         save = QPushButton("Save as PDF…")
         save.clicked.connect(self._save)
@@ -495,11 +570,21 @@ class MathDialog(QDialog):
             row.addWidget(b)
         lay.addLayout(row)
         self.off.setVisible(not live)
-        self.resize(z(620), z(520))
+        self.resize(z(760), z(560))
+
+    @property
+    def html(self) -> str:
+        """The math as shown (the layout chosen), for Save as PDF."""
+        return self.view.html
+
+    @property
+    def plain(self) -> str:
+        """The math as plain text (the same in both layouts)."""
+        return self.view.plain
 
     def _copy(self) -> None:
-        """Copy all: the math as plain text on the clipboard."""
-        QApplication.clipboard().setText(self.plain)
+        """Copy all: the math on the clipboard as plain text (MathView.copy)."""
+        self.view.copy()
         self.note.setText("Copied.")
 
     def default_name(self) -> str:
