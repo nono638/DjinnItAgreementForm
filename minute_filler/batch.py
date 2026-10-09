@@ -215,6 +215,11 @@ class Job:
     # The invoice's own choices (Peripherals and Customize); None = as Settings say.
     invoice_email: bool | None = None  # an e-mailed copy for each party
     invoice_index: str | None = None   # the index: "auto", "on" or "off"
+    # The answer to Generate's question about the index (index_question) when the Pages number was typed below
+    # the transcripts' own count: True = judged on the number typed (40), False = on the transcripts' pages (83,
+    # as without one); None = not asked yet. Only this day's: other days of its invoice are judged on their own
+    # pages, and other reporters' invoices bill their own pages, not the number typed (billed_by)
+    index_on_typed: bool | None = None
     invoice_show: list | None = None   # what granular detail shows (keys of settings.DETAIL_ITEMS)
     invoice_detail: bool = False       # "Show granular detail" for this job's invoice (off for every new job)
     # Who ordered which pages of the day, set in the Excerpts window (excerpts.store): rows of (last page,
@@ -791,8 +796,12 @@ class Job:
         """Who ordered the pages of each day billed (see invoice.DayOrder): the job's Excerpts... rows when
         they fit it, else every ticked attorney orders every page, shared by the Parties number when it was
         set. A row counts the billed pages in it (on a transcript of several reporters, see day_mask). (Rows
-        that need checking must stop the invoice before this: see portions_problem.)"""
+        that need checking must stop the invoice before this: see portions_problem.) A day answered to be judged
+        on its typed Pages number (index_on_typed) has no total: its index is judged on that number
+        (invoice.index_pages)."""
         days, totals, counts = self.invoice_days(), self.day_totals(), self.day_reporters()
+        if self.index_on_typed and self.pages_typed():
+            totals = []
         rows = self.valid_portions()
         if rows and len(days) == 1:
             out, start = [], 0
@@ -975,8 +984,8 @@ def _printed_span(printed: list, first: int, last: int) -> str:
 
 
 # The choices of a job's invoice that are kept with its records (job_origin) and put back (job_from_origin)
-_ORIGIN_CHOICES = ("parties", "invoice_email", "invoice_index", "invoice_show", "invoice_detail", "portions",
-                   "page_basis", "front_owner")
+_ORIGIN_CHOICES = ("parties", "invoice_email", "invoice_index", "index_on_typed", "invoice_show", "invoice_detail",
+                   "portions", "page_basis", "front_owner")
 # Not put back when a job is opened again: they are worked out afresh (today's date, the delivery date from it)
 _ORIGIN_SKIP = ("agreement_date", "delivery_date")
 
@@ -1025,6 +1034,8 @@ def job_from_origin(origin: dict, s: Settings) -> Job:
         job.invoice_email = choices["invoice_email"]
     if choices.get("invoice_index") in ("auto", "on", "off"):
         job.invoice_index = choices["invoice_index"]
+    if isinstance(choices.get("index_on_typed"), bool):
+        job.index_on_typed = choices["index_on_typed"]
     if isinstance(choices.get("invoice_show"), list):
         job.invoice_show = [k for k in choices["invoice_show"] if isinstance(k, str)]
     job.invoice_detail = choices.get("invoice_detail") is True
@@ -1285,7 +1296,8 @@ def group(docs: list[Doc], s: Settings, jobs: list[Job] | None = None) -> list[J
                 # the user's invoice and run sheet choices of either job are kept
                 job.parties = job.parties or other.parties
                 job.invoice_detail |= other.invoice_detail
-                for name in ("invoice_email", "invoice_index", "invoice_show", "portions", "runsheet_to"):
+                for name in ("invoice_email", "invoice_index", "index_on_typed", "invoice_show", "portions",
+                             "runsheet_to"):
                     if getattr(job, name) is None:
                         setattr(job, name, getattr(other, name))
                 job.page_basis = {**other.page_basis, **job.page_basis}
@@ -1801,6 +1813,67 @@ def group_problem(group: list[Job]) -> str:
         return ""
     days = ", ".join(j.case.get("dates") or j.title() for j in empty)
     return f"nobody is ticked on {days}: tick who ordered {'that day' if len(empty) == 1 else 'those days'}"
+
+
+def typed_days(group: list[Job]) -> list[Job]:
+    """The days of an invoice whose Pages number, typed below their transcripts' own count (40 typed, the
+    transcript has 83), is billed on the user's own invoice: those whose index Generate asks about
+    (index_question) and Peripherals... shows the answer of (Job.index_on_typed). A number above the
+    transcripts' is the whole day either way; other reporters' invoices bill their own pages (Job.billed_by)."""
+    return [j for j in group if "me" in j.bill_reporters() and j.pages_typed()
+            and 0 < j.invoice_pages() < j.transcript_pages()]
+
+
+@dataclass
+class IndexQuestion:
+    """What to ask when a typed page count decides the index another way than the transcript (index_question):
+    the days asked about (their answer goes on them: Job.index_on_typed), the pages typed and their transcripts'
+    own pages (40 typed, the transcript has 83) and how many transcripts those are, and why there is an index
+    judged on the transcripts and none on the pages typed ("83 total pages, 50 or more", "40 total pages, under
+    50": invoice.index_reason). (Judged on fewer pages, a day never gets an index it wouldn't have.)"""
+    jobs: list
+    typed: int
+    counted: int
+    transcripts: int
+    pdf_why: str
+    typed_why: str
+
+
+def index_question(group: list[Job], s: Settings) -> IndexQuestion | None:
+    """Whether to ask the user about the index of the user's own invoice of these days (joint_invoice_sets'
+    first): a day whose Pages field was typed below its transcripts' own count (typed_days: 40 typed, the
+    transcript has 83) and that changes which days get one. The index is decided on the whole transcript
+    (invoice.index_pages: the 83), but a count the user typed over the one read from the PDF is theirs, so the
+    window asks rather than decides (the user, 2026-10-08: "they'd want more granular control"). The answer is
+    kept on those days (Job.index_on_typed), which judges them on the number typed or on the transcript from
+    then on; under the rule "each" day on its own, the other days keep theirs. None when no day is typed so, the
+    days are answered already, a Yes or No is chosen (Peripherals..., or indexes turned off in Settings), or both
+    ways give the same answer. (The command line, --batch, has no typed counts: the transcript decides.)"""
+    from .invoice import index_mode, index_reason, indexed_days
+    typed = [j for j in typed_days(group) if j.index_on_typed is None]
+    if not typed:
+        return None
+    mine = [j.billed_by("me") for j in group]  # (the job itself, when it bills nobody else)
+    opts = joint_invoice(mine)[1]
+    if not opts.orders or index_mode(opts, s) != "auto":
+        return None
+    # the typed days judged on the number typed: their transcripts' own count taken out (DayOrder.total). The
+    # orders are the days' invoice_orders one after the other, one for each of their invoice_days
+    alt, at, places = [], 0, []
+    for j, m in zip(group, mine):
+        n = len(m.invoice_days())
+        if j in typed:
+            places += range(at, at + n)
+        alt += [replace(o, total=0) if j in typed else o for o in opts.orders[at:at + n]]
+        at += n
+    if at != len(opts.orders):
+        return None  # (the orders aren't the days': nothing to compare)
+    typed_opts = replace(opts, orders=alt)
+    if indexed_days(opts, s) == indexed_days(typed_opts, s):
+        return None
+    return IndexQuestion(typed, sum(j.invoice_pages() for j in typed), sum(j.transcript_pages() for j in typed),
+                         sum(len(j.transcripts()) for j in typed),
+                         index_reason(opts, s, places), index_reason(typed_opts, s, places))
 
 
 FORMS = ("agreement", "mofr")  # the outputs form_groups makes once for several days

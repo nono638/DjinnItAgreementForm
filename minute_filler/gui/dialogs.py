@@ -1187,11 +1187,16 @@ class InvoicePeripheralsDialog(QDialog):
     """Peripherals...: what one job's invoice includes besides the original and the copies, for that job only: an
     e-mailed copy for each party, and the index (automatic, from the threshold's pages of the whole transcript;
     yes; no). It says it is for this job only, at the top and the bottom: it was taken for the settings. values()
-    gives (email, index), None where it is as Settings say."""
+    gives (email, index), None where it is as Settings say; on_typed() the answer to Generate's index question
+    for a Pages number typed below the transcript's count (Job.index_on_typed)."""
 
-    def __init__(self, email: bool | None, index: str | None, s: Settings, days: int = 1, parent=None):
-        """email, index: the job's choices (None = Settings); days: how many days the invoice covers."""
+    def __init__(self, email: bool | None, index: str | None, s: Settings, days: int = 1, parent=None,
+                 typed: tuple[int, int] | None = None, on_typed: bool | None = None):
+        """email, index: the job's choices (None = Settings); days: how many days the invoice covers. typed: (the
+        pages typed, the transcripts' own) of the days typed below their transcripts' count, which Auto may judge
+        on the number typed (on_typed: as answered; None: not asked yet, so Generate asks)."""
         super().__init__(parent)
+        self.typed_answer, self.reset = on_typed, False
         self.setWindowTitle("Peripherals for this job")
         self.setMinimumWidth(z(480))
         self.s = s
@@ -1209,6 +1214,14 @@ class InvoicePeripheralsDialog(QDialog):
         lay.addWidget(QLabel("Index for this job (and one for the judge):"))
         t = s.invoice_index_threshold
         self.index = QButtonGroup(self)
+        self.on_typed_box = None
+        if typed:
+            n, whole = typed
+            self.on_typed_box = QCheckBox(f"Judge it on the {n:,} pages you typed, not the transcript's {whole:,}")
+            self.on_typed_box.setToolTip("Your answer when Generate asked (Est. number of pages typed below the\n"
+                                         "transcript's count). Not asked yet: Generate asks. Same as Settings\n"
+                                         "has it ask again.")
+            self.on_typed_box.setChecked(bool(on_typed))
         for key, label in (("auto", f"Auto: when the whole transcript has {t} pages or more"),
                            ("on", "Yes, for this job (however short the transcript)"), ("off", "No, for this job")):
             rb = QRadioButton(label)
@@ -1216,6 +1229,13 @@ class InvoicePeripheralsDialog(QDialog):
             rb.setChecked(key == (self.default_index if index is None else index))
             self.index.addButton(rb)
             lay.addWidget(rb)
+            if key == "auto" and self.on_typed_box is not None:  # (under Auto, which it is part of)
+                self.on_typed_box.setEnabled(rb.isChecked())
+                rb.toggled.connect(self.on_typed_box.setEnabled)
+                row = QHBoxLayout()
+                row.addSpacing(z(22))
+                row.addWidget(self.on_typed_box, 1)
+                lay.addLayout(row)
         rule = f" Several days: {INDEX_RULES.get(s.invoice_index_rule, '').lower()}." if days > 1 else ""
         lay.addWidget(_tip(f"Auto counts every reporter's pages of the transcript, not only yours.{rule}"))
         lay.addSpacing(6)
@@ -1228,7 +1248,17 @@ class InvoicePeripheralsDialog(QDialog):
         self.email.setChecked(self.default_email)
         for b in self.index.buttons():
             b.setChecked(b.property("key") == self.default_index)
+        self.reset = True  # (Generate asks about a typed count again)
         self.accept()
+
+    def on_typed(self) -> bool | None:
+        """Whether Auto judges the index of the typed days on the number typed (Job.index_on_typed): the box as
+        left; None (Generate asks) when there is no box, after Same as Settings, or when it was never answered
+        and is left unticked."""
+        if self.on_typed_box is None or self.reset:
+            return None
+        ticked = self.on_typed_box.isChecked()
+        return None if self.typed_answer is None and not ticked else ticked
 
     def values(self) -> tuple[bool | None, str | None]:
         """(email, index) for the job; None where the choice is the same as Settings, so it follows them."""
@@ -1891,7 +1921,8 @@ shows the pages
 that attorney ordered, and on a transcript of several reporters your invoice bills only your own pages (the
 Invoice panel's <i>Billed</i> line: "You wrote 45 of 83 total pages"). A number you
 type in either stays; a typed page count is what your invoice bills, and the day's pages on every agreement
-(an excerpt counts its pages of it). Typing the transcript's own count (or your own pages of it) is no number of
+(an excerpt counts its pages of it). Typed below the transcript's own count, when the two would decide the
+index differently, Generate asks whether to include one (<b>Peripherals…</b> shows and changes your answer). Typing the transcript's own count (or your own pages of it) is no number of
 yours: to bill every page of a transcript of several reporters, choose <i>Whose pages…</i> → <i>The whole
 transcript</i>.</li>
 <li><b>Tick the attorneys who ordered.</b> A transcript lists everyone who appeared, not who ordered. The

@@ -102,8 +102,10 @@ EST_PAGES_TIP = ("Counted from the transcript PDF: every page, whoever wrote it 
                  "or its excerpt under Excerpts…); the MOFR the pages anyone ordered. Your invoice bills\n"
                  "only your own pages of them (Invoice panel: Billed).\n"
                  "A number you type is yours: your invoice bills it, and it is the day's pages on every\n"
-                 "agreement (an excerpt counts its pages of it). No transcript (a caption page only)?\n"
-                 "Type the pages here and the invoice bills them (a number read from an e-mail isn't billed).")
+                 "agreement (an excerpt counts its pages of it). Typed below the PDF's count, Generate asks\n"
+                 "about the index when the two would decide it differently. No transcript (a caption page\n"
+                 "only)? Type the pages here and the invoice bills them (a number read from an e-mail isn't\n"
+                 "billed).")
 AGREEMENT_SPEED_TIP = ("The one speed written on the minute agreement form (and the MOFR), at its one rate per page,\n"
                        "out of the speeds offered (ticked in the Invoice panel). Settings → Invoice picks it\n"
                        "(first choice Expedited, else the slowest offered); choose another here for this job\n"
@@ -2360,6 +2362,56 @@ class MainWindow(QMainWindow):
         box.exec()
         return box.clickedButton() is go_on and not self._batch_running()
 
+    def _ask_index(self, groups: list[list[Job]]) -> bool:
+        """Before invoices are made: for each set of days billed together (groups) where a Pages number typed
+        below the transcript's own count changes whether there is an index (batch.index_question), asks whether
+        to include one: the user made the count their own, so the app doesn't decide. The answer is kept on the
+        typed days (Job.index_on_typed: No judges them on the number typed, Yes on the transcript), so it isn't
+        asked again; Peripherals... shows it. False when Go back was clicked (nothing is made), or Generate all
+        started meanwhile. Answers given before a Go back are kept, as the box says."""
+        from ..batch import index_question
+        asked = False
+        try:
+            for group in groups:
+                group = [j for j in group if j in self.jobs]  # (a read that ended meanwhile may have merged one)
+                q = index_question(group, self.s) if group else None
+                if q is None:
+                    continue
+                dates = [d for j in group if (d := j.case.get("dates"))]
+                title = ", ".join(x for x in (group[0].title(), ", ".join(dates)) if x)
+                several = len(group) > 1
+                # under the rule "each" day on its own, the answer is about the days typed only
+                whom = ("those days" if len(q.jobs) > 1 else "that day") \
+                    if several and self.s.invoice_index_rule == "each" else "the invoice"
+                which = f" for {', '.join(d for j in q.jobs if (d := j.case.get('dates')))}" if several else ""
+                has = "the transcripts have" if q.transcripts > 1 else "the transcript has"
+                gets, it = ("get", "they get") if whom == "those days" else ("gets", "it gets")
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Question)
+                box.setWindowTitle("Index for this invoice?")
+                box.setText(f"{title}\n\nYou typed {q.typed:,} pages in Est. number of pages{which}; {has} "
+                            f"{q.counted:,}.\n\nJudged on the transcript, {whom} {gets} an index ({q.pdf_why}); "
+                            f"judged on the pages you typed, {it} none ({q.typed_why}).\n\nInclude an index (and the "
+                            f"judge's) {'on this invoice' if whom == 'the invoice' else 'for ' + whom}?")
+                box.setInformativeText("Your answer is kept for this job: Peripherals… in the Invoice panel "
+                                       "changes it.")
+                yes = box.addButton("Yes, an index", QMessageBox.YesRole)
+                no = box.addButton("No index", QMessageBox.NoRole)
+                back = box.addButton("Go back", QMessageBox.RejectRole)
+                box.setDefaultButton(back)
+                box.setEscapeButton(back)
+                box.exec()
+                if box.clickedButton() not in (yes, no) or self._batch_running():  # (closed: as Go back)
+                    return False
+                for j in q.jobs:
+                    if j in self.jobs:
+                        j.index_on_typed = box.clickedButton() is no
+                asked = True
+            return True
+        finally:
+            if asked:  # (the Includes line and the prices follow the answers, a later Go back too)
+                self._update_status()
+
     def _speed_to_rule(self):
         """↺: the job's speed goes back to the one Settings → Invoice picks; the rate and delivery date follow."""
         self.case.fields["delivery"] = FieldState()
@@ -2720,7 +2772,8 @@ class MainWindow(QMainWindow):
         typed) or the run sheet (no transcript); whose pages to bill, or whether to go on without an invoice
         that is held (_without_unchecked_invoice); whether rows that may be one firm are one (_ask_firms); which
         speed, when an e-mail asks for another one (_ask_speeds); a Parties number that isn't the firms that
-        ordered (_ask_parties); about blank required fields and competing values; who ordered, when no attorney
+        ordered (_ask_parties); whether there is an index, when a page count typed below the transcript's
+        changes it (_ask_index); about blank required fields and competing values; who ordered, when no attorney
         is ticked; and where the run sheet takes go (nothing is made while that run sheet can't be read).
         Background work can finish while a question is on screen, so after each one the job is checked to still
         exist and is taken as it is now.
@@ -2768,6 +2821,9 @@ class MainWindow(QMainWindow):
         if {"agreement", "mofr"} & set(outputs) and (not self._ask_speeds([job]) or job not in self.jobs):
             return
         if billing and (not self._ask_parties([job]) or job not in self.jobs):
+            return
+        # a Pages number typed below the transcript's count that changes whether there is an index: which
+        if "invoice" in outputs and (not self._ask_index([[job]]) or job not in self.jobs):
             return
         case = job.case  # (Whose pages... or a read that ended meanwhile may have merged the job again)
         # Ask about required fields that are blank, fields with competing values, and a case name only the records
@@ -2999,7 +3055,9 @@ class MainWindow(QMainWindow):
         Asked first, once per job that needs it: whose pages to bill, rows of a case's days that may be one firm
         (_ask_firms), the speed an e-mail asks for (_ask_speeds) and a Parties number that isn't the firms that
         ordered (_ask_parties). Days whose invoice still waits for a choice are listed, to go back or go on without
-        them; blank fields are not asked about, but incomplete jobs are listed, to leave out or make anyway.
+        them. Blank fields are not asked about, but incomplete jobs are listed, to leave out or make anyway; then,
+        for each invoice of the days made, whether there is an index when a page count typed below the
+        transcript's changes it (_ask_index).
         Where the takes go is asked once per case when it has a run sheet already (Settings → Run sheet); the
         jobs of one case share a run sheet group, so its days go on one sheet. The batch works on copies of
         the jobs and the settings (shown first in a preview when Settings.preview_before_saving: _preview_batch);
@@ -3094,6 +3152,14 @@ class MainWindow(QMainWindow):
             if box.clickedButton() == ready:
                 chosen = [j for j in chosen if not problems(j)]
             elif box.clickedButton() != everything:
+                return
+        if "invoice" in outputs:
+            # a typed page count that changes whether there is an index: asked per invoice, of the days that are
+            # made (after the incomplete ones were left out: an invoice of fewer days may decide it another way)
+            from ..batch import group_problem, invoice_groups
+            chosen = [j for j in chosen if j in self.jobs]
+            billed = [j for j in chosen if not j.invoiced and not j.invoice_hold()]
+            if not self._ask_index([g for g in invoice_groups(billed, self.s) if not group_problem(g)]):
                 return
         # Where each case's takes go: asked once per case (the days of a trial share one run sheet)
         sheet_for: dict[int, tuple[str, int]] = {}  # id(job) -> (the run sheet chosen, its case's number)
@@ -3575,7 +3641,10 @@ class MainWindow(QMainWindow):
         owned = self._show_whose_pages(job)
         with QSignalBlocker(self.inv_detail):
             self.inv_detail.setChecked(job.invoice_detail)  # this job's own (Generate this job uses it)
-        self.inv_peripherals_info.setText(_lines(self._peripherals_text(opts)))
+        from ..batch import index_question, typed_days
+        on_typed = any(j.index_on_typed for j in typed_days(group))
+        self.inv_peripherals_info.setText(_lines(self._peripherals_text(opts, index_question(group, self.s),
+                                                                        on_typed, len(group) > 1)))
         self.inv_info.setToolTip("")
         if not job.invoice_pages() and not owned:
             if not job.docs:
@@ -3967,36 +4036,55 @@ class MainWindow(QMainWindow):
                     return g
         return [cur]
 
-    def _peripherals_text(self, opts) -> str:
+    def _peripherals_text(self, opts, question=None, on_typed: bool = False, several: bool = False) -> str:
         """What the invoice includes besides the original and the copies, and whether there is an index and why
         (invoice.index_reason, on every page of the transcripts), why on a line of its own: 'E-mailed copy,
         index\n(83 total pages, 50 or more)', 'E-mailed copy, no index\n(40 total pages, under 50)', 'No e-mailed
         copy (this job), index\n(turned on for this job)'. With no pages yet, the rule: 'E-mailed copy, index from
-        50 pages'."""
+        50 pages'. question: a typed page count that changes whether there is an index (batch.index_question):
+        'E-mailed copy, index? Generate asks\n(40 typed, the transcript has 83)' ('Generate all asks' for an
+        invoice of several days: several). on_typed: a day of it is judged on its typed count, as answered
+        (Job.index_on_typed): '(on the pages you typed: 40 total pages, under 50)'."""
         from ..invoice import index_mode, index_reason, indexed_days
         s = self.s
         email = s.invoice_include_email if opts.email is None else opts.email
         text = ("E-mailed copy" if email else "No e-mailed copy") + (" (this job)" if opts.email is not None else "")
+        if question is not None:
+            has = "the transcripts have" if question.transcripts > 1 else "the transcript has"
+            return (f"{text}, index? Generate{' all' if several else ''} asks\n"
+                    f"({question.typed:,} typed, {has} {question.counted:,})")
         if index_mode(opts, s) == "auto" and not opts.pages:
             return f"{text}, index from {s.invoice_index_threshold} pages"
-        why = f"({index_reason(opts, s)})"  # (on a line of its own)
+        mine = "on the pages you typed: " if on_typed and index_mode(opts, s) == "auto" else ""
+        why = f"({mine}{index_reason(opts, s)})"  # (on a line of its own)
         if len(why) > LINE_WIDTH and ", " in why:  # broken after its comma, not with "more)" left on a line alone
             head, _, tail = why.rpartition(", ")
             why = f"{head},\n{tail}"
         return f"{text}, {'index' if any(indexed_days(opts, s)) else 'no index'}\n{why}"
 
     def _invoice_peripherals(self):
-        """Peripherals…: the e-mailed copy and the index for this job's invoice, and the other days on it."""
-        from ..batch import joint_invoice
+        """Peripherals…: the e-mailed copy and the index for this job's invoice, and the other days on it; and,
+        for its days typed below their transcripts' count (batch.typed_days), the answer to Generate's question
+        (Job.index_on_typed)."""
+        from ..batch import joint_invoice, typed_days
         from .dialogs import InvoicePeripheralsDialog
         job = self.cur
         group = self._invoice_group(job)
         opts = joint_invoice(group)[1]
-        dlg = InvoicePeripheralsDialog(opts.email, opts.index, self.s, len(group), self)
+        typed = typed_days(group)
+        answers = {j.index_on_typed for j in typed}
+        dlg = InvoicePeripheralsDialog(
+            opts.email, opts.index, self.s, len(group), self,
+            typed=(sum(j.invoice_pages() for j in typed), sum(j.transcript_pages() for j in typed)) if typed else None,
+            on_typed=answers.pop() if len(answers) == 1 else None)
         if dlg.exec():
             email, index = dlg.values()
-            for day in self._invoice_group(job):  # as it is now: a read may have ended meanwhile
+            group = self._invoice_group(job)  # as it is now: a read may have ended meanwhile
+            for day in group:
                 day.invoice_email, day.invoice_index = email, index
+            if typed:
+                for day in typed_days(group):
+                    day.index_on_typed = dlg.on_typed()
             self._update_status()
 
     def _invoice_show(self):
