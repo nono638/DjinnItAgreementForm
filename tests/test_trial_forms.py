@@ -5,13 +5,13 @@ ordered (days in a row as a range: fill.date_ranges) and its own pages, the same
 every day; the rest (case, copies, proceedings, delivery date) is taken from all the days. Generate all again
 makes the forms but no invoice. With the setting off, or an invoice for each day, the forms are one set per day as
 before; so are they for a day held for Excerpts... or with nobody ticked, and a run of some of the days lists only
-those. Generate all's count and its preview agree with what is made; a settings file from before has the setting
-on. All names and numbers are made up."""
+those. Generate all's count (the math saved with the invoices too) and its preview agree with what is made; a
+settings file from before has the setting on. All names and numbers are made up."""
 import pymupdf
 import pytest
 
 from minute_filler.batch import (_date_key, case_forms, expand_paths, files_to_make, fill_jobs, form_groups, group,
-                                 read_docs)
+                                 output_counts, read_docs)
 from minute_filler.deliver import ledger_for
 from minute_filler.fill import date_ranges
 from minute_filler.models import Attorney
@@ -46,6 +46,7 @@ def s(tmp_path):
     s = pat_settings()
     s.output_dir = str(tmp_path / "out")
     s.records_dir = str(tmp_path / "records")
+    s.save_math = "off"  # (the files counted are the forms and invoices; test_the_count_has_the_math saves it)
     return s
 
 
@@ -121,6 +122,19 @@ def test_one_mofr_for_the_trial(trial, s):
     assert mofr.dates == "9/28/2026, 9/30/2026, 10/1/2026, 10/2/2026" and mofr.pages == 140
     assert all(any(p.name.startswith("MOFR") for p in j.saved) for j in trial)  # listed under every day
     assert "140" in field_values(mofr.file_path)
+
+
+def test_the_count_has_the_math(trial, s):
+    """Generate all's number of files counts the math saved with the invoices (as it counts the detailed copies:
+    the button and the summary must agree): the joint invoice of each of the 4 attorneys, its math, and the math
+    of all 4."""
+    from minute_filler.invoice_math import is_math_file
+    s.save_math = "both"
+    outputs = ["agreement", "mofr", "invoice", "runsheet"]
+    count = files_to_make(trial, outputs, s)
+    made = fill_jobs(trial, s, outputs=outputs)
+    assert count == len(made) == 15 and len([p for p in made if is_math_file(p)]) == 5
+    assert output_counts(trial, outputs, s)["math"] == 0  # (all made: Generate all would make no more)
 
 
 def test_a_rerun_makes_the_forms_again_but_no_invoice(trial, s):

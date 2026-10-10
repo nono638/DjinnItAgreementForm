@@ -65,16 +65,16 @@ def test_the_job_lists_marks_count_and_tooltips_agree(window, tmp_path):
         j.case.attorneys[0].checked = True
     window.jobs[1].case.fields["judge"].value = ""  # something to check on one day only
     window._refresh_job_labels()
-    marked = [window.job_list.item(i).text().startswith("⚠") for i in range(2)]
+    marked = [window.job_list.topLevelItem(i).text(0).startswith("⚠") for i in range(2)]
     assert marked == [False, True]
     assert "1 to check (⚠)" in window.jobs_label.text() and "⚠" in window.jobs_label.toolTip()
-    tip = window.job_list.item(1).toolTip()
+    tip = window.job_list.topLevelItem(1).toolTip(0)
     assert "To check before Generate:" in tip and "⚠ Judge / Justice is missing" in tip
-    assert "To check" not in window.job_list.item(0).toolTip()
+    assert "To check" not in window.job_list.topLevelItem(0).toolTip(0)
     window.jobs[0].error = "PermissionError: the file is open"  # a failed Generate is a reason too
     window._refresh_job_labels()
-    assert window.job_list.item(0).text().startswith("⚠") and "2 to check" in window.jobs_label.text()
-    assert "Not saved: PermissionError" in window.job_list.item(0).toolTip()
+    assert window.job_list.topLevelItem(0).text(0).startswith("⚠") and "2 to check" in window.jobs_label.text()
+    assert "Not saved: PermissionError" in window.job_list.topLevelItem(0).toolTip(0)
 
 
 def test_the_run_sheet_is_ticked_for_two_reporters_and_not_for_one(window, tmp_path):

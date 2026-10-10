@@ -6,7 +6,8 @@ answer is kept on the typed day (Job.index_on_typed: judged on the number typed,
 Peripherals... shows and changes. Not asked when both ways agree, when the count typed is above the PDF's (a
 caption page only), when the day is answered already or has a Yes or No under Peripherals... Under the rule "each"
 day on its own, the other days keep their own index; other reporters' invoices bill their own pages, not the
-number typed, and keep theirs. All names are made up."""
+number typed, and keep theirs. With no index price on the rate sheet the answer would change nothing: Generate
+warns instead ("No index price") and the Includes line says why no index is charged. All names are made up."""
 import os
 import time
 
@@ -73,6 +74,25 @@ def test_a_typed_count_is_asked_about_only_when_it_changes_the_index(tmp_path, s
     job.invoice_index = None
     s.invoice_include_index = False  # no index at all, Settings say
     assert index_question([job], s) is None
+
+
+def no_index_price(s, tmp_path) -> None:
+    """A rate sheet with no Index column, the invoice offering Regular only."""
+    d = tmp_path / "sheets"
+    d.mkdir()
+    (d / "No Index.csv").write_text("Rate,Original,Copy,Email\nRegular,$4.30,$1.00,$1.00\n", encoding="utf-8")
+    s.rate_sheets_dir, s.rate_sheet, s.invoice_speeds = str(d), "No Index", ["Regular"]
+    s.reload_rates()
+
+
+def test_without_an_index_price_the_question_is_a_warning(tmp_path, s):
+    """The user, 2026-10-09: with no index price on the rate sheet, the answer would change nothing, "but it
+    should warn the user"."""
+    job, = days(tmp_path, s, {"June 3, 2026": 83})
+    typed(job, "40")
+    assert index_question([job], s).priced
+    no_index_price(s, tmp_path)
+    assert not index_question([job], s).priced
 
 
 def test_the_answer_stays_with_the_job(tmp_path, s):
@@ -199,7 +219,7 @@ def two_days(window, tmp_path, second=30):
     window.add_files([str(transcript_pdf(tmp_path / "Roe 6-3-2026.pdf", 83)),
                       str(transcript_pdf(tmp_path / "Roe 6-4-2026.pdf", second, date="June 4, 2026"))])
     settle(window, lambda: len(window.jobs) == 2)
-    window.job_list.setCurrentRow(0)
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(0))
     for j in window.jobs:
         j.case.attorneys = [Attorney(name="Alex B. Counsel", firm="Counsel & Counsel", checked=True)]
     first, second = window.jobs
@@ -247,6 +267,34 @@ def test_the_window_asks_and_keeps_the_answer_for_the_job(window, tmp_path, monk
     job.index_on_typed = None
     assert window._ask_index([[job]]) and len(asked) == 1 and job.index_on_typed is False
     assert window.inv_peripherals_info.text() == "E-mailed copy, index\n(83 total pages, 50 or more)"
+
+
+def test_without_an_index_price_generate_warns(window, tmp_path, monkeypatch):
+    """No index price on the rate sheet: the Includes line says no index is charged and why, and Generate warns
+    instead of asking (Go on makes the invoice without one, Go back nothing); no answer is kept, so it asks once
+    a price is added."""
+    from PySide6 import QtWidgets
+    no_index_price(window.s, tmp_path)
+    forty_of_83(window, tmp_path)
+    job = window.cur
+    assert window.inv_peripherals_info.text() == "E-mailed copy, no index charged\n(the rate sheet has no index price)"
+    seen = []
+
+    def click(text):
+        def exec_(box):
+            seen.append((box.windowTitle(), box.text(), box.informativeText()))
+            next(b for b in box.buttons() if b.text() == text).click()
+        monkeypatch.setattr(QtWidgets.QMessageBox, "exec", exec_)
+
+    click("Go back")
+    assert not window._ask_index([[job]])
+    click("Go on without an index")
+    assert window._ask_index([[job]]) and job.index_on_typed is None
+    title, text, more = seen[-1]
+    assert title == "No index price"
+    assert text.endswith("Judged on the transcript, the invoice gets an index (83 total pages, 50 or more), but your "
+                         "rate sheet has no index price for the speeds this invoice offers, so no index is charged.")
+    assert "Index column of the rate sheet (File → Open rate sheets folder)" in more
 
 
 def test_peripherals_shows_and_changes_the_answer(window, tmp_path, monkeypatch):

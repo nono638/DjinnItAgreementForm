@@ -28,6 +28,7 @@ def s(tmp_path):
     s = pat_settings()
     s.output_dir = str(tmp_path / "out")
     s.records_dir = str(tmp_path / "records")
+    s.save_math = "off"  # (files_to_make counts the invoices here; test_show_the_math.py saves the math)
     return s
 
 

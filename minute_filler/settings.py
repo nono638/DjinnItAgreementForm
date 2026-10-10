@@ -1,13 +1,15 @@
 """Persistent user settings stored as JSON in %APPDATA%\\YinItAgreementForm.
 
 Settings holds every choice (the defaults are what a new user gets) and load() brings older files up to date.
-The tables here name the choices the window and the Settings dialog offer: the outputs (OUTPUTS), the speeds
-(SPEEDS) and which one the agreement form names when its first choice isn't offered (AGREEMENT_FALLBACKS),
-which days of an invoice get an index (INDEX_RULES), who pays the index of pages several firms ordered together
-(INDEX_SHARED), what "Show granular detail" adds to an invoice (DETAIL_ITEMS), how the math of the invoices is
-laid out (MATH_LAYOUTS), where the invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN,
-default_invoice_texts), when the AI may tick who ordered (AI_TICKS), and the folders the outputs go to when they have none of their own (OUTPUT_FOLDERS,
-see Settings.folder_for).
+The tables here name the choices the window and the Settings dialog offer: the outputs (OUTPUTS, the
+courthouse's: see courthouses/), the speeds (SPEEDS) and which one the agreement form names when its first
+choice isn't offered (AGREEMENT_FALLBACKS), which days of an invoice get an index (INDEX_RULES), who pays the
+index of pages several firms ordered together (INDEX_SHARED), what "Show granular detail" adds to an invoice
+(DETAIL_ITEMS), how the math of the invoices is laid out and which of it is saved (MATH_LAYOUTS, MATH_SAVES),
+where the invoice's own text goes and when it is shown (TEXT_PLACES, TEXT_WHEN, default_invoice_texts), when the
+AI may tick who ordered (AI_TICKS), the folders the outputs go to when they have none of their own
+(OUTPUT_FOLDERS, see Settings.folder_for), and what to do when a case's own folder is there already
+(CASE_FOLDER_EXISTING).
 
 A settings.json that load() can't read (locked by a sync, damaged) is never written over on the app's own: the
 app runs on the defaults (Settings.unreadable), and only the user's own Save does (save(force=True)).
@@ -28,6 +30,8 @@ import os
 from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 
+from .courthouses import OUTPUT_FOLDERS, OUTPUTS  # (re-exported: the outputs are the courthouse's)
+
 APP_NAME = "YinItAgreementForm"
 FILENAME_PATTERN = "Minute Agreement - {case} - {index} - {attorney} - {today}"
 OLD_FILENAME_PATTERN = "Minute Agreement - {case} - {index} - {attorney}"  # the default before settings v3
@@ -36,10 +40,11 @@ OLD_APP_NAMES = ("DjinnItAgreementForm", "MinuteAgreementFiller")
 # The folders under Documents named after the app, as they were called before the rename -> now
 OLD_DOCUMENT_FOLDERS = {"DjinnIt Records": "YinIt Records", "DjinnIt Run Sheets": "YinIt Run Sheets"}
 RECENT_MAX = 10  # how many documents and folders File -> Open recent keeps
+RATE_SHEETS_OK_KEPT = 20  # how many incomplete rate sheets used anyway are remembered (Settings.rate_sheets_ok)
 # What belongs to this computer and this copy of the app: left out of an exported settings file, and kept as
-# it is when one is imported
+# it is when one is imported (an incomplete rate sheet used anyway here is warned about on another computer)
 LOCAL = ("window_geometry", "recent_files", "update_checked", "recap_month", "recap_year", "welcomed",
-         "signature_image", "opened_year", "new_year_day")
+         "signature_image", "opened_year", "new_year_day", "rate_sheets_ok")
 # What says who the user is: left out of a settings file exported "without my details" (for a colleague), and
 # kept as it is when such a file is imported. The invoice's payment text (who to pay, and how) is left out
 # with them. The folders are among them: their paths name the user's Windows account.
@@ -266,16 +271,10 @@ class ReporterProfile:
         return bool((self.full_name or self.name) and (self.address1 or self.phone or self.email))
 
 
-OUTPUTS = {  # what Generate can make: key -> label
-    "agreement": "Minute agreement",
-    "mofr": "MOFR",
-    "invoice": "Invoice",
-    "runsheet": "Run sheet",
-}
-# Where each output is saved when Settings.output_dirs doesn't say: a folder of its own under Documents, or
-# (not listed) the general "Save to" folder. A new output only needs its key in OUTPUTS and its file written to
-# Settings.folder_for(key, ...): it then gets its own row under Settings -> Options -> Folders as well.
-OUTPUT_FOLDERS = {"runsheet": "YinIt Run Sheets"}
+# OUTPUTS (what Generate can make: key -> label) and OUTPUT_FOLDERS (where an output is saved when
+# Settings.output_dirs doesn't say: a folder of its own under Documents; one not listed goes to the general
+# "Save to" folder) are the courthouse's outputs (courthouses.OutputSpec), imported above. An output gets
+# its own row under Settings -> Options -> Folders, and its file is written to Settings.folder_for(key, ...).
 SPEEDS = ("Regular", "Expedited", "Daily", "Immediate")  # the delivery speeds, as named in Settings
 # When the agreement form's first-choice speed isn't offered: key -> label (see Settings.agreement_speed)
 AGREEMENT_FALLBACKS = {"slowest": "the slowest speed offered", "fastest": "the fastest speed offered"}
@@ -294,6 +293,23 @@ INVOICE_PAYMENT_TEXT = (
     "The transcript is sent after the check clears.")
 RUNSHEET_FILENAME_PATTERN = "{month} {year} {index} {case} - Run Sheet"
 RUNSHEET_EXISTING = ("ask", "add", "new")  # when the case has a run sheet: ask / add to it / start a new one
+# When a case's own folder (Settings.case_folders) is already there with files in it: key -> label
+CASE_FOLDER_EXISTING = {
+    "ask": "Ask",
+    "add": "Add the files to it",
+    "new": "Make a new one beside it (\"712345-2021 (2)\")",
+}
+CASE_FOLDER_PATTERN = "{index}"  # the name of a case's own folder (pdfout.case_folder_name): "712345-2021"
+
+
+def clean_folder_pattern(pattern: str) -> str:
+    """A case folder pattern with each character Windows allows in no folder name made a "-" ("{index} / {case}"
+    -> "{index} - {case}": the Settings window lets none be typed, but a settings file can be edited by hand);
+    a blank one is CASE_FOLDER_PATTERN."""
+    from .pdfout import FORBIDDEN_RE
+    return " ".join(FORBIDDEN_RE.sub("-", pattern).split()) or CASE_FOLDER_PATTERN
+
+
 # When the AI's answer may tick an attorney as the one who ordered: key -> label (see Settings.ai_ticks)
 AI_TICKS = {
     "text": "From e-mails and pasted text only",
@@ -315,6 +331,14 @@ INDEX_SHARED = {
 MATH_LAYOUTS = {
     "invoice": "By invoice",
     "firms": "Firms side by side",
+}
+# Which PDFs of the math Generate saves with the invoices (invoice_math.save_math): key -> label. "Each
+# invoice's" can go to the firm that asks; "one for all" is the reporter's own, to look back at the whole job
+MATH_SAVES = {
+    "both": "Each invoice's, and one for all of them",
+    "each": "Each invoice's",
+    "all": "One for all the invoices",
+    "off": "Don't save it",
 }
 # What "Show granular detail" can add to an invoice: key -> label
 DETAIL_ITEMS = {
@@ -354,11 +378,19 @@ TEXT_WHEN = {
     "shared": "Several reporters wrote the transcript",
     "split_share": "Granular detail shows the split; the firms ordered different pages",
     "split_even": "Granular detail shows the split; every party ordered every page",
+    "mixed_speeds": "Pages were ordered together at different speeds",
 }
 TEXT_PLACEHOLDERS = ("{case} {index} {dates} {pages} {total_pages} {parties} {number} {name} {bill_to} "
                      "{transcript} (\"transcript\" or \"transcripts\") {is} (\"is\" or \"are\") "
                      "{shared} (\"the original and the judge's index\", what firms ordering the same pages split; "
                      "with Index on shared pages split, \"the original, the index and the judge's index\")")
+
+
+# The note on an invoice some of whose pages were ordered together with a firm at another speed (added to the
+# rows of earlier settings once, v12: it shows only on such invoices, which earlier versions never made)
+MIXED_SPEEDS_ROW = {"where": "amounts", "when": "mixed_speeds",
+                    "text": "Pages ordered together at different speeds: the original is billed once, at the "
+                            "faster speed; you pay your share at the speed you ordered."}
 
 
 def default_invoice_texts(payment: str = INVOICE_PAYMENT_TEXT, footer: str = INVOICE_FOOTER) -> list[dict]:
@@ -371,6 +403,7 @@ def default_invoice_texts(payment: str = INVOICE_PAYMENT_TEXT, footer: str = INV
          "text": "Amounts are your share: {shared} of pages ordered together are split between the parties who "
                  "ordered them."},
         {"where": "amounts", "when": "split_even", "text": "Amounts are per party ({parties} parties ordered)."},
+        dict(MIXED_SPEEDS_ROW),  # (a copy: a row edited in place mustn't change the one the migration adds)
         {"where": "amounts", "when": "parties", "text": "The {transcript} {is} delivered once every party has paid."},
         {"where": "amounts", "when": "one_party", "text": "The {transcript} {is} sent after payment is received."},
         {"where": "payment", "when": "always", "text": payment},
@@ -409,6 +442,9 @@ class Settings:
     # Rates come from a rate sheet (CSV) - see rates.py
     rate_sheet: str = "Sample Rates"
     rate_sheets_dir: str = ""         # blank = %APPDATA%\YinItAgreementForm\Rate Sheets
+    # Incomplete rate sheets the user chose to use anyway, as they were then (rates.sheet_fingerprint, the last
+    # RATE_SHEETS_OK_KEPT): not warned about again until the file changes (MainWindow._check_rate_sheet)
+    rate_sheets_ok: list = field(default_factory=list)
     # Turnaround used when the rate sheet has no Days column
     days_immediate: int = 0
     days_daily: int = 1
@@ -428,9 +464,14 @@ class Settings:
     # Output
     form_choice: str = "ucs"          # "ucs", "clean" or "original" (see fill.FORMS)
     include_instructions: bool = True  # keep the UCS form's instructions page (page 2)
-    settings_version: int = 11        # bumped when from_dict must change something in older files
+    settings_version: int = 12        # bumped when from_dict must change something in older files
     output_dir: str = ""              # blank = next to the first input file, else Documents\Minute Agreements
     output_dirs: dict = field(default_factory=dict)  # a folder for one output (key of OUTPUTS); none = as above
+    # each case's files in a folder of its own inside the one above ("...\Minute Agreements\712345-2021"), named
+    # by case_folder_pattern (pdfout.case_folder_name); an output with a folder of its own keeps it
+    case_folders: bool = True
+    case_folder_pattern: str = CASE_FOLDER_PATTERN
+    case_folder_existing: str = "ask"  # one of CASE_FOLDER_EXISTING
     filename_pattern: str = FILENAME_PATTERN  # {case} {index} {attorney} {date} (of the minutes) {today}
     batch_combine_dates: bool = False  # batch: all days of a case on one form instead of one form per day
     # Generate all: the days of a case that share an invoice (invoice_joint) get one minute agreement per attorney
@@ -512,6 +553,7 @@ class Settings:
     welcomed: bool = False            # the first-run "Welcome" questions were shown (once, while there is no name)
     show_math: bool = True            # after Generate makes invoices, a window spells out how each amount was reached
     math_layout: str = "invoice"      # one of MATH_LAYOUTS: the math's tables, as last chosen in its window
+    save_math: str = "both"           # one of MATH_SAVES: the math saved as PDFs next to the invoices
     opened_year: str = ""             # the year the app was last opened in ("2026")
     new_year_day: str = ""            # the day it was first opened in a new year: the New Year yin-yang shows all day
 
@@ -658,7 +700,8 @@ class Settings:
     def folder_for(self, kind: str, general: Path | str | None = None) -> Path:
         """The folder an output (a key of OUTPUTS) is saved to: its own folder under Settings -> Options ->
         Folders, else its built-in one (OUTPUT_FOLDERS: run sheets go to Documents\\YinIt Run Sheets), else
-        `general` (the job's "Save to" folder, see batch.out_dir_for; Documents\\Minute Agreements without one)."""
+        `general` (where the job's files go: its case's own folder or its "Save to" folder, see batch.out_dir_for;
+        Documents\\Minute Agreements without one)."""
         own = self.output_dirs.get(kind, "")
         if own:
             return Path(own)
@@ -769,7 +812,7 @@ class Settings:
         yet other prices), and used when it is the one the settings name. A bundled sheet the file holds as an
         earlier version shipped it, never edited (rates.OLD_BUNDLED: Sample Rates with Daily copies at $1.30), is
         the sheet as it ships now: else that old copy came back as "Sample Rates (imported)", and was used."""
-        from .rates import BUNDLED_DIR, is_old_bundled, sheets_dir
+        from .rates import bundled_dir, is_old_bundled, sheets_dir
         folder = sheets_dir(self.rate_sheets_dir)
 
         def same(target: Path, text: str) -> bool:
@@ -783,8 +826,11 @@ class Settings:
             first = folder / Path(name).name  # (the name only: never a path out of the folder)
             # (export_to read the sheet as text: its line ends are "\n", whatever they were on disk)
             if any(is_old_bundled(first.name, t.encode("utf-8")) for t in (text, text.replace("\n", "\r\n"))):
+                bundled = bundled_dir()
+                if bundled is None:
+                    continue  # (the courthouse brings no rate sheets: the one in the folder stays as it is)
                 try:
-                    text = (BUNDLED_DIR / first.name).read_text(encoding="utf-8-sig")
+                    text = (bundled / first.name).read_text(encoding="utf-8-sig")
                 except OSError:
                     continue  # (the bundled sheet can't be read: the one in the folder stays as it is)
             target, n = first, 1
@@ -840,6 +886,7 @@ class Settings:
         # v4 added outputs; unknown ones are dropped. Lists and tables keep only entries of the right kind.
         s.outputs = [o for o in s.outputs if isinstance(o, str) and o in OUTPUTS]
         s.invoice_speeds = [x for x in s.invoice_speeds if isinstance(x, str)]  # none: the job's own speed
+        s.rate_sheets_ok = [x for x in s.rate_sheets_ok if isinstance(x, str)][-RATE_SHEETS_OK_KEPT:]
         if data.get("invoice_choice") is False:  # v5: "offer every speed" off billed the speed chosen for the
             s.invoice_speeds = []                 # form alone, which is what no speed ticked does now
         s.invoice_turnaround = {k: v for k, v in s.invoice_turnaround.items()
@@ -865,6 +912,8 @@ class Settings:
             s.invoice_index_shared = "each"
         if s.math_layout not in MATH_LAYOUTS:
             s.math_layout = "invoice"
+        if s.save_math not in MATH_SAVES:
+            s.save_math = "both"
         s.invoice_detail_items = [k for k in s.invoice_detail_items if isinstance(k, str) and k in DETAIL_ITEMS]
         s.excerpt_hidden_speeds = [k for k in s.excerpt_hidden_speeds if isinstance(k, str)]
         # an answer about two firms: [key, key, same, name, name]; a row saved by 2.2.0 ([key, key, same]) gets
@@ -874,6 +923,9 @@ class Settings:
                           and all(isinstance(k, str) and k for k in r[:2]) and isinstance(r[2], bool)]
         if s.runsheet_existing not in RUNSHEET_EXISTING:
             s.runsheet_existing = "ask"
+        if s.case_folder_existing not in CASE_FOLDER_EXISTING:
+            s.case_folder_existing = "ask"
+        s.case_folder_pattern = clean_folder_pattern(s.case_folder_pattern)
         if s.ai_ticks not in AI_TICKS:
             s.ai_ticks = "text"
         # v8: a folder for each output. The run sheets' folder (runsheet_dir before) is one of them now.
@@ -892,6 +944,14 @@ class Settings:
                            if isinstance(r, dict) and isinstance(r.get("where"), str) and r["where"] in TEXT_PLACES
                            and isinstance(r.get("when"), str) and r["when"] in TEXT_WHEN
                            and isinstance(r.get("text"), str)]
+        # v12: firms of a split order are billed the speeds they committed to; an invoice of pages ordered at
+        # different speeds says how (once: under the amounts, after the notes on the speeds and the split, as in
+        # default_invoice_texts; before the other amounts rows without them, last without any)
+        if version < 12 and not any(r["when"] == "mixed_speeds" for r in s.invoice_texts):
+            notes = [i + 1 for i, r in enumerate(s.invoice_texts)
+                     if r["where"] == "amounts" and r["when"] in ("speeds", "split_share", "split_even")]
+            first = next((i for i, r in enumerate(s.invoice_texts) if r["where"] == "amounts"), len(s.invoice_texts))
+            s.invoice_texts.insert(max(notes, default=first), dict(MIXED_SPEEDS_ROW))
         s.records_columns = {k: [c for c in v if isinstance(c, str)] for k, v in s.records_columns.items()
                              if k in ("invoices", "activity") and isinstance(v, list)}
         if isinstance(data.get("zoom"), int) and not isinstance(data.get("zoom"), bool):

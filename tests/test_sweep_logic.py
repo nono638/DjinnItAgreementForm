@@ -219,7 +219,7 @@ def _dates_fields(path, key_of):
 
 
 def _width(text: str, fs: float) -> float:
-    """The width a text takes on a form, measured with the fields' font itself, not with fill.text_width (which
+    """The width a text takes on a form, measured with the fields' font itself, not with pdfout.text_width (which
     once measured "9/28/2026–10/2/2026" 14 points short)."""
     return pymupdf.Font("helv").text_length(text, fontsize=fs)
 
@@ -406,6 +406,7 @@ def test_the_detailed_copy_is_dated_as_its_invoice_across_midnight(s, tmp_path, 
     for module in (invoice, records, deliver):
         monkeypatch.setattr(module, "date", Midnight, raising=False)
     s.invoice_detailed_copy = True
+    s.save_math = "off"  # (the invoice and its copy, each read for its number and date)
     case = make_case({**ROE, "dates": "12/30/2026", "est_pages": "30"}, attorneys=[ALEX])
     ledger = Ledger(tmp_path / "r.db")
     made = deliver.generate(case, s, tmp_path / "out", ["invoice"], InvoiceOpts(30), ledger)

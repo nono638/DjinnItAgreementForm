@@ -50,6 +50,7 @@ from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
 
+from .courthouses import OUTPUTS
 from .dates import us_date
 from .invoice_calc import fmt, money
 from .log import error as log_error
@@ -64,7 +65,9 @@ NUMBER_LOCK = threading.RLock()
 # Opening a database makes its tables and adds missing columns: two threads doing that at once (the batch and the
 # window) would both try to add the same column
 _SCHEMA_LOCK = threading.Lock()
-KINDS = {"agreement": "Minute agreement", "mofr": "MOFR", "invoice": "Invoice", "runsheet": "Run sheet"}
+# What each kind of file made is called: the courthouse's outputs (the same dict, refreshed by courthouses.use).
+# A record of a kind the courthouse doesn't have is shown by its key (KINDS.get(kind, kind)).
+KINDS = OUTPUTS
 TRASH_DAYS = 30  # a deleted record can be restored for this long
 BACKUPS_KEPT = 10  # daily copies of the database kept (the oldest are deleted)
 FORCED_KEPT = 5    # copies made with Back up now, or before a copy is put back, kept besides the daily ones

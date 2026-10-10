@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..deliver import backup_folder, ledger_for
-from ..fill import safe_filename
+from ..pdfout import safe_filename
 from ..invoice_calc import fmt, money
 from ..log import error as log_error
 from ..rates import parse_amount

@@ -114,5 +114,7 @@ def test_folder_in_forms_out(settings, tmp_path):
     seen = []
     saved = fill_jobs(jobs, settings, progress=lambda i, n, name: seen.append((i, n)))
     assert len(jobs) == 2 and len(saved) == 2 and seen == [(0, 2), (1, 2)]
-    assert all(p.exists() and p.parent == tmp_path / "out" for p in saved)
+    # each case in its own folder (Settings.case_folders)
+    assert sorted(p.parent.name for p in saved) == ["700001-2025", "712222-2024"]
+    assert all(p.exists() and p.parent.parent == tmp_path / "out" for p in saved)
     assert not any(j.error for j in jobs)

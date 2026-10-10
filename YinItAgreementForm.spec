@@ -1,5 +1,6 @@
 # PyInstaller spec - build with build_exe.bat / build_installer.bat
 import re
+import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.win32.versioninfo import (VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable,
@@ -25,6 +26,11 @@ version_info = VSVersionInfo(
 )
 
 hidden = collect_submodules("winrt") + ["openpyxl"]  # openpyxl: imported only when needed (run sheet, Excel export)
+# Each output's code (its maker, policy and window panel: courthouses.OutputSpec) is imported by name when it is
+# needed, which the analysis can't follow: the modules the built-in courthouses name are listed here.
+sys.path.insert(0, SPECPATH)
+from minute_filler.courthouses import BUILT_IN
+hidden += sorted({m for c in BUILT_IN for m in c.modules()})
 
 a = Analysis(
     ["minute_filler/main.py"],

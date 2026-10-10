@@ -20,6 +20,8 @@ first.
 
 A run sheet made before the app was renamed (2.0) is still found and added to: its hidden "DjinnIt" sheet
 (OLD_META) is read, and replaced by a "YinIt" one when the run sheet is written again (meta_sheet, _meta).
+
+RunSheets is the output deliver.generate adds the takes through (courthouses.OutputSpec.maker).
 """
 from __future__ import annotations
 
@@ -33,14 +35,18 @@ from copy import copy
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .dates import us_date
 from .extract_regex import find_dates, norm_index, strip_line_numbers, tidy_name, title_page_count
-from .fill import safe_filename, unique_path
+from .pdfout import safe_filename, unique_path
 from .log import error as log_error
 from .models import CaseInfo
 from .settings import Settings
 from .takes import TITLE_ONLY, body_pages, find_takes, reporter_label, title_reporters
+
+if TYPE_CHECKING:
+    from .deliver import Making
 
 SHEET, BY_REPORTER, META = "Run Sheet", "By Reporter", "YinIt"
 FORMAT = "YinIt run sheet 1"
@@ -382,7 +388,7 @@ def new_path(case: CaseInfo, rows: list[Row], s: Settings) -> Path:
     and the first day of the takes ("June 2026 712345-2021 Jane Roe v. Sam Poe - Run Sheet.xlsx")."""
     days = [r.day for r in rows if r.day]
     first = min(days) if days else date.today()
-    from .fill import short_caption
+    from .pdfout import short_caption
     try:
         name = s.runsheet_filename_pattern.format(
             month=first.strftime("%B"), year=first.year, case=short_caption(case.get("case_name")) or "Case",
@@ -600,7 +606,7 @@ def _fill_sheet(ws, rows: list[Row], case_name: str, indexes: list[str], case: C
     fill = lambda color: PatternFill("solid", start_color=color, end_color=color)
     thin = Side(style="thin", color="BFBFBF")
     box = Border(left=thin, right=thin, top=thin, bottom=thin)
-    from .fill import short_caption
+    from .pdfout import short_caption
     ws["A1"] = short_caption(case_name, 120) or "Run sheet"
     ws["A1"].font = Font(size=14, bold=True)
     details = [f"Index No. {', '.join(indexes)}" if indexes else ""]
@@ -838,3 +844,22 @@ def _append_theirs(path: Path, opts: RunSheetOpts) -> None:
         used.add(r)
         last = max(last, r)
     _save(wb, path)
+
+
+class RunSheets:
+    """The run sheet as an output (courthouses.OutputSpec.maker), made by deliver.generate before any other
+    file (group "sheet")."""
+
+    @staticmethod
+    def check(m: Making) -> None:
+        """ValueError (NO_RUNSHEET) when there are no takes to add, before anything is made."""
+        if not (m.runsheet and m.runsheet.rows):
+            raise ValueError(NO_RUNSHEET)
+
+    @staticmethod
+    def make(m: Making) -> None:
+        """Adds the takes to the case's run sheet (add_takes), recorded with the pages of the takes added; a run
+        sheet that had every take already is left as it was, and not recorded."""
+        path = add_takes(m.case, m.runsheet, m.s, m.folders or [])
+        if m.runsheet.created or m.runsheet.added:
+            m.record("runsheet", path, count=m.runsheet.added_pages)  # the pages of the takes added

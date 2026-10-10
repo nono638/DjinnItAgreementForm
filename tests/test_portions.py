@@ -1,10 +1,13 @@
 """Excerpts (who ordered which pages): each firm's invoice bills only the days it is ticked on and, of a day
 split in the Excerpts window (Job.portions), only the pages it ordered. Pages ordered together share the original
-and the judge's index; each firm pays its own copies and (by default) its own index. Also the index setting, the Parties
-number (and one below the firms ticked), portions kept to be checked when the pages or the attorneys change, the
-rows following a firm renamed or filled in by a merge, the same attorney entered twice, a run stopped part way,
-the files counted for Generate all and the records of each firm. All names and numbers are made up; prices are from the bundled "Sample Rates" sheet (Regular: original
-$4.30, copy, e-mailed copy and index $1.00 a page; Expedite: $5.40 and $1.10)."""
+and the judge's index; each firm pays its own copies and (by default) its own index. Also the index setting, the
+Parties number (and one below the firms ticked), portions kept to be checked when the pages or the attorneys
+change, the rows following a firm renamed or filled in by a merge, the same attorney entered twice, a run stopped
+part way, the files counted for Generate all and the records of each firm. The prices of each speed for firms
+sharing pages are those of a courthouse whose firms choose a speed from their invoices (split_orders_choose);
+Queens's firms commit to one (test_mixed_speeds.py). All names and numbers are made up; prices are from the
+bundled "Sample Rates" sheet (Regular: original $4.30, copy, e-mailed copy and index $1.00 a page; Expedite:
+$5.40 and $1.10)."""
 import json
 from decimal import Decimal
 
@@ -39,6 +42,7 @@ def s(tmp_path):
     s = pat_settings()
     s.output_dir = str(tmp_path / "out")
     s.records_dir = str(tmp_path / "records")
+    s.save_math = "off"  # (files_to_make counts the invoices here; test_show_the_math.py saves the math)
     return s
 
 
@@ -84,6 +88,7 @@ def test_every_firm_ordering_every_page_pays_what_the_whole_invoice_splits(s):
                     assert mine.pages == sum(days) and mine.parties == n
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_four_days_priced_by_hand(four_days, s):
     """Alex: 30 pages alone, 60 shared, 50 shared. Dana: 20 alone, 60 shared, 40 alone, 50 shared. Every day is
     indexed (one of them has 50 pages or more)."""
@@ -142,7 +147,7 @@ def test_the_index_setting_is_kept_and_checked(tmp_path):
     """invoice_index_shared defaults to "each"; a value it can't be ("sometimes") loads as "each". A file saved
     before v11 says "each" whatever it said (its "split" was the old default, from a misunderstanding); "split"
     chosen in a v11 file stays."""
-    assert Settings().invoice_index_shared == "each" and Settings().settings_version == 11
+    assert Settings().invoice_index_shared == "each" and Settings().settings_version >= 11
     s = Settings()
     for version, saved, loaded in ((6, "sometimes", "each"), (10, "split", "each"), (10, "each", "each"),
                                    (11, "split", "split"), (11, "sometimes", "each")):
@@ -154,6 +159,7 @@ def test_the_index_setting_is_kept_and_checked(tmp_path):
 
 # ------------------------------------------------------------------ the days and pages of each firm
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_generate_all_makes_an_invoice_per_firm_for_its_own_days_and_pages(four_days, s):
     assert files_to_make(four_days, ["invoice"], s) == 2
     fill_jobs(four_days, s, outputs=["invoice"])
@@ -188,6 +194,7 @@ def test_a_firm_is_billed_only_for_the_days_it_is_ticked(tmp_path, s):
     assert firms["Dana Smith"].case.get("dates") == "6/4/2026" and firms["Dana Smith"].opts.parties == 1
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_parties_number_shares_a_day_without_portions(tmp_path, s):
     job, = read_days(tmp_path, s, {"June 3, 2026": 30})
     job.case.attorneys = [alex()]
@@ -251,6 +258,7 @@ def test_a_day_with_nobody_ticked_is_billed_to_everyone_on_the_invoice(s, tmp_pa
     assert firms == {"Alex B. Counsel": [("6/3/2026", 30), ("6/4/2026", 20)], "Dana Smith": [("6/4/2026", 20)]}
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_a_firms_detail_says_which_pages_are_shared(tmp_path, s):
     job, = read_days(tmp_path, s, {"June 3, 2026": 30})
     job.case.attorneys = [alex(), dana()]
@@ -329,6 +337,7 @@ def test_portions_of_a_day_name_only_its_own_attorneys(tmp_path, s):
     assert not jobs[0].invoiced and "check Excerpts… for 6/3/2026" in jobs[0].error and jobs[1].invoiced
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_same_attorney_entered_twice_is_one_party(tmp_path, s):
     """Two entries with the same Attorney.key() are one party with one invoice; a blank row being typed in is
     no party at all."""
@@ -347,8 +356,8 @@ def test_the_same_attorney_entered_twice_is_one_party(tmp_path, s):
 def test_a_stopped_run_does_not_bill_an_attorney_twice(tmp_path, s, monkeypatch):
     """Dana's invoice can't be saved (the PDF is open): Alex's was made. Generate all again makes Dana's only,
     and then the days are invoiced. Days on one invoice and days billed alone alike."""
-    from minute_filler import deliver
-    real = deliver.make_invoice
+    from minute_filler import invoice
+    real = invoice.make_invoice
     calls = []
 
     def flaky(case, atty, *a, **k):
@@ -357,7 +366,7 @@ def test_a_stopped_run_does_not_bill_an_attorney_twice(tmp_path, s, monkeypatch)
             raise PermissionError("the PDF is open in another program")
         return real(case, atty, *a, **k)
 
-    monkeypatch.setattr(deliver, "make_invoice", flaky)
+    monkeypatch.setattr(invoice, "make_invoice", flaky)  # (called by invoice.Invoices)
 
     def billed() -> list[str]:
         """Who the invoices made since the round began are for."""
@@ -394,6 +403,7 @@ def test_shared_pages_show_without_trailing_zeros_and_undated_days_keep_the_case
     assert firms == {"Alex B. Counsel": "6/3/2026", "Dana Smith": "6/3/2026, 6/4/2026"}
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_a_parties_number_below_the_firms_ticked_bills_no_more_than_their_share(tmp_path, s):
     """Bug (1.8.0): Parties 1 with two attorneys ticked billed each of them the whole original and index."""
     job, = read_days(tmp_path, s, {"June 3, 2026": 30})

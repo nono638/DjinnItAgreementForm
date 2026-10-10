@@ -12,6 +12,14 @@ firm's invoice. Split run cuts a run in two; Remove run (or the Delete key) give
 excerpts every day of the case. A right-click on a run offers the same. Every change is kept at once (on the days'
 jobs) and the main window follows it; a change made there (an attorney ticked, a speed, Peripherals...) shows here at
 once too: the window stays open beside it.
+
+Each firm orders its pages at a speed (Job.speeds, and a run's own in Job.portions; see excerpts.py). The row of
+boxes above the table sets a firm's speed for all its pages of the case (_firm_speed_boxes); a right-click on a
+firm's box of a run sets the speed of that run alone ("Smith Law on this run at…", _run_menu). A ticked box of a
+run whose firms ordered at set speeds says the speed and what the firm pays for the run ("Daily · $345.00");
+firms that ordered a run together must commit to one (until then it reads "Expedite? · $98.00", priced at the
+agreement form's speed, in amber). Only the runs of a firm billed alone, choosing from its invoice, are priced at
+each speed offered: the "Prices for" boxes and their columns are hidden while there is none.
 """
 from __future__ import annotations
 
@@ -31,6 +39,8 @@ from ..excerpts import (
 from ..invoice import own_words, shared_words
 from ..invoice_calc import fmt
 from ..invoice_math import money_exact
+from ..rates import speed_key
+from .widgets import QuietCombo
 from .zoom import z
 
 DATE, WEEKDAY, PAGES, PLACE = 0, 1, 2, 3  # the first columns
@@ -39,6 +49,8 @@ FIRST_FIRM = 4  # then a box per firm, the pages billed and a price per speed
 # tinted with it (see-through, so it works on the light and the dark theme) and their line starts with it
 GROUP_COLORS = ("#2563eb", "#16a34a", "#ea580c", "#9333ea", "#0d9488", "#db2777", "#ca8a04", "#dc2626")
 TINT = 80  # how opaque a box's tint is (of 255)
+AMBER = "#d97706"  # (a firm's box without the speed it must commit to: the warnings' amber, light and dark)
+VARIES = "(varies)"  # the Speed box of a firm whose days or runs are at different speeds
 
 
 def weekdays(label: str) -> str:
@@ -66,6 +78,7 @@ class ExcerptsWindow(QDialog):
         self.s, self.changed = s, changed
         self.setWindowTitle("Excerpts: who ordered which pages")
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        self.group: list = []  # the jobs shown (the days of an invoice)
         self.days: list[Day] = []
         self.runs: list[Run] = []
         self.firms = []
@@ -77,10 +90,24 @@ class ExcerptsWindow(QDialog):
                        "around it make room; tick the firms that ordered it. Remove run (or Delete) gives a run's "
                        f"pages to the run above; right-click a run for more. Pages several firms ordered split "
                        f"{shared_words(s)}; each firm pays for its own {own_words(s)}. A run nobody ticks is billed "
-                       "to nobody. Each colour is one set of firms ordering together, as listed under the table.")
+                       "to nobody. Each colour is one set of firms ordering together, as listed under the table. "
+                       "Firms ordering the same pages commit to a speed: set each firm's above the table, or one "
+                       "run's by right-clicking its box. At different speeds the original is billed once, at the "
+                       "fastest, and each firm pays its share at its own speed.")
         intro.setWordWrap(True)
         intro.setObjectName("muted")
         lay.addWidget(intro)
+        speeds = QHBoxLayout()  # a firm's speed for all its pages of the case (Job.speeds), a box per firm
+        self.firm_speeds_label = QLabel("Speed ordered (all its pages):")
+        self.firm_speeds_label.setToolTip("The speed each firm ordered its pages at. A firm ordering pages "
+                                          "together with another commits to one; a firm alone may choose from "
+                                          "its invoice. A run at another speed: right-click its box.")
+        speeds.addWidget(self.firm_speeds_label)
+        self.firm_speed_row = QHBoxLayout()
+        speeds.addLayout(self.firm_speed_row)
+        speeds.addStretch(1)
+        self.firm_speed_boxes: dict[str, QuietCombo] = {}
+        lay.addLayout(speeds)
         opts = QHBoxLayout()
         self.place = QCheckBox("Show each run's place in the day")
         self.place.setChecked(s.excerpt_show_place)
@@ -127,6 +154,7 @@ class ExcerptsWindow(QDialog):
             row.addWidget(b)
         row.addStretch(1)
         self.problem = QLabel("")
+        self._speeds_warning = ""  # (the speeds warning shown in it, taken away once the speeds are fixed)
         self.problem.setObjectName("problem")
         self.problem.setWordWrap(True)
         row.addWidget(self.problem, 1)
@@ -159,7 +187,7 @@ class ExcerptsWindow(QDialog):
         """Forgets the days shown and closes the window (their jobs are gone, or have no days to show: New job,
         a job removed, a job without a transcript)."""
         self._pending = None
-        self.days, self.runs, self.firms = [], [], []
+        self.group, self.days, self.runs, self.firms = [], [], [], []
         self._loading = True
         self.table.setRowCount(0)
         self._loading = False
@@ -181,21 +209,32 @@ class ExcerptsWindow(QDialog):
     def _fill(self, group: list) -> None:
         """Reads the days (those with pages), the firms and the runs of these jobs afresh and shows them."""
         self._pending = None
+        self.group = list(group)
         self.days = [d for d in case_days(group) if d.pages > 0]
         self.firms = firms_of(group)
         self.runs = [r for d in self.days for r in runs_of(d, self.firms)]
         self._show()
 
     def _show(self) -> None:
-        """Fills the table and the prices under it from self.runs."""
+        """Fills the table, the firms' speed boxes above it, and the prices and the speeds warning under it, from
+        self.runs."""
         p = prices(self.days, self.runs, self.s)
         self.speeds = p.speeds
         self._speed_boxes(p.speeds)
-        shown = [sp for sp in p.speeds if sp not in self.s.excerpt_hidden_speeds]
+        self._firm_speed_boxes()
+        # "Prices for" and its "Each pays · <speed>" columns price the runs whose firms choose from their
+        # invoices: hidden while every run is priced at the speeds its firms ordered
+        choice = bool(p.runs) or not p.ordered
+        self.speeds_label.setVisible(choice)
+        for cb in self.speed_boxes.values():
+            cb.setVisible(choice)
+        shown = [sp for sp in p.speeds if sp not in self.s.excerpt_hidden_speeds] if choice else []
         firms = self.firms
         heads = ["Date", "Weekday", "Pages", "Place in the day"] + [a.label() for a in firms] + [
             "Pages billed"] + [f"Each pays · {sp}" for sp in shown]
-        colour = {keys: GROUP_COLORS[i % len(GROUP_COLORS)] for i, (keys, _, _) in enumerate(p.groups)}
+        # a colour per set of firms ordering together (those at set speeds: per set of firms and speeds)
+        sets = [keys for keys, _, _ in p.groups] + [pairs for pairs, _, _ in p.ordered_groups]
+        colour = {keys: GROUP_COLORS[i % len(GROUP_COLORS)] for i, keys in enumerate(sets)}
         self._loading = True
         t = self.table
         keep = t.currentRow()
@@ -220,17 +259,29 @@ class ExcerptsWindow(QDialog):
             pages.setToolTip(f"Type a run of {day.label}'s pages, e.g. {day.span(1, min(day.pages, 20))}"
                              if day.splittable else "This job covers several days: it is ordered whole")
             self._cell(r, PLACE, day.place(run.start, run.end), False)
+            at = p.ordered.get(id(run))  # (key -> (speed, what it pays): firms at the speeds they ordered)
+            group = tuple((k, at[k][0]) for k in run.keys) if at else tuple(run.keys)
             for c, a in enumerate(firms):
                 it = QTableWidgetItem("")
                 it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
                 on = a.key() in run.keys
                 it.setCheckState(Qt.Checked if on else Qt.Unchecked)
-                if on and tuple(run.keys) in colour:
-                    tint = QColor(colour[tuple(run.keys)])
+                if on and group in colour:
+                    tint = QColor(colour[group])
                     tint.setAlpha(TINT)
                     it.setBackground(tint)
                     it.setToolTip(f"Ordered together by {len(run.keys)} firms: they share these pages"
                                   if len(run.keys) > 1 else "Ordered by this firm alone")
+                if on and at and a.key() in at:
+                    speed, pays = at[a.key()]
+                    if run.speed(a.key()):
+                        it.setText(f"{speed} · {money_exact(pays)}")
+                    else:  # (it must commit to one: priced at the agreement form's until then)
+                        it.setText(f"{speed}? · {money_exact(pays)}")
+                        it.setForeground(QColor(AMBER))
+                        it.setToolTip(f"No speed set: these pages are ordered with another firm, so this one "
+                                      f"commits to a speed (Generate asks). Priced at {speed}, the agreement "
+                                      "form's, until then. Right-click to set it, or set it above the table.")
                 t.setItem(r, FIRST_FIRM + c, it)
             self._cell(r, first, str(billed_in(day, run)) if run.keys else "0 (nobody ordered it)", False)
             each = p.runs.get(id(run), {})
@@ -241,12 +292,20 @@ class ExcerptsWindow(QDialog):
                 self._cell(r, first + 1 + k, text, False)
         t.setColumnHidden(PLACE, not self.s.excerpt_show_place)
         t.resizeColumnsToContents()
+        for c in range(FIRST_FIRM, first):  # (a box and its text, "Immediate · $72.50", sized to the pixel came
+            t.setColumnWidth(c, t.columnWidth(c) + z(10))  # out "Immediate · …": the box's margin isn't counted)
         t.horizontalHeader().setSectionResizeMode(PAGES, QHeaderView.Interactive)
         t.setColumnWidth(PAGES, max(t.columnWidth(PAGES), z(110)))
         if 0 <= keep < t.rowCount():
             t.selectRow(keep)
         self._loading = False
         self.summary.setText(self._summary(p, shown))
+        held = [x for d in self.days for x in d.job.speed_problems(self.s)]
+        warned, self._speeds_warning = self._speeds_warning, "⚠ " + held[0] if held else ""
+        if held:  # (three speeds on the same pages: the invoice waits; a speed the rate sheet lacks: Generate stops)
+            self.problem.setText(self._speeds_warning)
+        elif warned and self.problem.text() == warned:  # (fixed since, by the strip or a right-click)
+            self.problem.setText("")
 
     def _cell(self, r: int, c: int, text: str, editable: bool) -> QTableWidgetItem:
         """Puts a text cell in the table (only a run's Pages can be typed in) and returns it."""
@@ -257,9 +316,11 @@ class ExcerptsWindow(QDialog):
         return it
 
     def _summary(self, p, shown: list[str]) -> str:
-        """The prices under the table: by the firms ordering together, then each firm's invoice."""
+        """The prices under the table: by the firms ordering together (at the speeds they ordered, when set:
+        "Counsel & Counsel (Daily) + Smith Law (Immediate): 60 pp. - Counsel & Counsel pays $345.00, Smith Law
+        $435.00 (one original, at Immediate)"), then each firm's invoice."""
         names = {a.key(): a.label() for a in self.firms}
-        if not shown:
+        if not shown and not p.ordered:
             return "<i>Tick a speed above to see the prices.</i>"
         lines = ["<b>The pages by who ordered them together</b> (each with its colour in the table)"]
         for i, (keys, pages, each) in enumerate(p.groups):
@@ -269,15 +330,84 @@ class ExcerptsWindow(QDialog):
             swatch = f'<span style="color:{GROUP_COLORS[i % len(GROUP_COLORS)]}">■</span> '
             lines.append(f"{swatch}{who}{' only' if alone else ''}: {pages} pp. - "
                          + (f"costs {costs}" if alone else f"each of the {len(keys)} pays {costs}"))
+        order = {sp.name: i for i, sp in enumerate(self.s.sheet().speeds)}  # (cheapest first: the last, fastest)
+        for i, (pairs, pages, each) in enumerate(p.ordered_groups, len(p.groups)):
+            who = " + ".join(f"{names.get(k, k)} ({sp})" for k, sp in pairs)
+            swatch = f'<span style="color:{GROUP_COLORS[i % len(GROUP_COLORS)]}">■</span> '
+            if len(pairs) == 1:
+                lines.append(f"{swatch}{who} only: {pages} pp. - costs {money_exact(each[pairs[0][0]])}")
+                continue
+            pays = ", ".join(f"{names.get(k, k)} {'pays ' if n == 0 else ''}{money_exact(each[k])}"
+                             for n, (k, _) in enumerate(pairs))
+            kinds = list(dict.fromkeys(sp for _, sp in pairs))
+            fastest = max(kinds, key=lambda sp: order.get(sp, -1))
+            how = f" (one original, at {fastest})" if len(kinds) > 1 else ""
+            lines.append(f"{swatch}{who}: {pages} pp. - {pays}{how}")
         nobody = sum(billed_in(r.day, r) for r in self.runs if not r.keys)
         if nobody:
             lines.append(f"Nobody: {nobody} pp. (not billed)")
         if p.firms:
             lines.append("<br><b>Each firm's invoice</b> (rounded up to the cent)")
             for key, amounts in p.firms:
-                costs = " · ".join(f"{sp} {fmt(amounts[sp])}" for sp in shown if sp in amounts)
+                # (the speeds offered, as ticked above; an invoice of the speed the firm ordered: that one, ticked
+                # or not)
+                costs = " · ".join(f"{sp} {fmt(amounts[sp])}" for sp in amounts
+                                   if key in p.committed or sp in shown or sp not in p.speeds)
                 lines.append(f"{names.get(key, key)}: {costs}")
         return "<br>".join(lines)
+
+    def _firm_speed_boxes(self) -> None:
+        """The row above the table: a box per firm with the speed it ordered all its pages of the case at
+        (Job.speeds of each day it ordered on; VARIES when they differ, or a run has its own), "Chooses on the
+        invoice" for none. Built afresh with the table; choosing one sets it on every day (_firm_speed_chosen)."""
+        while self.firm_speed_row.count():
+            w = self.firm_speed_row.takeAt(0).widget()
+            if w is not None:  # hidden at once: shown twice in a row, a box never laid out stayed over the window
+                w.hide()       # (640 x 480 at its top left) until the event loop deleted it
+                w.deleteLater()
+        self.firm_speed_boxes = {}
+        sheet = self.s.sheet()
+        speeds = [sp.name for sp in sheet.speeds]
+        for a in self.firms:
+            k = a.key()
+            mine = {r.speed(k) for r in self.runs if k in r.keys}
+            if not mine:
+                continue  # (it orders nothing of the case)
+            box = QuietCombo()
+            if len(mine) > 1:
+                box.addItem(VARIES, None)
+            box.addItem("Chooses on the invoice", "")
+            for sp in speeds:
+                box.addItem(sp, sp)
+            now = next(iter(mine)) if len(mine) == 1 else None
+            found = sheet.find(now) if now else None  # ("Expedited" is the sheet's "Expedite")
+            if now and found is None:  # (a speed the rate sheet doesn't have: kept, and said, as in the card)
+                box.addItem(f"{now} (not on the rate sheet)", now)
+            box.setCurrentIndex(max(0, box.findData(found.name if found else now)) if now is not None else 0)
+            box.setToolTip(f"The speed {a.label()} ordered all its pages of the case at")
+            box.activated.connect(lambda _i, key=k, b=box: self._firm_speed_chosen(key, b.currentData()))
+            label = QLabel(a.label())
+            self.firm_speed_row.addWidget(label)
+            self.firm_speed_row.addWidget(box)
+            self.firm_speed_row.addSpacing(z(12))
+            self.firm_speed_boxes[k] = box
+        self.firm_speeds_label.setVisible(bool(self.firm_speed_boxes))
+
+    def _firm_speed_chosen(self, key: str, speed) -> None:
+        """A firm's speed for all its pages of the case (the row above the table): set on every day it ordered
+        on, its runs' own speeds cleared (Job.set_speed); "" = chooses from its invoice. The table is shown again
+        after the box's own signal (it is built afresh with the table)."""
+        if speed is None:
+            return
+        for day in self.days:
+            if any(key in r.keys for r in self._day_runs(day)):
+                day.job.set_speed(key, speed)
+        QTimer.singleShot(0, self._speeds_kept)
+
+    def _speeds_kept(self) -> None:
+        """After a speed is set: the days read again and shown, and the main window told."""
+        self._fill(self.group)
+        self.changed()
 
     def _speed_boxes(self, speeds: list[str]) -> None:
         """A box per speed offered: unticked hides its prices (kept in Settings.excerpt_hidden_speeds)."""
@@ -286,6 +416,7 @@ class ExcerptsWindow(QDialog):
         while self.speed_row.count():
             w = self.speed_row.takeAt(0).widget()
             if w is not None:
+                w.hide()  # (at once, as in _firm_speed_boxes)
                 w.deleteLater()
         self.speed_boxes = {}
         for sp in speeds:
@@ -467,10 +598,12 @@ class ExcerptsWindow(QDialog):
         if chosen is not None:
             self._select(*chosen)
 
-    def _run_menu(self, run: Run) -> tuple[QMenu, list]:
+    def _run_menu(self, run: Run, key: str | None = None) -> tuple[QMenu, list]:
         """The right-click menu of a run, and the slot of each of its actions (by the action's data): Split run
         (not for a run that can't be cut), Remove run (not for a day's only run), Remove this day's excerpts and
-        Remove all excerpts."""
+        Remove all excerpts; on the box of a firm that ordered the run (key), "<firm> on this run at…" with the
+        rate sheet's speeds (the run's own ticked), and "<firm>: same as its other pages" when the run's speed
+        isn't the day's and the day has other runs."""
         menu = QMenu(self)
         slots = []
         for text, slot, on in (("Split run", self._split, run.day.splittable and run.end > run.start),
@@ -481,18 +614,53 @@ class ExcerptsWindow(QDialog):
             act.setEnabled(on)
             act.setData(len(slots))
             slots.append(slot)
+        if key is not None and key in run.keys:
+            name = next((a.label() for a in self.firms if a.key() == key), key)
+            menu.addSeparator()
+            sub = menu.addMenu(f"{name} on this run at…")
+            for sp in self.s.sheet().speeds:
+                act = sub.addAction(sp.name)
+                act.setCheckable(True)
+                act.setChecked(bool(run.speed(key)) and speed_key(run.speed(key)) == sp.key)  # ("Expedited")
+                act.setData(len(slots))
+                slots.append(lambda k=key, name=sp.name: self._set_run_speed(k, name))
+            day_speed = run.day.job.speeds.get(key, "")
+            if run.speed(key) != day_speed and len(self._day_runs(run.day)) > 1:
+                act = menu.addAction(f"{name}: same as its other pages" + (f" ({day_speed})" if day_speed else ""))
+                act.setData(len(slots))
+                slots.append(lambda k=key: self._set_run_speed(k, None))
         return menu, slots
 
+    def _set_run_speed(self, key: str, speed: str | None) -> None:
+        """The speed firm `key` ordered the run chosen at (None: the same as its other pages of the day, Job.speeds),
+        kept on its day (excerpts.store keeps a run's own speed only where it differs)."""
+        run = self._chosen()
+        if run is None or key not in run.keys:
+            return
+        day = run.day
+        runs = self._day_runs(day)
+        if speed is None:
+            if day.job.speeds.get(key):
+                run.speeds[key] = day.job.speeds[key]
+            else:
+                run.speeds.pop(key, None)
+        else:
+            run.speeds[key] = speed
+        self._keep(day, runs)
+        self._select(day.job, run.start)
+
     def _context_menu(self, pos) -> None:
-        """A right-click on a run: its row is chosen, then its menu (_run_menu) shown. The table can be read
-        afresh while the menu is open (the main window changed the days): what is picked acts on the same
-        run found again, or, when it is gone, says so."""
+        """A right-click on a run: its row is chosen, then its menu (_run_menu) shown, with the speeds of the firm
+        whose box was clicked. The table can be read afresh while the menu is open (the main window changed the
+        days): what is picked acts on the same run found again, or, when it is gone, says so."""
         row = self.table.rowAt(pos.y())
         if not 0 <= row < len(self.runs):
             return
         self.table.selectRow(row)
         run = self.runs[row]
-        menu, slots = self._run_menu(run)
+        col = self.table.columnAt(pos.x())  # (a firm's box: its speed on this run too)
+        key = self.firms[col - FIRST_FIRM].key() if FIRST_FIRM <= col < FIRST_FIRM + len(self.firms) else None
+        menu, slots = self._run_menu(run, key)
         act = menu.exec(self.table.viewport().mapToGlobal(pos))
         if act is None or not act.isEnabled():
             return

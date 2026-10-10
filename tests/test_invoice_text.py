@@ -84,7 +84,8 @@ def test_old_payment_and_footer_are_kept():
     texts = Settings.load().invoice_texts
     assert {"where": "payment", "when": "always", "text": "Check to Pat Reporter"} in texts
     assert not any(r["where"] == "footer" for r in texts)  # an empty footer stays empty
-    s.path.write_text(json.dumps({"invoice_texts": [{"where": "nowhere", "when": "always", "text": "x"},
+    s.path.write_text(json.dumps({"settings_version": Settings.settings_version,  # (no rows added since)
+                                  "invoice_texts": [{"where": "nowhere", "when": "always", "text": "x"},
                                                     {"where": "top", "when": "always", "text": "Hello"}]}),
                       encoding="utf-8")
     assert Settings.load().invoice_texts == [{"where": "top", "when": "always", "text": "Hello"}]

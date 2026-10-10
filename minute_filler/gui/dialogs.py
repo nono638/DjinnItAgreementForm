@@ -1,8 +1,9 @@
 """The app's dialogs: Settings (with its invoice text editor), the "please clarify" questions before filling, the
-speed the agreement form names when an e-mail asks for another (SpeedDialog), the run sheet choice, a job's
-invoice Peripherals (for that job only), granular detail and whose pages of a transcript of several reporters to
-bill, another reporter's invoice details (ReporterDialog), the Ollama setup help (with a model download), About and the How to use guide
-(GUIDE). The preview before saving and the first-run welcome are in preview.py; the Excerpts window (who ordered
+speed the agreement form names when an e-mail asks for another (SpeedDialog), the speed each firm of a split
+order ordered at (SplitSpeedsDialog), the run sheet choice, a job's invoice Peripherals (for that job only),
+granular detail and whose pages of a transcript of several reporters to bill, another reporter's invoice details
+(ReporterDialog), the Ollama setup help (with a model download), About and the How to use guide (GUIDE). The
+preview before saving, the math and the first-run welcome are in preview.py; the Excerpts window (who ordered
 which pages) is gui/excerpts.py."""
 from __future__ import annotations
 
@@ -18,8 +19,9 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..models import Attorney, FIELD_LABELS
-from ..settings import (AGREEMENT_FALLBACKS, AI_TICKS, DETAIL_ITEMS, INDEX_RULES, INDEX_SHARED, OUTPUT_FOLDERS, OUTPUTS,
-                        SPEEDS, ReporterProfile, TEXT_PLACEHOLDERS, TEXT_PLACES, TEXT_WHEN, Settings,
+from ..settings import (AGREEMENT_FALLBACKS, AI_TICKS, CASE_FOLDER_EXISTING, CASE_FOLDER_PATTERN, DETAIL_ITEMS,
+                        INDEX_RULES, INDEX_SHARED, MATH_SAVES, OUTPUT_FOLDERS, OUTPUTS, SPEEDS, ReporterProfile,
+                        TEXT_PLACEHOLDERS, TEXT_PLACES, TEXT_WHEN, Settings, clean_folder_pattern,
                         default_invoice_texts, reporter_key)
 from .widgets import check_row, open_path, open_url, refill_combo, rounded, show_save_error
 from .zoom import z
@@ -246,7 +248,8 @@ class SettingsDialog(QDialog):
         self.o_math = QCheckBox("Show the math of each invoice")
         self.o_math.setToolTip("How each amount is reached (pages × rate, the copies, the split between parties):\n"
                                "the preview's first tab, The math, or, with previews off, a window after saving\n"
-                               "that can copy it or save it as a PDF. For Generate and Generate all.")
+                               "that can copy it or save it as a PDF. For Generate and Generate all.\n"
+                               "(Generate also saves it with the invoices: Invoice tab → Save the math.)")
         self.o_math.setChecked(settings.show_math)
         f.addRow("Invoice math", self.o_math)
         self.o_updates = QCheckBox("Look for a newer version once a day")
@@ -324,6 +327,15 @@ class SettingsDialog(QDialog):
                                         "reached. A job whose invoice already shows the detail gets none.")
         self.i_detailed_copy.setChecked(settings.invoice_detailed_copy)
         f.addRow("", self.i_detailed_copy)
+        self.i_save_math = QComboBox()
+        for key, label in MATH_SAVES.items():
+            self.i_save_math.addItem(label, key)
+        self.i_save_math.setCurrentIndex(max(0, self.i_save_math.findData(settings.save_math)))
+        self.i_save_math.setToolTip("How each amount was reached, saved as PDFs next to the invoices when Generate "
+                                    "makes them:\neach invoice's (\"... - the math.pdf\", to send that firm) and one "
+                                    "for all of them (to look back at the job).\nThe same choice is under the math "
+                                    "itself, in the preview and its window.")
+        f.addRow("Save the math", self.i_save_math)
         self.i_email = QCheckBox("Each party also gets an e-mailed copy (Email column of the rate sheet)")
         self.i_email.setChecked(settings.invoice_include_email)
         f.addRow("", self.i_email)
@@ -697,6 +709,7 @@ class SettingsDialog(QDialog):
         self.o_dir = QLineEdit(settings.output_dir)
         self.o_dir.setPlaceholderText("The folder of the dropped file")
         f.addRow("Save to", self._folder_row(self.o_dir, "Save the outputs to", None))
+        self._case_folder_rows(f, settings)
         self.o_dirs: dict[str, QLineEdit] = {}
         for key, label in OUTPUTS.items():
             e = QLineEdit(settings.output_dirs.get(key, ""))
@@ -710,6 +723,65 @@ class SettingsDialog(QDialog):
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         f.addRow("", hint)
+
+    def _case_folder_rows(self, f: QFormLayout, settings: Settings) -> None:
+        """The Folders rows about a folder for each case inside Save to (Settings.case_folders): the box, the
+        folder's name (a pattern of placeholders; the characters Windows forbids can't be typed) with an example
+        from a made-up case, and what to do when the folder is already there (Settings.case_folder_existing). The
+        last two are greyed out while the box is unticked."""
+        from PySide6.QtCore import QRegularExpression
+        from PySide6.QtGui import QRegularExpressionValidator
+
+        from ..models import CaseInfo
+        from ..pdfout import CASE_FOLDER_PLACES, FOLDER_FORBIDDEN, case_folder_name
+        self.o_case_folders = QCheckBox("A folder for each case, inside Save to")
+        self.o_case_folders.setToolTip("Each case's minute agreements, MOFR, invoices and their math go into a "
+                                       "folder of its own, named as below\n(\"...\\Minute Agreements\\712345-2021\")."
+                                       " An output with a folder of its own below, and the run sheet, keep theirs.")
+        self.o_case_folders.setChecked(settings.case_folders)
+        f.addRow("", self.o_case_folders)
+        self.o_case_pattern = QLineEdit(settings.case_folder_pattern)
+        self.o_case_pattern.setPlaceholderText(CASE_FOLDER_PATTERN)
+        # (none of the characters Windows forbids in a folder name can be typed or pasted: \ / : * ? " < > | and
+        # the control characters, Tab among them)
+        self.o_case_pattern.setValidator(QRegularExpressionValidator(
+            QRegularExpression(r'[^<>:"/\\|?*\x00-\x1f]*'), self.o_case_pattern))
+        places = " ".join("{" + p + "}" for p in CASE_FOLDER_PLACES)
+        self.o_case_pattern.setToolTip(f"The case folder's name. Placeholders: {places}\n"
+                                       "({index} 712345-2021, {case} the short caption, {date} the first day, "
+                                       "{dates} \"6-3-2026 to 6-4-2026\").\n"
+                                       f"Not allowed in a folder name, so they can't be typed: "
+                                       f"{' '.join(FOLDER_FORBIDDEN)}")
+        example = CaseInfo()
+        for key, value in (("case_name", "Jane Roe v. X.Y. Holding Corporation"), ("index_no", "712345/2021"),
+                           ("dates", "6/3/2026, 6/4/2026"), ("court", "Supreme"), ("county", "Queens"),
+                           ("part", "12"), ("judge", "Hon. A. Justice")):
+            example.set(key, value)
+        self.o_case_hint = QLabel()
+        self.o_case_hint.setObjectName("muted")
+        self.o_case_hint.setTextFormat(Qt.PlainText)  # (its "< >" is no tag)
+        # short lines, not wrapped: a wrapped label leaves a gap above it in a form
+
+        def show_example(_=None) -> None:
+            """The hint: the name the pattern typed gives the made-up case (cut at 70 characters)."""
+            name = case_folder_name(example, self.o_case_pattern.text().strip() or CASE_FOLDER_PATTERN)
+            name = name if len(name) <= 70 else name[:69] + "…"
+            self.o_case_hint.setText(f"e.g. \"{name}\"\nPlaceholders: {places}\n"
+                                     f"Not allowed in a folder name: {' '.join(FOLDER_FORBIDDEN)}")
+        self.o_case_pattern.textChanged.connect(show_example)
+        show_example()
+        f.addRow("Case folder name", self.o_case_pattern)
+        f.addRow("", self.o_case_hint)
+        self.o_case_existing = QComboBox()
+        for key, label in CASE_FOLDER_EXISTING.items():
+            self.o_case_existing.addItem(label, key)
+        self.o_case_existing.setCurrentIndex(max(0, self.o_case_existing.findData(settings.case_folder_existing)))
+        self.o_case_existing.setToolTip("When Generate finds the case's folder already there with files in it "
+                                        "(the case made before, or another with the same name)")
+        f.addRow("If it's already there", self.o_case_existing)
+        for w in (self.o_case_pattern, self.o_case_existing, self.o_case_hint):
+            self.o_case_folders.toggled.connect(w.setEnabled)
+            w.setEnabled(settings.case_folders)
 
     def _folder_row(self, edit: QLineEdit, title: str, key: str | None) -> QHBoxLayout:
         """[folder] [Browse...] [Open] for one of the Folders rows."""
@@ -871,6 +943,7 @@ class SettingsDialog(QDialog):
         s.preview_before_saving = self.o_preview.isChecked()
         s.recaps, s.check_updates = self.o_recaps.isChecked(), self.o_updates.isChecked()
         s.show_math, s.invoice_detailed_copy = self.o_math.isChecked(), self.i_detailed_copy.isChecked()
+        s.save_math = self.i_save_math.currentData()
         s.outputs = [k for k, cb in self.o_outputs.items() if cb.isChecked()]
         s.mofr_division = self.o_division.currentData()
         s.mofr_filename_pattern = self.o_mofr_pattern.text().strip() or s.mofr_filename_pattern
@@ -891,6 +964,11 @@ class SettingsDialog(QDialog):
         s.invoice_filename_pattern = self.i_pattern.text().strip() or s.invoice_filename_pattern
         s.records_dir = self.i_records.text().strip()
         s.output_dirs = {k: e.text().strip() for k, e in self.o_dirs.items() if e.text().strip()}
+        s.case_folders = self.o_case_folders.isChecked()
+        # (the box refuses those characters typed or pasted, but not in the pattern it started with: a settings
+        # file edited by hand)
+        s.case_folder_pattern = clean_folder_pattern(self.o_case_pattern.text())
+        s.case_folder_existing = self.o_case_existing.currentData()
         s.runsheet_existing = self.r_existing.currentData()
         s.runsheet_filename_pattern = self.r_pattern.text().strip() or s.runsheet_filename_pattern
         names, bad = self._reporter_names(self.r_names.toPlainText())
@@ -1149,6 +1227,79 @@ class SpeedDialog(QDialog):
             lay.addWidget(cb)
         buttons = QDialogButtonBox()
         buttons.addButton("Use these speeds" if len(rows) > 1 else "Use this speed", QDialogButtonBox.AcceptRole)
+        buttons.addButton("Go back", QDialogButtonBox.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def chosen(self) -> list[str]:
+        """The speed chosen for each row, in order."""
+        return [cb.currentData() or "" for cb in self.combos]
+
+
+class SplitSpeedsDialog(QDialog):
+    """Asks the speed each firm of a split order ordered at (firms that ordered the same pages commit to one:
+    courthouses.speed_upfront), for the firms whose speed isn't set yet (batch.speeds_to_ask): the case's name
+    above its days, then a row per day and firm, with who it ordered the pages with ("(its speed on its other
+    pages)" for a firm asked because it has a speed on some pages only) and a box of the rate sheet's speeds, set to
+    the speed it starts from (the firm's on its other pages of the case, else the agreement form's), matched
+    loosely ("Expedited" is "Expedite"). MainWindow._ask_split_speeds keeps the answers (Job.speeds); "Go back"
+    makes nothing."""
+
+    def __init__(self, asks: list, speeds: list[tuple[str, str]], button: str = "Generate", parent=None):
+        """asks: batch.SpeedAsk each; speeds: the rate sheet's, (label, name) each, cheapest first; button: the
+        button pressed ("Generate", "Generate all"), named on OK ("Generate all with these speeds")."""
+        super().__init__(parent)
+        self.setWindowTitle("Which speed did each firm order?")
+        self.setMinimumWidth(z(620))
+        lay = QVBoxLayout(self)
+        intro = QLabel("These firms ordered the same pages, so each one commits to a speed and is billed that "
+                       "speed alone (a firm ordering by itself can still choose from its invoice). At different "
+                       "speeds, the original is billed once, at the fastest, and each firm pays its share at its "
+                       "own speed. Which speed did each one order?")
+        intro.setWordWrap(True)
+        intro.setObjectName("subtitle")
+        lay.addWidget(intro)
+        grid = QGridLayout()
+        for c, head in enumerate(("Day", "Firm", "Ordered pages with", "Speed")):
+            lab = QLabel(f"<b>{head}</b>")
+            grid.addWidget(lab, 0, c)
+        self.combos: list[QComboBox] = []
+        r, case = 1, None
+        for a in asks:
+            if a.job.title() and a.job.title() != case:  # the case once, above its days (a title is long)
+                case = a.job.title()
+                head = QLabel(case)
+                head.setTextFormat(Qt.PlainText)
+                font = head.font()
+                font.setBold(True)
+                head.setFont(font)
+                grid.addWidget(head, r, 0, 1, 4)
+                r += 1
+            for c, text in enumerate((a.job.case.get("dates") or "(no date)", a.name,
+                                      a.shared_with or "(its speed on its other pages)")):
+                lab = QLabel(text)
+                lab.setTextFormat(Qt.PlainText)
+                lab.setWordWrap(True)
+                grid.addWidget(lab, r, c)
+            cb = QComboBox()
+            for label, name in speeds:
+                cb.addItem(label, name)
+            from ..rates import speed_key
+            # (spelled as on the rate sheet or not: "Expedited" is its "Expedite")
+            exact = [i for i, (_, name) in enumerate(speeds) if name == a.speed]
+            alike = [i for i, (_, name) in enumerate(speeds) if speed_key(name) == speed_key(a.speed)]
+            cb.setCurrentIndex((exact or alike or [0])[0])
+            self.combos.append(cb)
+            grid.addWidget(cb, r, 3)
+            r += 1
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 2)
+        lay.addLayout(grid)
+        lay.addWidget(_tip("The speeds are kept with each day: change them later in the \"Who ordered what\" card "
+                           "or in the Excerpts window."))
+        buttons = QDialogButtonBox()
+        buttons.addButton(f"{button} with these speeds", QDialogButtonBox.AcceptRole)
         buttons.addButton("Go back", QDialogButtonBox.RejectRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -1885,7 +2036,11 @@ and <b>Who ordered what</b> show who pays for what). Firms that ordered the same
 the judge's index; each pays for its own copy, e-mailed copy and index (Settings → Invoice → <i>Index on shared
 pages</i> can split the index too). Whether there is an index depends on the
 whole transcript (every reporter's pages): 50 pages or more by default (Settings → Invoice), and
-<b>Peripherals…</b> in the Invoice panel can say yes or no for one job.</li>
+<b>Peripherals…</b> in the Invoice panel can say yes or no for one job. Firms that ordered the same pages
+commit to a speed (the <i>Speed</i> column of Who ordered what; Generate asks when one isn't set) and are
+billed it alone: at different speeds the original is billed once, at the fastest, each slower firm pays its
+share as if every firm had ordered its speed, and the fastest pay the rest. A firm ordering alone still
+chooses a speed from its invoice.</li>
 <li><b>MOFR</b>: the Minute Order Form/Receipt, the reporter's parts filled in, with the pages anyone ordered:
 one for the whole case when its days share an invoice (Generate all), listing every day.</li>
 <li><b>Run sheet</b>: an Excel sheet of a shared trial's takes (who wrote which pages), read from the
@@ -1896,8 +2051,12 @@ initials at the foot of the pages. It is ticked by itself when two or more repor
 too: each gets invoices for their own pages, in their name, with the details kept under Settings → Run sheet →
 <i>Invoices for</i>, and numbers of their own (DS-2026-0001). Records lists them, but leaves them out of your
 sums.</p>
-<p>The PDFs are saved next to your document, or in the folders chosen in Settings → Options → Folders, and
-they stay fillable (unless <i>Flatten the PDF</i> is ticked in Settings → Options): you can still correct any
+<p>The PDFs are saved in a folder for the case, named by its index number ("712345-2021", or as Settings →
+Options → Folders → <i>Case folder name</i> says), next to your document or inside the <i>Save to</i> folder
+chosen there (a kind of file given a folder of its own, and the run sheet, go straight into theirs). Untick
+<i>A folder for each case</i> there to keep them all in one folder. When the case's folder is already there
+with files in it, Generate asks whether to add to it or make a new one beside it ("712345-2021 (2)"). The PDFs
+stay fillable (unless <i>Flatten the PDF</i> is ticked in Settings → Options): you can still correct any
 value in a PDF viewer. Every file made is listed in
 <b>Records</b> (Ctrl+R).</p>
 
@@ -1908,6 +2067,9 @@ value in a PDF viewer. Every file made is listed in
 on each field says where its value came from (found in the document, counted from the transcript PDF, your
 records, AI, your defaults, calculated or typed by you). A case name marked <i>records</i> is the one an earlier
 job with the same index number has in your records: a suggestion to check, as the document gave none surer.
+A document with no index number gets a note under the list on the left (and a ⚠ on its row, under a job of
+several documents); so do documents of one job whose index numbers don't match, and Generate then asks before making anything (<i>Keep them together</i>, or
+right-click one → <i>Move to a job of its own</i>). A title page listing several index numbers is fine.
 <i>No. of copies</i> is the number of ordering parties (the firms ticked, or the invoice's <i>Parties</i> number
 when you set it).
 <i>Est. number of pages</i> is counted from the transcript PDF when there is one: every page, whoever wrote
@@ -1940,7 +2102,7 @@ tick who ordered</i> changes that.</li>
 the <b>Invoice</b> panel (<i>Speeds offered</i>): the <i>invoice</i> offers every speed ticked, each at its own
 price; the <i>minute agreement form</i> names one speed at one rate per page. Settings → Invoice picks that speed
 (Expedited, else the slowest offered); choose another for one job under Minute agreement form details (↺ goes
-back). When an e-mail asks for another speed ("please send a daily copy"), that card asks which, and so does
+back). A firm whose speed is set in <i>Who ordered what</i> gets that speed on its own agreement. When an e-mail asks for another speed ("please send a daily copy"), that card asks which, and so does
 Generate.</li>
 <li><b>Check Who pays what</b> (under the attorneys): each firm's invoice in short, its pages, how it ordered
 them (alone, or shared with other firms) and what it pays at each speed. It follows every tick at once; its
@@ -1961,22 +2123,26 @@ and <b>Settings → Defaults</b> (rate sheet, copies) once, and they are used on
 <li>Only one window runs at a time: opening the app again (or a PDF with "Open with") brings the open window
 forward and adds the documents there.</li>
 <li>In the job list, ✓ marks a job already made and ⚠ one with something to check: a field missing, no
-attorney ticked, Whose pages… or Excerpts… to choose, or a Generate that failed. Hover over the job to see
-what. Right-click a document to move it to a job of its own.</li>
+attorney ticked, Whose pages… or Excerpts… to choose, documents whose index numbers don't match, more than two
+speeds on the same pages, or a Generate that failed. Hover over the job to see
+what. <i>Pages</i> is the transcript's own pages (no word index), <i>Yours</i> the pages you wrote (? until
+Whose pages… says). A job of several documents lists them under it: right-click one to see its text, move it
+to a job of its own or remove it.</li>
 <li>When one firm ordered the whole trial and others only some pages, open <b>Excerpts…</b> (Invoice panel):
 a table of every day of the case on that invoice, a row per run of pages typed in the transcript's own numbers (141-170) and a
 box per firm. It shows what each run costs, the pages by the firms ordering together and each firm's invoice,
 as you change it, and stays open beside the window. <b>Remove run</b> (or the Delete key, or a right-click)
 gives a run's pages to the run next to it, so every page stays in a run; <b>Remove this day's
-excerpts</b> and <b>Remove all excerpts</b> go back to whole days. Check the <b>Who ordered what</b> card
-before generating.</li>
+excerpts</b> and <b>Remove all excerpts</b> go back to whole days. The boxes above the table set the speed
+each firm ordered its pages at; right-click a firm's tick box on a run for that run's own speed (for now, at
+most two speeds on the same pages). Check the <b>Who ordered what</b> card before generating.</li>
 <li>The preview's tabs have a colour for each kind of file; with many files, the arrows at the end of the tabs
 scroll them, <b>Files ▾</b> lists every file, and Ctrl+Tab / Ctrl+Shift+Tab go to the next one and back.
 <b>Side by side</b> shows everything at once (scroll across with the bar at the bottom, or Shift and the mouse
 wheel), and Ctrl + / Ctrl - zoom it.</li>
-<li>The <b>Who ordered what</b> card shows, for each day and attorney, the pages it ordered and who
-<i>Also ordered</i> them (those split the original and the judge's index; each pays its own copies and
-index).</li>
+<li>The <b>Who ordered what</b> card shows, for each day and attorney, the pages it ordered, the
+<i>Speed</i> it ordered them at (change it there) and who <i>Also ordered</i> them (those split the original
+and the judge's index; each pays its own copies and index).</li>
 <li>Your own invoice text (shown always, or only when it applies) is in Settings → Invoice → <i>Invoice
 text</i>; <b>Preview…</b> shows a made-up invoice with it.</li>
 <li><b>The math</b> shows how each amount is reached, in tables: <i>By invoice</i> (a row for each charge:
@@ -1984,8 +2150,11 @@ its pages, rate and cost, whether each firm splits it or pays for its own, and w
 <i>Firms side by side</i> (a column for each firm); the window keeps the one you chose last. It is in the
 preview, behind the links under Who pays what and in the Invoice panel, and after saving when previews are off
 (there it can be saved as a PDF for an attorney who asks; Settings → Options turns it on or off).
-<b>Copy all</b> copies it as text, a line for each charge. Settings → Invoice can also save a
-<i>detailed copy</i> of each invoice, with the same number, ready for when someone asks.</li>
+<b>Copy all</b> copies it as text, a line for each charge. Generate saves it too, as PDFs next to the
+invoices ("... - the math.pdf"): each invoice's, to send that firm, and one for all of them, to look back at
+the job; which of them is chosen under the math itself and in Settings → Invoice → <i>Save the math</i>.
+Settings → Invoice can also save a <i>detailed copy</i> of each invoice, with the same number, ready for when
+someone asks.</li>
 <li>In <b>Records</b>, type a firm, case or index number to find its invoices, tick <b>Paid</b> when they
 pay, and choose the columns with <b>Columns…</b>. Deleted records stay in the trash for 30 days; the PDFs
 are never deleted.</li>
@@ -1999,7 +2168,9 @@ and <b>File → Import settings</b> reads it there.</li>
 <li>When an invoice is final, <b>File → Lock finished PDFs</b> saves a copy nobody can change.</li>
 <li>Text too small or too big? <b>Ctrl +</b> and <b>Ctrl −</b> (or Ctrl and the mouse wheel) zoom,
 <b>Ctrl 0</b> goes back to 100%.</li>
-<li>Prices are in rate sheets you can edit in Excel: <b>File → Open rate sheets folder</b>.</li>
+<li>Prices are in rate sheets you can edit in Excel: <b>File → Open rate sheets folder</b>. List only the speeds you
+offer, but give each one all four prices (Original, Copy, Email and Index): the app warns you when one is missing.
+Headings close to these are read too (E-mail, Index Price).</li>
 </ul>
 
 <h3>Keyboard shortcuts</h3>

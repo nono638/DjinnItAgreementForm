@@ -485,7 +485,8 @@ def test_the_preview_shows_the_files_and_going_back_saves_nothing(previewing, tm
     previewing.fill()
     year = date.today().year
     assert [i.invoice_no for i in lg.invoices()] == [f"{year}-0001"]
-    assert sorted(p.name.split(" - ")[0] for p in previewing.cur.saved) == [f"Invoice {year}-0001", "Minute Agreement"]
+    assert sorted(p.name.split(" - ")[0] for p in previewing.cur.saved) == \
+        [f"Invoice {year}-0001"] * 2 + ["Minute Agreement"]  # (the invoice and its math, saved with it)
 
 
 def test_what_is_saved_is_what_the_preview_showed(previewing, monkeypatch):
@@ -570,7 +571,7 @@ def test_dont_show_previews_anymore(previewing, monkeypatch):
     previewing.fill()
     assert previewing.s.preview_before_saving is False and Settings.load().preview_before_saving is False
     previewing.fill()  # no preview this time
-    assert shown == [1] and len(previewing.cur.saved) == 2
+    assert shown == [1] and len(previewing.cur.saved) == 3  # (the agreement, the invoice and its math)
 
 
 def test_the_run_sheet_is_not_made_for_the_preview(previewing, monkeypatch, tmp_path):
@@ -870,7 +871,7 @@ def test_a_past_job_is_opened_again_from_its_record(window, tmp_path, monkeypatc
     window._show_case()
     monkeypatch.setattr(window, "_saved_box", lambda *a, **k: None)
     window.fill()
-    assert len(window.cur.saved) == 2
+    assert len(window.cur.saved) == 3  # (the agreement, the invoice and its math, which isn't recorded)
     lg = ledger_for(window.s)
     made = lg.activity()
     assert all(json.loads(a.origin)["sources"] == [str(src)] for a in made)

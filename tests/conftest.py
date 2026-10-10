@@ -1,5 +1,6 @@
 """Fixtures for every test: settings and records kept in a temporary folder, no real Ollama, no look on GitHub for
-a newer version, and an off-screen Qt application and main window for the GUI tests."""
+a newer version, and an off-screen Qt application and main window for the GUI tests. Also, for the tests that ask
+for it, a courthouse whose split orders choose a speed from their invoices (split_orders_choose)."""
 import os
 
 import pytest
@@ -42,6 +43,20 @@ def no_firm_answers():
     use_firm_answers([])
 
 
+@pytest.fixture
+def split_orders_choose():
+    """A courthouse like Queens, except that the firms of a split order (the same pages ordered by several firms)
+    choose a speed from their invoices, as every invoice did before speeds were set per firm, and as a courthouse
+    without Courthouse.speed_upfront still does: for the tests of the price of shared pages at each speed. (Queens
+    bills each such firm the one speed it committed to: tests/test_mixed_speeds.py.)"""
+    from dataclasses import replace
+
+    from minute_filler import courthouses
+    before = courthouses.use(replace(courthouses.current(), speed_upfront=False))
+    yield
+    courthouses.use(before)
+
+
 @pytest.fixture(autouse=True)
 def no_internet(monkeypatch):
     """Tests never ask GitHub for the latest version (the window's daily look): there is no newer one."""
@@ -55,14 +70,19 @@ def qt(monkeypatch):
     preview before saving is answered "Save" at once (a box waiting for a click would stop the test); a test of
     the preview itself sets PreviewDialog.exec as it needs. "The math" after an invoice is made is closed at once
     too (a test of it sets MathDialog.exec), and so is the first-run welcome: a window made without a name whose
-    startup ran during the clean-up once waited for a click for good (a test of it sets WelcomeDialog.exec)."""
+    startup ran during the clean-up once waited for a click for good (a test of it sets WelcomeDialog.exec).
+    Generate's "Which speed did each firm order?" (firms sharing pages without a speed) is answered with what it
+    was filled with, the agreement form's speed: a window test of a split order once waited for it for good (a
+    test of it sets SplitSpeedsDialog.exec)."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     fonts = os.path.join(os.environ.get("WINDIR", ""), "Fonts")
     if os.path.isdir(fonts):  # the real fonts, so text is measured as on screen (see the layout tests)
         os.environ.setdefault("QT_QPA_FONTDIR", fonts)
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from minute_filler.gui.dialogs import SplitSpeedsDialog
     from minute_filler.gui.preview import MathDialog, PreviewDialog, WelcomeDialog
+    monkeypatch.setattr(SplitSpeedsDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
     monkeypatch.setattr(PreviewDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
     monkeypatch.setattr(MathDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
     monkeypatch.setattr(WelcomeDialog, "exec", lambda self: QtWidgets.QDialog.Rejected)

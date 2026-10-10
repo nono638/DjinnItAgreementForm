@@ -4,6 +4,8 @@ samples_internal/
 # Personal notes: questions to settle about billing, and the plan for other courthouses
 QUESTIONS TO ASK.md
 MIGRATION.md
+# A courthouse's research: the workbooks its billing rules came from and the questions still open about them
+minute_filler/courthouses/*/research/
 
 # Original full-size artwork (resized copies live in minute_filler/assets)
 sillyImages/

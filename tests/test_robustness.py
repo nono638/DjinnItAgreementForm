@@ -151,6 +151,7 @@ def test_caption_matching_is_not_too_loose():
 def test_days_of_one_case_get_the_date_in_the_file_name(tmp_path):
     s = Settings()
     s.output_dir = str(tmp_path)
+    s.case_folders = False  # (the names side by side; test_case_folders.py has the folders)
     s.filename_pattern = "Minute Agreement - {case} - {index}"
     jobs = group([doc(s, "Smith v Jones", "712222-2024", "5-22-2026", "a"),
                   doc(s, "Smith v Jones", "712222-2024", "5-26-2026", "b"),

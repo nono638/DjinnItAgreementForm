@@ -13,6 +13,7 @@ from minute_filler.models import Attorney
 from helpers import pat_settings, transcript_pdf
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+ALSO, BILLED = 5, 6  # the card's "Also ordered" and "Your pages billed" columns (main_window.ORDER_COLS)
 
 
 def alex():
@@ -103,7 +104,7 @@ def two_days(window, tmp_path):
     first, second = sorted(window.jobs, key=lambda j: j.case.get("dates"))
     first.case.attorneys, second.case.attorneys = [alex(), dana()], [alex()]
     first.portions = [(10, [A, B]), (30, [A])]
-    window.job_list.setCurrentRow(window.jobs.index(first))
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(window.jobs.index(first)))
     window._show_job()  # the editor shows these attorneys (else the next look at it takes them back)
     return first, second
 
@@ -111,11 +112,13 @@ def two_days(window, tmp_path):
 def test_the_card_lists_every_attorney_of_every_day(window, tmp_path):
     first, second = two_days(window, tmp_path)
     assert not window.orders_card.isHidden()
-    rows = [[window.orders.item(r, c).text() for c in range(6)] for r in range(window.orders.rowCount())]
+    from minute_filler.gui.main_window import ORDER_COLS
+    assert ORDER_COLS.index("Also ordered") == ALSO and ORDER_COLS.index("Your pages billed") == BILLED
+    rows = rows_of(window)
     assert rows[0][:3] == ["6/3/2026", "Alex B. Counsel", "every page, 1–30"]
-    assert rows[0][4].startswith("Dana Smith (1–10)")
-    assert rows[1][:3] == ["6/3/2026", "Dana Smith", "excerpt: 1–10 of 30"] and rows[1][5] == "10"
-    assert rows[2][1:3] == ["Alex B. Counsel", "every page, 1–20"] and rows[2][4] == "nobody (alone)"
+    assert rows[0][ALSO].startswith("Dana Smith (1–10)")
+    assert rows[1][:3] == ["6/3/2026", "Dana Smith", "excerpt: 1–10 of 30"] and rows[1][BILLED] == "10"
+    assert rows[2][1:3] == ["Alex B. Counsel", "every page, 1–20"] and rows[2][ALSO] == "nobody (alone)"
     assert rows[3][1] == "Dana Smith" and rows[3][2].startswith("not ticked on this day")
     window.output_boxes["invoice"].setChecked(False)  # no invoice: no card
     assert window.orders_card.isHidden()
@@ -205,7 +208,7 @@ def test_the_card_says_a_day_nobody_ticked_holds_the_case(window, tmp_path):
     rows = rows_of(window)
     assert [r[:3] for r in rows if r[0] == "6/4/2026"] == [["6/4/2026", "(nobody ticked)", NOBODY_DAY]]
     assert window.orders_info.text().startswith("⚠ No invoice for these 2 days of the case yet: nobody is ticked")
-    assert all("no invoice yet" in r[5] for r in rows if r[0] == "6/3/2026")  # nothing billed as it stands
+    assert all("no invoice yet" in r[BILLED] for r in rows if r[0] == "6/3/2026")  # nothing billed as it stands
 
 
 def test_the_card_never_shows_an_empty_table(window, tmp_path):
@@ -219,7 +222,7 @@ def test_a_typed_page_count_says_it_is_what_is_billed(window, tmp_path):
     one_day(window, tmp_path, pages=100)
     window.rows["est_pages"].choose("40")
     rows = rows_of(window)
-    assert rows[0][2] == "every page (Pages field typed: 40 billed)" and rows[0][5] == "40"
+    assert rows[0][2] == "every page (Pages field typed: 40 billed)" and rows[0][BILLED] == "40"
 
 
 def test_an_excerpt_of_none_of_my_pages_says_it_gets_no_invoice(window, tmp_path):
@@ -227,8 +230,8 @@ def test_an_excerpt_of_none_of_my_pages_says_it_gets_no_invoice(window, tmp_path
     job.portions = [(4, [A, B]), (10, [A])]  # Dana Smith ordered pages 1-4: the other reporter's
     window._update_status()
     rows = rows_of(window)
-    assert rows[0][5] == "6"
-    assert rows[1][1] == "Dana Smith" and rows[1][5] == "0 (no invoice: none of these pages are yours)"
+    assert rows[0][BILLED] == "6"
+    assert rows[1][1] == "Dana Smith" and rows[1][BILLED] == "0 (no invoice: none of these pages are yours)"
 
 
 def test_a_day_waiting_for_whose_pages_opens_whose_pages(window, tmp_path, monkeypatch):
@@ -250,10 +253,10 @@ def test_unticking_a_day_in_the_job_list_updates_the_card(window, tmp_path):
     from PySide6.QtCore import Qt
     first, second = two_days(window, tmp_path)
     assert {r[0] for r in rows_of(window)} == {"6/3/2026", "6/4/2026"}
-    window.job_list.item(window.jobs.index(second)).setCheckState(Qt.Unchecked)
+    window.job_list.topLevelItem(window.jobs.index(second)).setCheckState(0, Qt.Unchecked)
     assert not second.include and {r[0] for r in rows_of(window)} == {"6/3/2026"}
     assert "Generate all may bill it with other days" in window.orders_info.text()
-    window.job_list.item(window.jobs.index(first)).setCheckState(Qt.Unchecked)  # the day shown: left out
+    window.job_list.topLevelItem(window.jobs.index(first)).setCheckState(0, Qt.Unchecked)  # the day shown: left out
     info = window.orders_info.text()
     assert "unticked in the job list" in info and "may bill it" not in info and "Your pages billed" in info
 
@@ -361,4 +364,4 @@ def test_the_job_list_marks_a_day_whose_invoice_is_held(window, tmp_path):
     first.portions = [(10, [A, B]), (25, [A])]
     window._update_status()
     assert not first.problems() and first.invoice_hold()
-    assert window.job_list.item(window.jobs.index(first)).text().startswith("⚠")
+    assert window.job_list.topLevelItem(window.jobs.index(first)).text(0).startswith("⚠")

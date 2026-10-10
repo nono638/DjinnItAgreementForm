@@ -5,10 +5,10 @@ Forms (Settings.form_choice):
   "clean"    - the app's re-typeset form with named fields and extra lines
   "original" - the 1999 scan with fields added on top
 
-Lines the UCS form or the original has no field for (forms/*_map.py OVERLAYS: the signature lines and a second
-line for the dates, and on the original also the fax lines, the date of agreement and the case name's second and
-third lines) get a text field added, so every value can still be changed in a PDF viewer. A signature picture
-takes the place of the reporter's signature field there.
+Lines the UCS form or the original has no field for (forms/*_map.py OVERLAYS: the signature lines, a second
+line for the dates and the line saying which pages are at which speed, and on the original also the fax lines,
+the date of agreement and the case name's second and third lines) get a text field added, so every value can
+still be changed in a PDF viewer. A signature picture takes the place of the reporter's signature field there.
 
 The dates are written with three or more days in a row as a range ("9/28/2026–10/2/2026", date_ranges); on the
 UCS form and the original, dates that still don't fit their line go on to the second one, split between two dates
@@ -16,38 +16,50 @@ UCS form and the original, dates that still don't fit their line go on to the se
 
 Each attorney's agreement shows as its Estimated Number of Pages the pages that attorney ordered, whoever wrote
 them (agreement_case, from batch.Job.ordered_pages); with no count (no transcript and no pages typed), the
-field as it is. A firm that ordered no pages of the day gets no agreement (agreement_orderers).
+field as it is. A firm that ordered no pages of the day gets no agreement (agreement_orderers). A firm whose
+speed is set gets that speed, its rate and its delivery date; one that ordered at two (Daily on one day, Regular
+on another) gets one agreement with both ticked, "see below" as the rate and a line saying which pages are at
+which ('Daily $6.50 a page: 6/3/2026; Regular $4.30 a page: 6/4/2026': speeds_case, speeds_note; the
+re-typeset form has no such line, so that goes in its rate field).
 
-Also helpers that the MOFR, invoices and run sheets share: the dates as ranges (date_ranges), writing form fields
-(set_text) and adding new ones (add_text_field), file names (output_name, safe_filename, unique_path) and saving
-(save_output, which labels every PDF the app makes so it is never read back as an input, and flattens it when
-Settings say so).
-lock_pdf saves a copy with the fields flattened (File → Lock finished PDFs).
+The MOFR lists its dates as date_ranges does too, and its speeds as speeds_case gives them (case_speeds). The
+toolkit every output writes its PDF with (fitting text, fields, file names, saving) is in pdfout.py; its names
+are still importable from here. Agreements is the output deliver.generate and make_forms make the agreements
+through (courthouses.OutputSpec.maker).
 """
 from __future__ import annotations
 
 import copy
 import dataclasses
 import re
-import threading
-import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pymupdf
 
 from . import signature
-from .dates import us_date
+from .dates import next_weekday, us_date
 from .forms import original_map, ucs_map
-from .models import CaseInfo, Attorney, PROC_TYPES, SRC_DEFAULT
+from .models import CaseInfo, Attorney, PROC_TYPES, SRC_DEFAULT, to_int
+from .pdfout import (MAX_FS, MIN_FS, add_text_field, fit_size, form_text, output_name, save_output, set_check,
+                     set_text, text_width, wrap_fit)
+# (re-exported: these lived here before pdfout.py, and older code and tests import them from fill)
+from .pdfout import (FIELD_FONT, LOCK_BUTTON, MARK, OLD_MARKS, has_fields, is_generated, lock_pdf,  # noqa: F401
+                     mark, safe_filename, short_caption, unique_path, wrap)
 from .rates import speed_key
 from .settings import Settings
 
-FIELD_FONT = "helv"
-MAX_FS, MIN_FS = 10.0, 5.5
+if TYPE_CHECKING:
+    from .deliver import CaseForm, Making
+
 DATES_FLOOR = 7.0  # the dates line of the UCS and original forms shrinks to this before it spills onto a second line
 RANGE_DAYS = 3     # days in a row that become a range on the forms ("9/28/2026–9/30/2026"); two stay listed
 FORM_SPEEDS = ("regular", "expedited", "daily")  # the speeds with a box of their own on the form
+# The rate line of an agreement covering pages ordered at two speeds: a line further down says which is which
+# (speeds_note, beside No. of Copies Ordered, under the speed boxes, on the UCS form and the original: OVERLAYS
+# "speeds_note")
+SEE_BELOW = "see below"
 
 
 def forms_dir() -> Path:
@@ -67,58 +79,6 @@ DEFAULT_FORM = "ucs"
 def form_path(choice: str) -> Path:
     """The blank PDF for a form choice; an unknown choice gets the UCS form."""
     return forms_dir() / FORMS.get(choice, FORMS[DEFAULT_FORM])[0]
-
-
-_FONTS = threading.local()  # one Font per thread: the batch's thread measures too, and a Font has no lock
-
-
-def text_width(s: str, fs: float) -> float:
-    """Width of `s` in points, in the fields' font at size `fs`. Measured with the font itself:
-    pymupdf.get_text_length measures a text wrong once it has a letter outside Latin-1 (the en dash of
-    "10/12/2026–10/16/2026" makes it 14 points short at size 10), so too large a size was chosen and the last
-    date was cut off."""
-    font = getattr(_FONTS, "font", None)
-    if font is None:
-        font = _FONTS.font = pymupdf.Font(FIELD_FONT)
-    return font.text_length(s, fontsize=fs)
-
-
-def fit_size(s: str, rect: pymupdf.Rect, max_fs: float = MAX_FS) -> float:
-    """The font size for `s` on one line of `rect`: as large as the line's height allows (at most max_fs),
-    then smaller until it fits, but never below MIN_FS."""
-    fs = min(max_fs, max(MIN_FS, rect.height * 0.78))
-    while fs > MIN_FS and text_width(s, fs) > rect.width - 4:
-        fs -= 0.5
-    return fs
-
-
-def wrap(s: str, width: float, lines: int, fs: float = MAX_FS) -> list[str]:
-    """Greedy word wrap into at most `lines` lines; the last line keeps the overflow
-    (and is later shrunk to fit)."""
-    words, out, cur = s.split(), [], ""
-    for w in words:
-        trial = f"{cur} {w}".strip()
-        if text_width(trial, fs) <= width - 4 or not cur:
-            cur = trial
-        else:
-            out.append(cur)
-            cur = w
-    out.append(cur)
-    if len(out) > lines:
-        out = out[: lines - 1] + [" ".join(out[lines - 1:])]
-    return out + [""] * (lines - len(out))
-
-
-def wrap_fit(s: str, width: float, lines: int, max_fs: float = MAX_FS) -> tuple[list[str], float]:
-    """(lines, font size): the largest size at which `s` wraps into `lines` lines of `width`, the lines
-    padded with "" to that many. At MIN_FS the last line may still overflow."""
-    fs = max_fs
-    while fs > MIN_FS:
-        out = wrap(s, width, lines, fs)
-        if all(text_width(l, fs) <= width - 4 for l in out):
-            return out, fs
-        fs -= 0.5
-    return wrap(s, width, lines, MIN_FS), MIN_FS
 
 
 def date_ranges(text: str) -> str:
@@ -173,13 +133,18 @@ def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str
     }
     for p in PROC_TYPES:
         v[f"proc_{p.lower()}"] = p in case.proc_types
-    delivery = g("delivery").strip()  # the speed chosen under "Agreement form"
-    key = speed_key(delivery)
+    # the speed chosen under "Agreement form", or the speeds of an agreement covering several (form_speeds)
+    speeds = list(dict.fromkeys(sp for sp, _, _ in case.form_speeds)) or [g("delivery").strip()]
+    keys = [speed_key(sp) for sp in speeds]
     for d in FORM_SPEEDS:
-        v[f"delivery_{d}"] = key == d
-    if delivery and key not in FORM_SPEEDS:  # e.g. "Immediate"
+        v[f"delivery_{d}"] = d in keys
+    other = [sp for sp, k in zip(speeds, keys) if sp and k not in FORM_SPEEDS]  # e.g. "Immediate"
+    if other:
         v["delivery_other_check"] = True
-        v["delivery_other"] = "" if key == "other" else delivery
+        v["delivery_other"] = ", ".join(sp for sp in other if speed_key(sp) != "other")
+    if case.form_speeds:  # which pages are at which speed, beside No. of Copies; the rate line says "see below"
+        v["rate"] = SEE_BELOW
+        v["speeds_note"] = speeds_note(case.form_speeds)
 
     p = s.profile
     v.update({
@@ -195,89 +160,6 @@ def build_values(case: CaseInfo, atty: Attorney | None, s: Settings) -> dict[str
         })
     v["sig_attorney"] = "per email" if s.per_email else ""
     return v
-
-
-_NO_ACCENT_FORM = str.maketrans("ŁłĐđØøıİ", "LlDdOoiI")
-
-
-def form_text(s: str) -> str:
-    """The fields of the court's form are set in Helvetica, which has the Western European
-    letters only; others (Š, ł, ễ...) come out cut off, so they are written without their accent."""
-    out = []
-    for ch in s:
-        try:
-            ch.encode("cp1252")
-        except UnicodeEncodeError:
-            ch = (unicodedata.normalize("NFKD", ch.translate(_NO_ACCENT_FORM)).encode("ascii", "ignore").decode()
-                  or ch)
-        out.append(ch)
-    return "".join(out)
-
-
-def set_text(w: pymupdf.Widget, text: str, fs: float | None = None) -> None:
-    """Writes `text` into a text field at size `fs`, else the largest that fits."""
-    w.field_value = text
-    w.text_font = "Helv"
-    # size 0 on a blank field = automatic, for whoever types into it later in a PDF viewer
-    w.text_fontsize = (fs or fit_size(text, w.rect)) if text else 0
-    w.text_color = (0, 0, 0)
-    w.update()
-
-
-def add_text_field(page: pymupdf.Page, name: str, rect, text: str = "", fs: float = 0, font: str = "Helv",
-                   color=(0, 0, 0), multiline: bool = False, right: bool = False) -> pymupdf.Widget:
-    """Adds a text field holding `text` at `rect`, so the value can still be changed in a PDF viewer.
-    fs: the font size (0 = automatic); font: "Helv", "TiRo" or "Cour" (fields can't be bold); right:
-    right-aligned."""
-    w = pymupdf.Widget()
-    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
-    w.field_name = name
-    w.rect = pymupdf.Rect(rect)
-    w.field_value = text
-    w.text_font = font
-    w.text_fontsize = fs
-    w.text_color = color
-    w.border_width = 0
-    if multiline:
-        w.field_flags = pymupdf.PDF_TX_FIELD_IS_MULTILINE
-    w = page.add_widget(w)
-    if right:  # /Q 2: right-aligned (Widget has no property for it)
-        page.parent.xref_set_key(w.xref, "Q", "2")
-        w.update()
-    return w
-
-
-# PDFs made by 1.3.0 had a "Lock fields" button of this name. Most viewers (Firefox, Edge, Chrome) ignore the
-# script behind it, and the attorneys saw it too, so it is no longer added; lock_pdf still takes it out.
-LOCK_BUTTON = "DjinnIt lock"  # (the app was DjinnIt then)
-
-
-def has_fields(path: Path) -> bool:
-    """True when a PDF has fields to lock (the old Lock fields button doesn't count): False for one already
-    flattened or locked."""
-    with pymupdf.open(path) as doc:
-        return any(w.field_name != LOCK_BUTTON for page in doc for w in page.widgets())
-
-
-def lock_pdf(path: Path) -> Path:
-    """Saves a copy of a PDF with its fields flattened into the page (they can no longer be changed) as
-    '<name> (locked).pdf' next to it, never overwriting; returns the copy's path. The original is kept."""
-    path = Path(path)
-    with pymupdf.open(path) as doc:
-        for page in doc:
-            buttons = [w.xref for w in page.widgets() if w.field_name == LOCK_BUTTON]
-            for xref in buttons:
-                page.delete_widget(page.load_widget(xref))
-        doc.bake()
-        out = unique_path(path.with_name(f"{path.stem} (locked){path.suffix}"))
-        doc.save(out, garbage=3, deflate=True)
-    return out
-
-
-def set_check(w: pymupdf.Widget, on: bool) -> None:
-    """Ticks or clears a checkbox field."""
-    w.field_value = w.on_state() if on else "Off"
-    w.update()
 
 
 def _spread(v: dict, text: str, keys: list[str], width: float, fixed: dict[str, float],
@@ -297,6 +179,8 @@ def _fill_clean(doc: pymupdf.Document, v: dict) -> None:
     _spread(v, v.get("case_name_raw", ""), ["case_name_1", "case_name_2", "case_name_3"],
             widgets["case_name_1"].rect.width, fixed)
     _spread(v, str(v.get("dates", "")), ["dates", "dates_2"], widgets["dates"].rect.width, fixed)
+    if v.get("speeds_note"):  # (no line for it under the rate: the speeds go in the rate's own field)
+        v["rate"] = v["speeds_note"]
     for name, w in widgets.items():
         val = v.get(name, "")
         if w.field_type == pymupdf.PDF_WIDGET_TYPE_CHECKBOX:
@@ -371,7 +255,7 @@ def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
     for src, dst in fmap.MERGE_INTO.items():
         if v.get(src):
             v[dst] = ", ".join(x for x in (v.get(dst, ""), v[src]) if x)
-    if v.get("rate"):
+    if v.get("rate") and v["rate"] != SEE_BELOW:
         v["rate"] = f"${v['rate']}"
     for key, w in widgets.items():
         if key is None:
@@ -388,124 +272,6 @@ def _fill_mapped(doc: pymupdf.Document, v: dict, fmap, case_fs: float) -> None:
         text = str(v.get(key) or "")
         r = pymupdf.Rect(rect)
         add_text_field(page, key, r, text, (fixed.get(key) or fit_size(text, r, max_fs=10)) if text else 0)
-
-
-def safe_filename(s: str) -> str:
-    """A name Windows accepts for a file: 'Roe v. Poe: 9/14' -> 'Roe v. Poe- 9-14'. At most 150 characters."""
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", s)
-    s = re.sub(r"\s+", " ", s).strip(" .-")
-    return s[:150] or "Minute Agreement"
-
-
-_NOT_A_SPLIT = r"(?!(?:Inc|LLC|L\.L\.C|Corp|P\.C|LLP|Ltd|Jr|Sr)\b)"  # ", Inc." does not start another party
-
-
-def short_caption(name: str, limit: int = 60) -> str:
-    """'A, B v. C Inc., D' -> 'A v. C Inc.' (used in file names)."""
-    sides = re.split(r"\s+v\.?\s+", " ".join(name.split()), maxsplit=1)
-    firsts = [re.split(r",\s+" + _NOT_A_SPLIT + r"|\s+and\s+", side)[0].strip(" ,") for side in sides]
-    short = " v. ".join(firsts)
-    return short if len(short) <= limit else short[:limit].rsplit(" ", 1)[0]
-
-
-def output_name(case: CaseInfo, atty: Attorney | None, s: Settings, dated: bool = False,
-                pattern: str | None = None, fallback: str = "Minute Agreement", **extra: str) -> str:
-    """The file name (with .pdf) for a PDF made for this case, from a pattern with {case} (short caption),
-    {index}, {attorney}, {date} (the first date of the minutes) and {today}. A pattern that can't be
-    filled in gives '<fallback> - <index>'.
-    dated: add the date of the minutes, to tell apart the forms for several days of one case; a form of several
-    days (one for the whole case, see batch.form_groups) gets its first and last day ('9-28-2026 to 10-2-2026'),
-    for {date} too.
-    pattern: another file name pattern (MOFR, invoice) than the agreement's; extra: more placeholders."""
-    from .extract_regex import find_dates
-    pattern = s.filename_pattern if pattern is None else pattern
-    found = list(dict.fromkeys(d for _, _, d in find_dates(case.get("dates"))))
-    # the first day read as a date: a typed 'September 28, 2026' is '9-28-2026', not 'September 28'
-    day = found[0].replace("/", "-") if found else case.get("dates").split(",")[0].strip().replace("/", "-")
-    if dated and len(found) > 1:
-        first, last = min(found, key=_date_key), max(found, key=_date_key)
-        day = f"{first.replace('/', '-')} to {last.replace('/', '-')}"
-    today = date.today()
-    caption = short_caption(case.get("case_name")) or "Case"
-    if dated and day and "{case}" in pattern and "{date}" not in pattern:
-        caption, dated = f"{caption} ({day})", False
-    try:
-        name = pattern.format(
-            case=caption, today=f"{today.month}-{today.day}-{today.year}",
-            index=case.get("index_no").replace("/", "-") or "no index",
-            attorney=(atty.name or atty.firm) if atty else "",
-            date=day, **extra,
-        )
-    except (KeyError, IndexError, ValueError, AttributeError, TypeError):  # a bad custom pattern
-        name = f"{fallback} - {case.get('index_no').replace('/', '-')}"
-    if dated and day and "{date}" not in pattern:
-        name += f" - {day}"
-    name = re.sub(r"(\s-\s*)+$", "", re.sub(r"\s-\s+-\s", " - ", name)).strip()
-    return (safe_filename(name) if name.strip(" .-") else fallback) + ".pdf"
-
-
-def _date_key(d: str) -> tuple:
-    """'6/2/2026' -> (2026, 6, 2), to sort M/D/YYYY dates."""
-    m, day, y = (int(x) for x in d.split("/"))
-    return y, m, day
-
-
-MARK = "YinIt"  # PDF "creator" of every file this app makes: such files are skipped as inputs
-OLD_MARKS = ("DjinnIt",)  # the mark before the app was renamed (2.0)
-
-
-def mark(doc: pymupdf.Document, kind: str) -> None:
-    """Labels a PDF as made by this app: its creator becomes MARK and the kind ("YinIt agreement",
-    "YinIt invoice", "YinIt math")."""
-    meta = dict(doc.metadata or {})
-    meta["creator"] = f"{MARK} {kind}"
-    doc.set_metadata(meta)
-
-
-def save_output(doc: pymupdf.Document, kind: str, path: Path, flatten: bool = False) -> Path:
-    """Saves a PDF this app made: labels it (see mark), optionally flattens the fields, never overwrites
-    (adds " (2)" etc.), closes it and returns where it went. When the save fails, the error is raised and the file
-    half written is deleted; when even that fails, the error says where it was left (`left_behind`)."""
-    mark(doc, kind)
-    if flatten:
-        doc.bake()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    out = unique_path(path)
-    try:
-        doc.save(out, garbage=3, deflate=True)
-    except Exception as e:
-        # the disk full, or the file taken meanwhile: a file half written is no PDF, and an invoice's number
-        # would stay with it (invoice.make_invoice gives the number back only when nothing is left on disk)
-        try:
-            out.unlink(missing_ok=True)
-        except OSError:
-            e.left_behind = out  # (held by an antivirus scan, say: make_invoice tries once more, then keeps the number)
-        raise
-    doc.close()
-    return out
-
-
-def is_generated(path: Path) -> bool:
-    """True for a PDF that this app made (see mark), also under its old name (OLD_MARKS)."""
-    if path.suffix.lower() != ".pdf":
-        return False
-    try:
-        with pymupdf.open(path) as doc:
-            return (doc.metadata or {}).get("creator", "").startswith((MARK, *OLD_MARKS))
-    except Exception:
-        return False
-
-
-
-def unique_path(p: Path) -> Path:
-    """`p`, or 'name (2).pdf', 'name (3).pdf'... when it already exists, so nothing is overwritten."""
-    if not p.exists():
-        return p
-    for i in range(2, 1000):
-        q = p.with_name(f"{p.stem} ({i}){p.suffix}")
-        if not q.exists():
-            return q
-    return p
 
 
 def fill(case: CaseInfo, atty: Attorney | None, s: Settings, out_dir: Path, dated: bool = False) -> Path:
@@ -568,22 +334,105 @@ def agreement_orderers(case: CaseInfo, ordered: dict[str, int] | None) -> list[A
     return out
 
 
-def agreement_case(case: CaseInfo, atty: Attorney | None, ordered: dict[str, int] | None) -> CaseInfo:
-    """The case as one attorney's minute agreement shows it: its Est. number of pages that attorney's
-    (agreement_pages); the case itself when there is no such count. A shallow copy: the other fields are the
-    case's own FieldState objects, so an agreement date fill sets is set on the case too."""
-    n = agreement_pages(ordered, atty)
-    if n is None:
+def speeds_note(form_speeds: list) -> str:
+    """Which pages of a form are at which speed (CaseInfo.form_speeds): 'Daily $6.50 a page: 6/3/2026; Regular
+    $4.30 a page: 6/4/2026, 6/5/2026' (where the pages of a day differ: '6/3/2026 pp. 1–60')."""
+    by: dict[str, tuple[str, list[str]]] = {}
+    for sp, rate, where in form_speeds:
+        r, places = by.setdefault(sp, (rate, []))
+        if where and where not in places:
+            places.append(where)
+    return "; ".join(f"{sp}" + (f" ${r} a page" if r else "") + (f": {', '.join(places)}" if places else "")
+                     for sp, (r, places) in by.items())
+
+
+def speeds_case(case: CaseInfo, speeds: list[tuple[str, str]], s: Settings) -> CaseInfo:
+    """The case as a form of pages ordered at these speeds shows it ((speed, where) each: the days or pages at
+    it, see batch.Job.ordered_speeds). One speed that isn't the case's own: that speed, its rate on the sheet and
+    its delivery date (unless one was typed). Several: CaseInfo.form_speeds (each ticked, "see below" on the
+    rate line, speeds_note saying which pages are at which, see build_values) and the latest delivery date of
+    them (unless one was typed). The case itself when there is nothing to change. A shallow copy, as
+    agreement_case's."""
+    from .merge import refresh_delivery_date, refresh_rate
+    from .models import SRC_DERIVED, SRC_USER, FieldState
+    names = list(dict.fromkeys(sp for sp, _ in speeds if sp))
+    kinds = list(dict.fromkeys(speed_key(sp) for sp in names))
+    if not names or kinds == [speed_key(case.get("delivery"))]:
         return case
     out = copy.copy(case)
     out.fields = dict(case.fields)
-    out.fields["est_pages"] = dataclasses.replace(case.fields["est_pages"], value=str(n))
+    if len(kinds) == 1:
+        out.fields["delivery"] = FieldState(names[0], SRC_USER, 1.0, [names[0]])
+        out.fields["rate"] = FieldState()  # (a rate typed was the case's speed's)
+        refresh_rate(out, s)
+        refresh_delivery_date(out, s)
+        return out
+    out.form_speeds = [(sp, s.rate_for(sp), where) for sp, where in speeds if sp]
+    days = [s.days_for(sp) for sp in names]
+    typed = out.fields["delivery_date"]
+    if all(d is not None for d in days) and not (typed.source == SRC_USER and typed.value):
+        d = us_date(next_weekday(date.today() + timedelta(days=max(days))))
+        out.fields["delivery_date"] = FieldState(d, SRC_DERIVED, 0.8, [d])
+    return out
+
+
+def case_speeds(case: CaseInfo, ordered: dict[str, int] | None, speeds: dict[str, list] | None) -> list:
+    """Every speed the firms that ordered pages ordered them at ((speed, where) each, see batch.Job.ordered_speeds),
+    with the case's own speed for a firm whose speed isn't set, for a form of the whole case (the MOFR, see
+    speeds_case); [] when no firm's is set (the case's speed alone)."""
+    speeds = speeds or {}
+    firms = [k for k, n in (ordered or {}).items() if k and n > 0] or list(speeds)
+    if not any(speeds.get(k) for k in firms):
+        return []
+    out = [x for k in firms for x in speeds.get(k, [])]
+    if any(not speeds.get(k) for k in firms):
+        out.append((case.get("delivery"), ""))
+    return out
+
+
+def agreement_case(case: CaseInfo, atty: Attorney | None, ordered: dict[str, int] | None,
+                   speeds: dict[str, list] | None = None, s: Settings | None = None) -> CaseInfo:
+    """The case as one attorney's minute agreement shows it: its Est. number of pages that attorney's
+    (agreement_pages), and the speed(s) it ordered at when they are set (speeds: by Attorney.key(), see
+    batch.Job.ordered_speeds; speeds_case, with the settings `s`); the case itself when there is no such
+    count nor speed. A shallow copy: the other fields are the case's own FieldState objects, so an agreement
+    date fill sets is set on the case too."""
+    n = agreement_pages(ordered, atty)
+    out = case
+    if n is not None:
+        out = copy.copy(case)
+        out.fields = dict(case.fields)
+        out.fields["est_pages"] = dataclasses.replace(case.fields["est_pages"], value=str(n))
+    k = atty.key() if atty is not None else ""
+    if speeds and s is not None and speeds.get(k):
+        out = speeds_case(out, speeds[k], s)
     return out
 
 
 def fill_all(case: CaseInfo, s: Settings, out_dir: Path, dated: bool = False,
              ordered: dict[str, int] | None = None) -> list[Path]:
     """One PDF per checked attorney (or a single form with a blank attorney block), each with the pages that
-    attorney ordered when `ordered` says (agreement_case). Used by the command line (main.py); unlike
-    deliver.generate it doesn't pick the attorneys with agreement_orderers, so every ticked row gets one."""
+    attorney ordered when `ordered` says (agreement_case). Used by --selftest (main.selftest); unlike
+    deliver.generate it doesn't pick the attorneys with agreement_orderers, so every ticked row gets one, and
+    each names the case's own speed."""
     return [fill(agreement_case(case, a, ordered), a, s, out_dir, dated) for a in case.orderers()]
+
+
+class Agreements:
+    """The minute agreement as an output (courthouses.OutputSpec.maker): deliver.generate makes the job's
+    (make), deliver.make_forms one for several days of a case (make_form)."""
+
+    @staticmethod
+    def make(m: Making) -> None:
+        """One agreement per attorney that ordered pages of the day (agreement_orderers), each showing the pages
+        it ordered and the speed(s) it ordered them at, when set (agreement_case), recorded with them."""
+        for atty in agreement_orderers(m.case, m.ordered):
+            # (its Est. number of pages: the pages it ordered; its speed: the one it committed to)
+            on = agreement_case(m.case, atty, m.ordered, m.speeds, m.s)
+            m.record("agreement", fill(on, atty, m.s, m.folder("agreement"), m.dated), atty,
+                     count=to_int(on.get("est_pages")) if on is not m.case else m.pages)
+
+    @staticmethod
+    def make_form(form: CaseForm, s: Settings, folder: Path) -> Path:
+        """The agreement of several days (batch.case_forms) for form.atty (None: the blank attorney block)."""
+        return fill(form.case, form.atty, s, folder, True)

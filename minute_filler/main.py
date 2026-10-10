@@ -15,7 +15,8 @@ def selftest(out_dir: str, files: list[str]) -> int:
     """Headless check of a build: reads each file and fills its minute agreement on each of the three forms (ucs,
     clean and original: fill.FORMS), checks the libraries a build can lose without anything else failing (fuzzy_search,
     regex_search, heic_photos, update_check, printing, math_pdf, single_instance, moving_picture: True each,
-    else the error), then writes selftest.json into out_dir.
+    else the error), that the code each output names can be imported (outputs) and that the courthouse's split
+    rule bills a made-up split order as the workbook does (mixed_speeds), then writes selftest.json into out_dir.
     The default settings are used; the saved ones are not touched."""
     import json
     from minute_filler.extract_regex import RegexExtractor
@@ -94,6 +95,31 @@ def selftest(out_dir: str, files: list[str]) -> int:
         report["moving_picture"] = reader.supportsAnimation() and reader.imageCount() > 1
     except Exception as e:
         report["moving_picture"] = f"{type(e).__name__}: {e}"
+    try:  # each output's maker, policy and window panel are imported by name (courthouses.OutputSpec), which a
+        # build only bundles when YinItAgreementForm.spec lists them: the window could otherwise not even open
+        from minute_filler import courthouses
+        from minute_filler.courthouses.base import resolve
+        for o in courthouses.outputs():
+            for ref in (o.maker, o.policy, o.panel):
+                if ref:
+                    resolve(ref)
+        report["outputs"] = True
+    except Exception as e:
+        report["outputs"] = f"{type(e).__name__}: {e}"
+    try:  # firms ordering the same pages at different speeds are billed by the courthouse's split rule, imported
+        # by name too (courthouses.Courthouse.split_rule): the workbook's example, 10 pages, Daily and Immediate
+        from minute_filler import courthouses
+        from minute_filler.invoice_calc import Share, quote_ordered
+        from minute_filler.rates import RateSheet, Speed
+        sheet = RateSheet("selftest", None, [
+            Speed("Daily", "6.50", "1.25", extras={"Email": "1.25"}),
+            Speed("Immediate", "7.60", "1.45", extras={"Email": "1.45"})])
+        rule = courthouses.split_rule()
+        daily = quote_ordered([Share(10, 2, False, "Daily", (("B", "Immediate"),))], sheet, rule)
+        immediate = quote_ordered([Share(10, 2, False, "Immediate", (("A", "Daily"),))], sheet, rule)
+        report["mixed_speeds"] = (str(daily.per_party), str(immediate.per_party)) == ("57.50", "72.50")
+    except Exception as e:
+        report["mixed_speeds"] = f"{type(e).__name__}: {e}"
     for f in files:
         try:
             case = merge([RegexExtractor(s.profile).extract(ingest_file(f))], s)
@@ -111,12 +137,15 @@ def selftest(out_dir: str, files: list[str]) -> int:
 
 def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> int:
     """Headless batch: --batch OUTDIR [--outputs agreement,mofr,invoice,runsheet] files/folders... fills one set of
-    forms per case and date with the saved settings, and writes batch.json (what was grouped, saved or
-    unreadable). The files go into OUTDIR whatever folders Settings give each output (run sheets still go to
-    their own folder). Without --outputs, the outputs ticked in the window are made. Returns 0, 1 when a file or
-    job had a problem, or 2 for an unknown output (main also returns 2 when OUTDIR or the files are missing)."""
+    forms per case and date with the saved settings (the math of the invoices saved as Settings.save_math says),
+    and writes batch.json (what was grouped, saved or unreadable, and each job's warnings: a document without
+    an index number, documents whose index numbers don't match, a firm of a split order whose speed wasn't given
+    and is billed at the agreement form's). The files go into OUTDIR whatever folders Settings give each
+    output, and not into a folder per case (OUTDIR is where they were asked for; run sheets still go to their
+    own folder). Without --outputs, the outputs ticked in the window are made. Returns 0, 1 when a file or job
+    had a problem, or 2 for an unknown output (main also returns 2 when OUTDIR or the files are missing)."""
     import json
-    from minute_filler.batch import expand_paths, fill_jobs, group, read_docs
+    from minute_filler.batch import expand_paths, fill_jobs, group, read_docs, settle_split_speeds
     from minute_filler.extract_regex import use_firm_answers
     from minute_filler.settings import OUTPUTS, Settings
 
@@ -131,12 +160,22 @@ def batch(out_dir: str, paths: list[str], outputs: list[str] | None = None) -> i
     use_firm_answers(s.firm_answers)  # (rows the user said are one firm, or not, are read so)
     s.output_dir = str(out)
     s.output_dirs = {k: v for k, v in s.output_dirs.items() if k == "runsheet"}  # everything else into OUTDIR
+    s.case_folders = False
     docs, errors = read_docs(expand_paths(paths), s)
     jobs = group(docs, s)
-    fill_jobs([j for j in jobs if j.include], s, outputs=outputs)  # not the documents that name no case
+    chosen = [j for j in jobs if j.include]  # not the documents that name no case
+    # (nobody to ask here: the firms of a split order without a speed get the agreement form's, and are told of)
+    unset = settle_split_speeds(chosen, s, outputs)
+    fill_jobs(chosen, s, outputs=outputs)
+
+    def warnings(j) -> list[str]:
+        """The job's warnings: its index numbers, and the speeds set for it without being given."""
+        return j.index_number_notes() + [f"{a.name}'s speed wasn't given: billed at {a.speed}, the agreement "
+                                         f"form's speed" for a in unset if a.job is j]
+
     report = {"documents": len(docs), "unreadable": errors, "jobs": [
         {"case": j.case.get("case_name"), "index": j.case.get("index_no"), "dates": j.case.get("dates"),
-         "documents": [d.path for d in j.docs], "problems": j.problems(),
+         "documents": [d.path for d in j.docs], "problems": j.problems(), "warnings": warnings(j),
          "forms": [p.name for p in j.saved], "error": j.error} for j in jobs]}
     (out / "batch.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return 1 if errors or any(j.error for j in jobs) else 0

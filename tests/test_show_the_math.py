@@ -1,8 +1,10 @@
 """Show the math: the window that spells out how the amounts of the invoices just made were reached, in tables
 (by invoice, or the firms side by side, the layout switched and kept; copied as text, saved as a PDF, turned
-off), the note under each invoice (the pages the user wrote, the index and why), and the detailed copy of
-each invoice. Also the recap's jokes (April Fools, "But
-who's counting?"), the New Year yin-yang on the first day of the year the app is used, and "The math" as a tab
+off), the note under each invoice (the pages the user wrote, the index and why), the detailed copy of each
+invoice, and the math Generate saves as PDFs next to the invoices (Settings.save_math: each invoice's and one
+for all of them by default; not recorded, opened or printed; none made for the preview, whose tab shows the math;
+the choice under the math itself, and in Settings). Also the recap's jokes (April Fools, "But who's counting?"),
+the New Year yin-yang on the first day of the year the app is used, and "The math" as a tab
 of the preview before saving. All names and numbers are made up; prices are from the bundled "Sample Rates"
 sheet (Regular: original $4.30, copy, e-mailed copy and index $1.00 a page)."""
 import os
@@ -43,6 +45,7 @@ def s(tmp_path):
     s.output_dir = str(tmp_path / "out")
     s.records_dir = str(tmp_path / "records")
     s.invoice_speeds = ["Regular"]
+    s.save_math = "off"  # (the files counted are the invoices and their copies; the tests of saving it set it)
     return s
 
 
@@ -118,6 +121,7 @@ def test_the_lines_of_a_share_add_up_to_the_total_shown():
     assert "together" not in plain and "    This firm pays: $38.25\n" in plain
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_math_spells_out_an_excerpt_stretch_by_stretch(s):
     """One firm ordered pages 1-90, another only 41-90 (Excerpts...): the first pays the 40 pages it ordered
     alone in full and half of the 50 ordered by both; the check at the end shows the two cover the whole
@@ -215,6 +219,7 @@ def test_the_math_by_invoice_is_a_table_with_a_row_a_charge(s):
     assert "    Index: 59 pages × $1.10 = $64.90 (each firm pays for its own)\n" in plain
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_math_with_the_firms_side_by_side(s):
     """The other layout: a table for the four firms at each speed, a column each (its name, number and pages):
     what it pays for each charge, with the pages that is, and what it pays in all. The plain text is the same in
@@ -297,6 +302,7 @@ def test_the_previews_math_tab_and_side_column_switch_together(s, qt):
     assert dlg.math.view.layout_key == "invoice"
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_all_the_firms_together_counts_each_set_of_invoices(s):
     """A firm that ordered one of two days (its case copied, to name its own day) fell out of the last line,
     and the invoices of another reporter of the case were added in with the user's."""
@@ -318,6 +324,7 @@ def test_all_the_firms_together_counts_each_set_of_invoices(s):
                               "Regular (DS invoices): the 2 firms together pay $31.50 for work that costs $31.50"]
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_three_firms_together_cost_whole_cents(s):
     """Bug: three shares of $24.333… added up to $72.999…. The last line now says the work "costs $73.00" and
     that rounding each share up "adds $0.02"."""
@@ -370,19 +377,19 @@ def test_generate_notes_the_math_and_makes_a_detailed_copy(s, tmp_path):
 def test_the_detailed_copies_are_named_apart_and_a_failed_one_stops_nothing(s, tmp_path, monkeypatch):
     """Bug: a detailed copy that couldn't be made stopped the run, so the other attorneys' invoices were never
     made. Now it is logged and left out; `detailed` names the copies made (not opened or printed)."""
-    from minute_filler import deliver
+    from minute_filler import invoice
     case, opts = two_firms()
     s.invoice_detailed_copy = True
     detailed = []
     paths = generate(case, s, tmp_path, ["invoice"], opts, detailed=detailed)
     assert len(paths) == 4 and detailed == [paths[1], paths[3]]
-    real = deliver.render
+    real = invoice.render
 
     def broken(*a, **k):
         if a[-1].detail:
             raise OSError("disk full")
         return real(*a, **k)
-    monkeypatch.setattr(deliver, "render", broken)
+    monkeypatch.setattr(invoice, "render", broken)  # (the detailed copy, drawn by invoice.Invoices)
     detailed = []
     paths = generate(case, s, tmp_path, ["invoice"], opts, detailed=detailed)
     assert len(paths) == 2 and detailed == [] and len(ledger_for(s).invoices()) == 4  # both invoices made
@@ -657,3 +664,125 @@ def test_generate_all_without_the_preview_shows_the_math_after(tmp_path, monkeyp
     win.fill_all_jobs()
     wait(win, lambda: not win.filling and ledger_for(win.s).invoices())
     assert len(after) == 1 and "Original:" in after[0]
+
+
+# ------------------------------------------------------------------ the math saved with the invoices (2.7.0)
+def math_pdfs(paths):
+    from minute_filler.invoice_math import is_math_file
+    return [p for p in paths if is_math_file(p)]
+
+
+@pytest.mark.parametrize("save, each, overall", [("both", 2, 1), ("each", 2, 0), ("all", 0, 1), ("off", 0, 0)])
+def test_generate_saves_the_math_as_the_settings_say(s, tmp_path, save, each, overall):
+    case, opts = two_firms()
+    s.save_math = save
+    paths = generate(case, s, tmp_path, ["invoice"], opts)
+    invoices = [p for p in paths if p.name.startswith("Invoice ") and p not in math_pdfs(paths)]
+    numbers = sorted(i.invoice_no for i in ledger_for(s).invoices())
+    assert len(invoices) == 2 and len(numbers) == 2  # (the math is no invoice, and isn't recorded)
+    assert [a.kind for a in ledger_for(s).activity()] == ["invoice", "invoice"]
+    names = {p.name for p in math_pdfs(paths)}
+    assert names == ({f"{p.stem} - the math.pdf" for p in invoices} if each else set()) | (
+        {f"Invoices {numbers[0]} to {numbers[1]} - Jane Roe v. X.Y. Holding Corporation - the math.pdf"}
+        if overall else set())
+    for p in math_pdfs(paths):
+        with pymupdf.open(p) as doc:
+            text = "".join(page.get_text() for page in doc)
+            assert doc.metadata["creator"] == "YinIt math" and text.startswith("The math")
+        mine = [n for n in numbers if n in p.name]
+        if len(mine) == 1:  # one invoice's: its own math, not the other firm's
+            other = next(n for n in numbers if n != mine[0])
+            assert f"Invoice {mine[0]}" in text and f"Invoice {other}" not in text
+        else:  # all of them
+            assert all(f"Invoice {n}" in text for n in numbers)
+
+
+def test_one_invoice_alone_gets_its_own_math_only(s, tmp_path):
+    case, opts = two_firms()
+    case.attorneys[1].checked = False
+    s.save_math = "both"
+    paths = generate(case, s, tmp_path, ["invoice"], InvoiceOpts(60, 1, days=[("6/3/2026", 60)]))
+    assert [p.name for p in math_pdfs(paths)] == [f"{paths[0].stem} - the math.pdf"]
+    # made again (another number): its own file; one there of the same name isn't written over
+    again = math_pdfs(generate(case, s, tmp_path, ["invoice"], InvoiceOpts(60, 1, days=[("6/3/2026", 60)])))
+    assert len(again) == 1 and again[0] not in paths
+
+
+def test_a_math_pdf_that_cant_be_saved_stops_nothing(s, tmp_path, monkeypatch):
+    from minute_filler import invoice_math
+    case, opts = two_firms()
+    s.save_math = "both"
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(invoice_math, "to_pdf", broken)
+    paths = generate(case, s, tmp_path, ["invoice"], opts)
+    assert len(paths) == 2 and len(ledger_for(s).invoices()) == 2 and not math_pdfs(paths)
+
+
+def test_the_math_files_are_known_by_their_name():
+    from minute_filler.invoice_math import is_math_file
+    assert is_math_file(Path("Invoice 2026-0012 - Roe v. X.Y. - Alex B. Counsel - the math.pdf"))
+    assert is_math_file(Path("Invoices 2026-0012 to 2026-0013 - the math (2).pdf"))
+    assert not is_math_file(Path("Invoice 2026-0012 - Roe v. X.Y. - Alex B. Counsel.pdf"))
+    assert not is_math_file(Path("Invoice 2026-0012 (detailed).pdf"))
+
+
+def test_generate_says_what_it_saved_and_neither_opens_nor_prints_it(tmp_path, monkeypatch, make_window, qt):
+    from minute_filler.gui import main_window
+    from minute_filler.gui.preview import MathDialog
+    win = math_window(tmp_path, monkeypatch, make_window, qt, preview=False)
+    shown, opened, printed = [], [], []
+    monkeypatch.setattr(MathDialog, "exec", lambda dlg: shown.append(
+        (dlg.saved_note.text(), dlg.saves.choice.currentData())) or 0)
+    monkeypatch.setattr(main_window, "open_path", lambda p: opened.append(Path(p).name))
+    monkeypatch.setattr(main_window.MainWindow, "_saved_box",
+                        lambda self, *a, files=None, **k: printed.extend(Path(p).name for p in files or []))
+    win.s.open_after = True
+    win.fill()
+    saved = math_pdfs(win.cur.saved)
+    assert len(saved) == 1 and saved[0].parent == tmp_path / "out" / "712345-2021"  # (next to the invoice)
+    assert shown == [("This time: 1 PDF next to the invoices.", "both")]
+    assert opened and printed and not [n for n in opened + printed if "the math" in n]
+    win.s.save_math = "off"
+    win.fill()
+    assert not math_pdfs(win.cur.saved) and shown[-1] == ("This time: not saved.", "off")
+
+
+def test_the_choice_is_under_the_math_and_the_preview_saves_none(tmp_path, monkeypatch, make_window, qt):
+    from minute_filler.gui.preview import MathDialog, PreviewDialog
+    win = math_window(tmp_path, monkeypatch, make_window, qt)
+    seen = []
+
+    def look(dlg):
+        seen.append((dlg.math.saves.choice.currentData(), [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]))
+        dlg.math.saves.choice.setCurrentIndex(dlg.math.saves.choice.findData("all"))  # changed there: kept
+        return PreviewDialog.Accepted
+    monkeypatch.setattr(PreviewDialog, "exec", look)
+    win.fill()
+    (choice, tabs), = seen
+    assert choice == "both" and tabs.count("The math") == 1 and len(tabs) > 1  # (its tab; no PDF of it made)
+    assert win.s.save_math == "all" and Settings.load().save_math == "all"
+    # Save saved it as just chosen: one invoice, "one for all of them" is its file
+    assert [p.name for p in math_pdfs(win.cur.saved)] == [f"Invoice {date.today().year}-0001 - Jane Roe v. "
+                                                          "X.Y. Holding Corporation - the math.pdf"]
+    # the live math (Who pays what) has it too, and the Settings window
+    dlg = MathDialog([], win.s, win, live=True)
+    assert dlg.saves.choice.currentData() == "all" and dlg.saved_note.text() == ""
+    from minute_filler.gui.dialogs import SettingsDialog
+    sd = SettingsDialog(win.s)
+    assert sd.i_save_math.currentData() == "all"
+    sd.i_save_math.setCurrentIndex(sd.i_save_math.findData("off"))
+    sd.accept()
+    assert Settings.load().save_math == "off"
+
+
+def test_generate_all_saves_the_math_of_each_job_and_joint_invoice(tmp_path, monkeypatch, make_window, qt):
+    from test_extras import wait
+    win = math_window(tmp_path, monkeypatch, make_window, qt, preview=False, days=2)
+    monkeypatch.setattr(type(win), "_saved_box", lambda self, *a, **k: None)
+    win.fill_all_jobs()
+    wait(win, lambda: not win.filling and ledger_for(win.s).invoices())
+    saved = {p for j in win.jobs for p in math_pdfs(j.saved)}
+    invoices = ledger_for(win.s).invoices()
+    assert len(invoices) == len(saved) == 1 and invoices[0].invoice_no in next(iter(saved)).name

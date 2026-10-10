@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pymupdf
 import pytest
 
-from minute_filler import deliver
+from minute_filler import mofr
 from minute_filler.batch import Job, fill_jobs, group, read_docs, remerge
 from minute_filler.deliver import generate
 from minute_filler.invoice import InvoiceOpts
@@ -62,7 +62,7 @@ def test_files_made_before_a_failure_are_reported(s, tmp_path, monkeypatch):
     def locked(*a, **kw):
         raise PermissionError("the file is open")
 
-    monkeypatch.setattr(deliver, "fill_mofr", locked)
+    monkeypatch.setattr(mofr, "fill_mofr", locked)  # (called by the MOFR's maker, mofr.Mofrs)
     case = make_case(ROE)
     with pytest.raises(PermissionError) as err:
         generate(case, s, tmp_path / "out", ["agreement", "mofr"], ledger=Ledger(tmp_path / "r.db"))
@@ -145,7 +145,8 @@ def test_invoice_text_rows_with_a_list_or_dict_for_where_or_when_are_dropped():
     # a hand-edited file: "where"/"when" that aren't strings used to crash the load (unhashable)
     rows = [{"where": ["footer"], "when": "always", "text": "x"}, {"where": "footer", "when": {"a": 1}, "text": "y"},
             {"where": "footer", "when": "always", "text": "Thank you."}]
-    Settings().path.write_text(json.dumps({"invoice_texts": rows}), encoding="utf-8")
+    Settings().path.write_text(json.dumps({"settings_version": Settings.settings_version, "invoice_texts": rows}),
+                               encoding="utf-8")  # (current: no rows added since, see settings.from_dict)
     s = Settings.load()
     assert s.invoice_texts == [{"where": "footer", "when": "always", "text": "Thank you."}]
 
@@ -185,7 +186,7 @@ def test_a_locked_run_sheet_makes_nothing_so_trying_again_bills_once(s, tmp_path
     monkeypatch.setattr(rs, "_save", real)
     made = generate(job.case, s, tmp_path / "out", ["invoice", "runsheet"], job.invoice_opts(), ledger,
                     runsheet=job.runsheet_opts(s))
-    assert len(made) == 2 and len(ledger.invoices()) == 1
+    assert len(made) == 3 and len(ledger.invoices()) == 1  # (the run sheet, the invoice and its math)
     # the same takes again: the run sheet is left as it was, and neither listed nor recorded again
     sheet = job.runsheet_opts(s)
     made = generate(job.case, s, tmp_path / "out", ["runsheet"], job.invoice_opts(), ledger, runsheet=sheet)
@@ -377,14 +378,15 @@ def test_generate_asks_about_the_case_as_whose_pages_left_it(make_window, monkey
 
 def test_selftest_checks_the_fuzzy_search(tmp_path):
     """--selftest says whether the Records' Fuzzy and Regex searches, HEIC photos, the look for a newer version,
-    printing, The math's Save as PDF and one window at a time (QtNetwork) work (the release check runs it on the
-    build)."""
+    printing, The math's Save as PDF and one window at a time (QtNetwork) work, and whether the code each output
+    names (imported by name: courthouses.OutputSpec) is there (the release check runs it on the build)."""
     from minute_filler.main import selftest
     assert selftest(str(tmp_path / "st"), []) == 0
     report = json.loads((tmp_path / "st" / "selftest.json").read_text(encoding="utf-8"))
     assert report["fuzzy_search"] is True and report["regex_search"] is True and report["heic_photos"] is True
     assert report["update_check"] is True and report["printing"] is True and report["math_pdf"] is True
     assert report["single_instance"] is True  # one window at a time needs QtNetwork in the build
+    assert report["outputs"] is True  # the outputs' code, imported by name, is in the build (courthouses)
 
 
 def test_an_iphone_heic_photo_is_read(tmp_path, monkeypatch):

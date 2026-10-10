@@ -207,11 +207,16 @@ class FieldState:
 @dataclass
 class CaseInfo:
     """Merged, user-editable state for one job: a FieldState per FIELD_KEYS field, the proceeding types ticked,
-    the attorneys (ticked or not) and the extractors' notes."""
+    the attorneys (ticked or not) and the extractors' notes; and, on the copy one form is filled from, the speeds
+    it names when there are several (form_speeds)."""
     fields: dict[str, FieldState] = field(default_factory=lambda: {k: FieldState() for k in FIELD_KEYS})
     proc_types: set[str] = field(default_factory=set)
     attorneys: list[Attorney] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # A form covering pages ordered at several speeds (fill.speeds_case: an attorney's agreement of Daily on one
+    # day and Regular on another, a MOFR of firms at different speeds): (speed, rate a page, where) each; empty =
+    # the "delivery" field's one speed
+    form_speeds: list = field(default_factory=list)
 
     def get(self, key: str) -> str:
         """The value of a field in FIELD_KEYS."""

@@ -71,6 +71,7 @@ def test_the_runs_of_a_day_typed_in_its_printed_numbers(tmp_path, s):
     assert d1.span(5, 25) == "105–125" and d1.place(5, 25) == "5–25 of 40"
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_example_case_is_billed_two_and_three_ways(tmp_path, s):
     jobs = trial(tmp_path, s)
     d1, d2 = days = case_days(jobs)
@@ -127,6 +128,7 @@ def test_a_run_among_numbers_the_transcript_skips_is_refused():
         d.parse("5-8")
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_index_of_a_job_of_two_dates_is_priced_as_the_invoices_do(tmp_path, s):
     """Two dates of 30 pages read as one job: the index (from 50 pages a day) was decided on the job's 60 pages
     in the table's prices ($309) while the invoices decide date by date and bill no index ($249). The table now
@@ -146,6 +148,7 @@ def test_the_index_of_a_job_of_two_dates_is_priced_as_the_invoices_do(tmp_path, 
     assert [amounts["Regular"] for _, amounts in p.firms] == [Decimal("249.00")] * 2
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_same_firms_on_two_days_are_one_group_whatever_their_order(tmp_path, s):
     jobs = trial(tmp_path, s)
     for j in jobs:
@@ -285,6 +288,7 @@ def wait(win, until, seconds=20):
     raise AssertionError("timed out")
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_excerpts_window_follows_the_table_and_the_main_window(window, tmp_path):
     from PySide6.QtCore import Qt
     from minute_filler.gui.excerpts import DATE, FIRST_FIRM, PAGES, PLACE, WEEKDAY
@@ -364,7 +368,7 @@ def test_the_excerpts_window_follows_speeds_and_jobs_ticked(window, tmp_path):
     window.inv_speed_boxes["Expedite"].setChecked(True)
     assert "Expedite" in w.speeds
     from PySide6.QtCore import Qt
-    window.job_list.item(1).setCheckState(Qt.Unchecked)  # day 2 left out of Generate all
+    window.job_list.topLevelItem(1).setCheckState(0, Qt.Unchecked)  # day 2 left out of Generate all
     assert [d.job for d in w.days] == [window.jobs[0]]
 
 
@@ -384,6 +388,7 @@ def test_a_cell_typed_while_the_main_window_changed_the_runs(window, tmp_path):
     assert day2.portions == [(10, [A.key()]), (20, [A.key()])]
 
 
+@pytest.mark.usefixtures("split_orders_choose")
 def test_the_colours_of_the_excerpts_table_are_the_sets_of_firms_ordering_together(window, tmp_path):
     """The boxes were tinted with no explanation (and glaring on the dark theme): each set of firms ordering
     together now has a colour, the same in the table and on its line under it; and the weekday is read."""
@@ -534,8 +539,8 @@ def test_the_right_click_menu_of_a_run(window, tmp_path, monkeypatch):
                 f()
             return next(x for x in self.menu.actions() if x.text() == "Remove run")
 
-    def run_menu(run):
-        menu, slots = menu_of(run)
+    def run_menu(run, key=None):  # (key: the firm whose box was clicked, for its speed on the run)
+        menu, slots = menu_of(run, key)
         return Picked(menu), slots
 
     def right_click(row):

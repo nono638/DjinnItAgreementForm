@@ -30,6 +30,13 @@ attorneys already invoiced (Job.invoiced_keys) are not billed again by the next 
 rows no longer fit it (Job.portions_problem) gets no invoice until they are checked. The days of a case on one
 invoice also get one minute agreement per attorney and one MOFR for all of them (form_groups, case_forms),
 unless Settings.forms_per_case is off.
+
+What each output needs of a job is its policy's (OutputPolicy and the classes after it, named by the
+courthouse's OutputSpec.policy). Each case's files go into a folder of their own inside Save to when Settings
+say so (case_folders, out_dir_for). Firms that order the same pages at different speeds (Job.speeds, and a
+run's own speeds in Job.portions) commit to one before they are billed (speeds_to_ask, settle_split_speeds).
+Documents of a job whose index numbers don't match are pointed out and asked about before Generate
+(Job.index_number_notes, Job.index_number_asks).
 """
 from __future__ import annotations
 
@@ -42,20 +49,22 @@ from typing import Callable
 
 from .extract_regex import (RegexExtractor, dedupe_attorneys, find_dates, maybe_same_entry, merge_entry, norm_index,
                             same_entry, same_firm)
+from . import courthouses
 from .deliver import NO_INVOICE, CaseForm, generate, ledger_for, make_forms
-from .fill import agreement_orderers, is_generated, short_caption
-from .invoice import (ORDERED_BY_NOBODY, DayOrder, InvoiceOpts, Portion, day_reporters, invoice_count,
-                      reporters_text)
+from .fill import agreement_orderers, case_speeds, speeds_case
+from .invoice import (ORDERED_BY_NOBODY, DayOrder, InvoiceOpts, Portion, day_reporters, default_speed,
+                      invoice_count, reporters_text)
 from .ingest import IMAGE_EXT, Ingested, ingest_file
 from .log import error as log_error, log
 from .merge import merge, refresh_copies, refresh_delivery_date, refresh_rate, same_value
 from .models import (Attorney, Candidate, CaseInfo, Extraction, FIELD_LABELS, FieldState, SRC_DERIVED, SRC_PDF,
                      SRC_RECORDS, SRC_REGEX, SRC_USER, to_int)
+from .pdfout import case_folder_name, free_folder, is_generated, short_caption
 from .rates import speed_key
 from .records import recorded_cases
 from .runsheet import NO_RUNSHEET, RunSheetOpts, matches, name_rows, read_info, rows_from, transcript_pages
 from .takes import my_initials, page_owners
-from .settings import OUTPUTS, Settings
+from .settings import OUTPUT_FOLDERS, OUTPUTS, Settings
 
 BATCH_EXT = {".pdf", ".eml", ".docx", ".txt", ".htm", ".html"} | IMAGE_EXT  # taken from a dropped folder
 Progress = Callable[[int, int, str], None]
@@ -104,6 +113,22 @@ def index_key(value: str) -> str:
     runsheet.index_numbers); "" when it has no number."""
     nums = re.findall(r"\d+", value or "")
     return (norm_index(*nums) if len(nums) == 2 else None) or "/".join(str(int(n)) for n in nums)
+
+
+MISMATCH_LEAD = "These documents may not be about the same case: "
+
+
+def index_number_text(groups: list, lead: str = MISMATCH_LEAD) -> str:
+    """Which documents have which index numbers, when they don't match (Job.index_number_mismatch): "These
+    documents may not be about the same case: Transcript.pdf has 712345/2021; email.txt and order.txt have
+    722222/2025" (after `lead`)."""
+    def names(g) -> str:
+        n = [d.ing.name for d in g]
+        return n[0] if len(n) == 1 else ", ".join(n[:-1]) + " and " + n[-1]
+
+    parts = [f"{names(g)} {'has' if len(g) == 1 else 'have'} "
+             + " and ".join(sorted({k for d in g for k in d.index_numbers()})) for g in groups]
+    return lead + "; ".join(parts)
 
 
 def ident(case: CaseInfo) -> Ident:
@@ -159,6 +184,13 @@ class Doc:
     def key(self) -> str:
         """The document as Job.page_basis and Job.front_owner name it: its path (its name when pasted)."""
         return self.path or self.ing.name
+
+    def index_numbers(self) -> set[str]:
+        """Every index number its own reading found (the rules' and the AI's, the file name's too), as jobs
+        compare them (index_key): {"712345/2021"}, or several on the title page of cases tried together; empty
+        when it has none (see Job.index_number_notes)."""
+        found = [c.value for x in (self.regex, self.ai) if x is not None for c in x.fields.get("index_no", [])]
+        return {k for k in map(index_key, found) if k}
 
     def owners(self) -> list[str]:
         """Whose each page of this transcript is (the word index after them left out, see
@@ -226,8 +258,13 @@ class Job:
     # Attorney.key()s of attorneys ticked on the day, or [ORDERED_BY_NOBODY] for pages nobody ordered), each
     # row from the page after the one above; the last ends at the day's pages. None = every ticked attorney
     # ordered every page. Only for a job of one day. Kept when they no longer fit (the pages changed, an
-    # attorney was unticked): see portions_problem.
+    # attorney was unticked): see portions_problem. A row may have a third item, {Attorney.key(): speed}: the
+    # firms that ordered that run at another speed than their own on the day (speeds; see speed_of).
     portions: list | None = None
+    # The speed each firm ordered this day's pages at, by Attorney.key() (the rate sheet's name: "Daily"); missing =
+    # not set: a firm billed alone chooses from its invoice, and the firms of a split order are asked at Generate
+    # (speeds_needed). Set in the "Who ordered what" card, the Excerpts window or Generate's question.
+    speeds: dict = field(default_factory=dict)
     runsheet_to: str | None = None  # the run sheet to add to; "" = a new one; None = as Settings say
     # one reporter wrote this case's transcripts: no run sheet for it, though the box is ticked for other cases
     # (set by the window while it ticks the box itself, see MainWindow._auto_runsheet)
@@ -242,6 +279,15 @@ class Job:
     front_owner: dict = field(default_factory=dict)
     own: tuple = ()  # the user's initials (takes.my_initials), set from the settings by remerge
     runsheet_group: int | None = None  # jobs of one case asked about together: they share the run sheet made
+    # The case's own folder inside Save to (Settings.case_folders, see out_dir_for): its name as chosen
+    # ("712345-2021", or "712345-2021 (2)" when a new one was asked for beside it); "" = not chosen yet.
+    # folder_named: what case_folder_name gave then, so the job's next Generate uses the folder again without
+    # asking, until the name it gives changes (another index number typed in)
+    folder: str = ""
+    folder_named: str = ""
+    # The documents the user said to keep together although their index numbers don't match
+    # (index_number_mismatch), by Doc.key(): asked again when a document not among them has an index number
+    index_numbers_ok: list = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """Nothing dropped and nothing typed."""
@@ -272,6 +318,48 @@ class Job:
         out = [FIELD_LABELS[k] + " is missing" for k in self.missing()]
         if self.no_attorney_chosen():
             out.append("no attorney is ticked")
+        return out
+
+    def index_number_groups(self) -> list[list[Doc]]:
+        """The job's documents that have index numbers (Doc.index_numbers), in groups that share one: a single
+        group when they are about one case. Documents linked through another are one case too: 712345/2021 on an
+        e-mail, 712345/2021 and 722222/2025 on the title page of cases tried together, 722222/2025 on an order."""
+        nums = [(d, d.index_numbers()) for d in self.docs]
+        groups: list[list[tuple]] = []  # (each in the order of the documents: a document joins the groups it links)
+        for d, n in nums:
+            if not n:
+                continue
+            joined = [g for g in groups if any(n & m for _, m in g)]
+            groups = [g for g in groups if all(g is not j for j in joined)]
+            groups.append([x for g in joined for x in g] + [(d, n)])
+        order = {id(d): i for i, (d, _) in enumerate(nums)}
+        return sorted(([d for d, _ in sorted(g, key=lambda x: order[id(x[0])])] for g in groups),
+                      key=lambda g: order[id(g[0])])
+
+    def index_number_mismatch(self) -> list[list[Doc]]:
+        """The groups of index_number_groups when there are more than one (the documents may be about different
+        cases: "Transcript.pdf has 712345/2021; email.txt has 722222/2025"), else []."""
+        groups = self.index_number_groups()
+        return groups if len(groups) > 1 else []
+
+    def index_number_asks(self) -> bool:
+        """Generate asks whether the documents belong together: their index numbers don't match, and the user
+        hasn't said to keep these documents together (index_numbers_ok)."""
+        mismatch = self.index_number_mismatch()
+        return bool(mismatch) and not {d.key() for g in mismatch for d in g} <= set(self.index_numbers_ok)
+
+    def index_number_notes(self) -> list[str]:
+        """What the documents say about the case's index number that needs a look, a line each: "email.txt: no
+        index number found" for a document with none ("No index number found in the document" for a job of one),
+        and, while the user hasn't said to keep them together (index_number_asks), which document has which when
+        they don't match (index_number_text)."""
+        out = []
+        if len(self.docs) == 1 and not self.docs[0].index_numbers():
+            out.append("No index number found in the document")
+        elif len(self.docs) > 1:
+            out += [f"{d.ing.name}: no index number found" for d in self.docs if not d.index_numbers()]
+        if self.index_number_asks():
+            out.append(index_number_text(self.index_number_mismatch()))
         return out
 
     def asked_speed(self) -> tuple[str, str, Doc | None]:
@@ -382,6 +470,11 @@ class Job:
         name_rows(rows)  # a reporter named on one day's title page is named on the other days too
         return RunSheetOpts(rows, self.runsheet_to)
 
+    def day_text(self, doc: Doc) -> str:
+        """A transcript's day as the window's list shows it ("6/3/2026", see _day_of); "" when none is known."""
+        day = self._day_of(doc)
+        return f"{day.month}/{day.day}/{day.year}" if day else ""
+
     def _day_of(self, doc: Doc) -> date | None:
         """The day of a transcript: its own date, else the job's first."""
         days = sorted(doc.ident.dates, key=_date_key) or [d for _, _, d in find_dates(self.case.get("dates"))]
@@ -486,6 +579,27 @@ class Job:
         own or those of the reporter Whose pages... chose first (see billed_mask)."""
         return sum(self.billed_pages_of(d) for d in self.transcripts())
 
+    def your_pages_of(self, doc: Doc) -> int | None:
+        """The pages of one transcript the user wrote, whatever Whose pages... bills (the window's list, Yours):
+        every page when no page has initials, or when one reporter wrote it all and that is the user (or the
+        user's initials aren't known); else those with the user's initials (0 on another reporter's transcript),
+        and the first pages when Whose pages... says they are the user's. None when that can't be told: a
+        transcript of several reporters while the user's initials aren't known, or whose first pages carry no
+        initials and Whose pages... hasn't said whose they are."""
+        found = doc.reporters()
+        if len(found) > 1 and (not self.own or (doc.front_pages() and doc.key() not in self.front_owner)):
+            return None
+        mask = self._mask(doc, "me")
+        return transcript_pages(doc.ing) if mask is None else sum(mask)
+
+    def your_pages(self) -> int | None:
+        """The pages the user wrote of the job's transcripts (your_pages_of, added up), or the Pages field when
+        typed in (what the user's invoice bills); None when a transcript can't tell."""
+        if self.pages_typed():
+            return self.invoice_pages()
+        counts = [self.your_pages_of(d) for d in self.transcripts()]
+        return None if None in counts else sum(counts)
+
     def shared_transcripts(self) -> list[Doc]:
         """The transcripts written by more than one reporter (Whose pages... lists them)."""
         return [d for d in self.transcripts() if len(d.reporters()) > 1]
@@ -521,11 +635,15 @@ class Job:
 
     def invoice_hold(self) -> str:
         """Why no invoice is made for this job until the user checks something ("" when it can be made):
-        Excerpts... rows that no longer fit, or whose pages to bill (Whose pages...)."""
+        Excerpts... rows that no longer fit, whose pages to bill (Whose pages...), or more speeds on the same
+        pages than the courthouse bills for now (speed_problems)."""
         if self.portions_problem():
             return self.portions_check()
         why = self.ownership_problem()
-        return f"Whose pages… needs choosing ({why})" if why else ""
+        if why:
+            return f"Whose pages… needs choosing ({why})"
+        too_many = self.speed_problems()
+        return f"The speeds need checking ({too_many[0]})" if too_many else ""
 
     def invoice_pages(self) -> int:
         """The pages to bill: the Pages field when typed in (with a transcript or without one: a caption page
@@ -630,7 +748,7 @@ class Job:
             rows = [(n, keys)]
         got: dict[str, int] = {k: 0 for k in keys}
         got[""], start = 0, 0
-        for last, ks in rows:
+        for last, ks, *_ in rows:
             real = [k for k in dict.fromkeys(ks) if k != ORDERED_BY_NOBODY]
             for k in real:
                 got[k] = got.get(k, 0) + last - start
@@ -745,7 +863,7 @@ class Job:
         them, see portion_pages)."""
         rows = self.portions
         try:
-            ends = [int(last) for last, _ in rows]
+            ends = [int(row[0]) for row in rows]
             return bool(ends) and ends[-1] == self.portion_pages() and all(a < b for a, b in zip([0] + ends, ends))
         except (TypeError, ValueError):
             return False
@@ -762,7 +880,7 @@ class Job:
         if not self.portions_fit_pages():
             return f"its rows don't end on this day's {self.portion_pages()} pages"
         ticked = set(self.ticked_keys()) | {ORDERED_BY_NOBODY}  # (a run nobody ordered: billed to nobody)
-        if any(not keys or any(k not in ticked for k in keys) for _, keys in self.portions):
+        if any(not keys or any(k not in ticked for k in keys) for _, keys, *_ in self.portions):
             return "it names an attorney no longer ticked"
         if not self.ticked_keys():
             return "nobody is ticked"
@@ -780,23 +898,28 @@ class Job:
 
     def rename_in_portions(self, old: str, new: str) -> None:
         """An attorney's name (or firm) was changed, from Attorney.key() `old` to `new`: the Excerpts... rows
-        follow it (a name cleared drops it from them), and so do the attorneys a stopped run invoiced already
-        (invoiced_keys: "key", or "key@ds" for another reporter's invoice), or a retry would bill them again."""
+        follow it (a name cleared drops it from them), and so do its speeds (Job.speeds, the runs' own) and the
+        attorneys a stopped run invoiced already (invoiced_keys: "key", or "key@ds" for another reporter's
+        invoice), or a retry would bill them again."""
         if not old or old == new:
             return
         if self.invoiced_keys and new:
             self.invoiced_keys = list(dict.fromkeys(
                 new + k[len(old):] if k == old or k.startswith(old + "@") else k for k in self.invoiced_keys))
+        self.speeds = _renamed(self.speeds, old, new)
         if self.portions is None:
             return
-        self.portions = [(last, list(dict.fromkeys(new if k == old else k for k in keys if k != old or new)))
-                         for last, keys in self.portions]
+        self.portions = [portion_row(last,
+                                     list(dict.fromkeys(new if k == old else k for k in keys if k != old or new)),
+                                     _renamed(more[0], old, new) if more else None)
+                         for last, keys, *more in self.portions]
 
     def invoice_orders(self) -> list[DayOrder]:
         """Who ordered the pages of each day billed (see invoice.DayOrder): the job's Excerpts... rows when
         they fit it, else every ticked attorney orders every page, shared by the Parties number when it was
-        set. A row counts the billed pages in it (on a transcript of several reporters, see day_mask). (Rows
-        that need checking must stop the invoice before this: see portions_problem.) A day answered to be judged
+        set. A row counts the billed pages in it (on a transcript of several reporters, see day_mask), and
+        carries the speeds set for its firms (portion_speeds). (Rows that need checking must stop the invoice
+        before this: see portions_problem.) A day answered to be judged
         on its typed Pages number (index_on_typed) has no total: its index is judged on that number
         (invoice.index_pages)."""
         days, totals, counts = self.invoice_days(), self.day_totals(), self.day_reporters()
@@ -806,22 +929,154 @@ class Job:
         if rows and len(days) == 1:
             out, start = [], 0
             mask, printed = self.day_mask(), self.printed_pages()
-            for last, keys in rows:
+            for i, (last, keys, *_) in enumerate(rows):
                 # the printed numbers when they are known and run in order through the stretch; else (Pages
                 # typed in, volumes that start their numbering again) its place in the day: "pages 1-20"
                 nums = printed[start:last]
                 ok = bool(nums) and None not in nums and all(a <= b for a, b in zip(nums, nums[1:]))
                 span = f"pp. {nums[0]}–{nums[-1]}" if ok else f"pages {start + 1}–{last}"
                 out.append(Portion(sum(mask[start:last]) if mask is not None else last - start, list(keys),
-                                   span=span))
+                                   span=span, speeds=self.portion_speeds(keys, i)))
                 start = last
             return [DayOrder(days[0][0], days[0][1], out, totals[0] if totals else 0, counts[0] if counts else {})]
         keys = self.ticked_keys()
         n = self.parties or len(keys)  # with nobody ticked: every attorney on the invoice (see firm_pages)
         totals += [0] * (len(days) - len(totals))
         counts += [{}] * (len(days) - len(counts))
-        return [DayOrder(day, pages, [Portion(pages, keys, n)], total, who)
+        return [DayOrder(day, pages, [Portion(pages, keys, n, speeds=self.portion_speeds(keys))], total, who)
                 for (day, pages), total, who in zip(days, totals, counts)]
+
+    # ------------------------------------------------------------- the speed each firm ordered
+
+    def speed_of(self, key: str, row: int | None = None) -> str:
+        """The speed firm `key` ordered: on run `row` of the Excerpts rows (Job.portions), that run's own when it
+        has one, else the day's (Job.speeds); "" when none is set."""
+        if row is not None and self.portions and row < len(self.portions):
+            more = self.portions[row][2:]
+            if more and isinstance(more[0], dict) and more[0].get(key):
+                return more[0][key]
+        return self.speeds.get(key, "")
+
+    def ordered_speeds(self) -> dict[str, list[tuple[str, str]]]:
+        """The speeds each firm ordered this day's pages at, where they are set, for its minute agreement
+        (fill.agreement_case) and the MOFR: by Attorney.key(), [(speed, where)], where being the day ("6/3/2026"),
+        or the pages of it at that speed when the firm ordered two ("6/3/2026 pp. 1–60"). A firm without a speed
+        isn't in it (its forms name the case's)."""
+        days = self.invoice_days()
+        if not days:
+            return {}
+        day = (days[0][0] if len(days) == 1 else self.case.get("dates")) or ""
+        rows = self.valid_portions()
+        if not rows or len(days) != 1:
+            return {k: [(self.speeds[k], day)] for k in self.ticked_keys() if self.speeds.get(k)}
+        per: dict[str, dict[str, list[tuple[int, int]]]] = {}
+        start, printed = 0, self.printed_pages()
+        for i, (last, keys, *_) in enumerate(rows):
+            for k in dict.fromkeys(keys):
+                if k != ORDERED_BY_NOBODY and self.speed_of(k, i):
+                    per.setdefault(k, {}).setdefault(self.speed_of(k, i), []).append((start + 1, last))
+            start = last
+        return {k: [(next(iter(by)), day)] if len(by) == 1 else
+                [(sp, f"{day} " + ", ".join(_printed_span(printed, a, b) or f"pages {a}–{b}" for a, b in _join(s)))
+                 for sp, s in by.items()] for k, by in per.items()}
+
+    def portion_speeds(self, keys, row: int | None = None) -> tuple[tuple[str, str], ...]:
+        """((key, speed), ...) of the firms among `keys` whose speed is set (speed_of), for invoice.Portion."""
+        return tuple((k, self.speed_of(k, row)) for k in dict.fromkeys(keys)
+                     if k != ORDERED_BY_NOBODY and self.speed_of(k, row))
+
+    def runs_ordered(self) -> list[tuple[str, list[str], list[str]]]:
+        """Who ordered each run of the day, for the speed checks: (where, the firms, their speeds as set, ""
+        where none is) per run of the Excerpts rows that bill it (valid_portions), else one for the whole day and
+        the firms ticked ("6/3/2026 pp. 1–60", ["k1", "k2"], ["Daily", ""]). [] without pages to bill or while
+        the Excerpts... rows need checking (portions_problem; not invoice_hold, which asks speed_problems, which
+        asks this)."""
+        days = self.invoice_days()
+        if not days or self.portions_problem():
+            return []
+        day = days[0][0] if len(days) == 1 else self.case.get("dates")
+        rows = self.valid_portions()
+        if not rows or len(days) != 1:
+            keys = self.ticked_keys()
+            return [(day or "", keys, [self.speed_of(k) for k in keys])]
+        out, start, printed = [], 0, self.printed_pages()
+        for i, (last, keys, *_) in enumerate(rows):
+            ks = [k for k in dict.fromkeys(keys) if k != ORDERED_BY_NOBODY]
+            if ks:
+                out.append((f"{day} {_printed_span(printed, start + 1, last) or f'pages {start + 1}–{last}'}",
+                            ks, [self.speed_of(k, i) for k in ks]))
+            start = last
+        return out
+
+    def split_keys(self) -> list[str]:
+        """The firms of a split order on this day: those that ordered a run together with another ticked firm
+        (a Parties number alone is billing one side: its other parties aren't in the table)."""
+        return list(dict.fromkeys(k for _, ks, _ in self.runs_ordered() if len(ks) > 1 for k in ks))
+
+    def speed_problems(self, s: Settings | None = None) -> list[str]:
+        """What stops this day's speeds from being billed (none when nothing does): more different speeds on the
+        same pages than the courthouse allows (speeds_together: Job.invoice_hold holds the invoice for these),
+        and, with the settings `s`, a speed their rate sheet doesn't have (the Excerpts window warns of it). A
+        firm's speed not set yet is no problem: Generate asks (speeds_needed)."""
+        out = []
+        cap = courthouses.speeds_together()
+        sheet = s.sheet() if s is not None else None
+        names = {a.key(): a.label() for a in self.case.attorneys}
+        for where, keys, speeds in self.runs_ordered():
+            if sheet is not None:
+                for k, sp in zip(keys, speeds):
+                    if sp and sheet.find(sp) is None:
+                        out.append(f"{names.get(k, k)}'s speed, {sp}, isn't on the rate sheet {sheet.name}")
+            kinds = list(dict.fromkeys(sp for sp in speeds if sp))
+            kinds = [sp for i, sp in enumerate(kinds) if speed_key(sp) not in map(speed_key, kinds[:i])]
+            if len(kinds) > cap:
+                # (a temporary, arbitrary cap of the courthouse's until the practice is settled: see
+                # courthouses.speeds_together)
+                out.append(f"{where}: {len(kinds)} different speeds ({', '.join(kinds)}); for now at most {cap} "
+                           "may share pages")
+        return list(dict.fromkeys(out))
+
+    def speeds_needed(self, s: Settings) -> list[str]:
+        """The firms whose speed Generate must ask for on this day (courthouses.speed_upfront): those of a split
+        order (split_keys) with no speed on some run of theirs (shared or not), and a firm with a speed on some
+        of its runs but not others (an invoice can't be partly "choose one"). By Attorney.key(), each once."""
+        if not courthouses.speed_upfront():
+            return []
+        split = set(self.split_keys())
+        out = []
+        for _, keys, speeds in self.runs_ordered():
+            for k, sp in zip(keys, speeds):
+                if not sp and (k in split or self.has_speed(k)):
+                    out.append(k)
+        return list(dict.fromkeys(out))
+
+    def has_speed(self, key: str) -> bool:
+        """Firm `key` has a speed set on this day, for all its pages or for a run of them."""
+        return bool(self.speeds.get(key)) or any(
+            isinstance(r[2], dict) and r[2].get(key) for r in self.portions or [] if len(r) > 2)
+
+    def set_speed(self, key: str, speed: str, row: int | None = None) -> None:
+        """Sets the speed firm `key` ordered: for all its pages of the day (clearing its runs' own speeds), or
+        for run `row` of the Excerpts rows alone (none kept when it is the day's). "" clears it."""
+        if row is None:
+            if speed:
+                self.speeds[key] = speed
+            else:
+                self.speeds.pop(key, None)
+            if self.portions:
+                self.portions = [portion_row(r[0], r[1], {k: v for k, v in r[2].items() if k != key}
+                                             if len(r) > 2 and isinstance(r[2], dict) else None)
+                                 for r in self.portions]
+            return
+        if not self.portions or row >= len(self.portions):
+            return
+        r = self.portions[row]
+        own = dict(r[2]) if len(r) > 2 and isinstance(r[2], dict) else {}
+        if speed and speed != self.speeds.get(key, ""):
+            own[key] = speed
+        else:
+            own.pop(key, None)
+        self.portions[row] = portion_row(r[0], r[1], own)
 
     def order_lines(self, attorneys: list[Attorney] | None = None) -> list[OrderLine]:
         """Who orders what, spelled out for the window's "Who ordered what" card: a line per day and attorney,
@@ -861,7 +1116,7 @@ class Job:
         rows = self.valid_portions() or [(pages, keys)]
         mask, printed = self.day_mask(), self.printed_pages()
         stretches, start = [], 0  # (first, last, keys), 1-based
-        for last, ks in rows:
+        for last, ks, *_ in rows:
             stretches.append((start + 1, last, [k for k in ks if k in names]))
             start = last
 
@@ -887,25 +1142,23 @@ class Job:
         return out + nothing(day)
 
     def output_problems(self, outputs) -> list[str]:
-        """What stops the chosen outputs: missing fields for the agreement or MOFR, or a speed to choose for
-        them (speed_question), no pages to bill for an invoice (no transcript and no pages typed), no transcript
-        for a run sheet, or Excerpts... rows to check for the invoice."""
-        out = self.problems() if {"agreement", "mofr"} & set(outputs) else []
-        if {"agreement", "mofr"} & set(outputs) and self.speed_question():  # (the speed they name)
-            out.append(f"{self.speed_question()}: choose the speed (Minute agreement form details)")
-        if "invoice" in outputs and self.invoice_hold():
-            out.append(self.invoice_hold())
-        elif "invoice" in outputs and not self.invoice_pages():
-            out.append(NO_INVOICE)
-        if "runsheet" in outputs and not self.transcript_pages():
-            out.append(NO_RUNSHEET)
-        return out
+        """What stops the chosen outputs, each output's own (its policy, see output_policy), each problem once and
+        in the order the courthouse lists the outputs: missing fields for the agreement or MOFR, or a speed to
+        choose for them (speed_question), no pages to bill for an invoice (no transcript and no pages typed) or
+        why it is held (invoice_hold: Excerpts... rows to check, Whose pages... to choose, too many speeds on the
+        same pages), no transcript for a run sheet."""
+        chosen = set(outputs)
+        return list(dict.fromkeys(p for o in courthouses.keys() if o in chosen
+                                  for p in output_policy(o).problems(self)))
 
     def issues(self, outputs) -> list[str]:
-        """Everything to check about the job, each once: why Generate failed last time, fields missing or no
-        attorney ticked (problems), and what stops the outputs ticked (output_problems). The job list marks a
-        job ⚠ when there is any (and it isn't saved), and its tooltip lists them."""
+        """Everything to check about the job, each once: why Generate failed last time, documents whose index
+        numbers don't match (index_number_asks), fields missing or no attorney ticked (problems), and what stops
+        the outputs ticked (output_problems). The job list marks a job ⚠ when there is any (and it isn't saved),
+        and its tooltip lists them."""
         out = [f"Not saved: {self.error}"] if self.error else []
+        if self.index_number_asks():  # (the documents may be about different cases)
+            out.append(index_number_text(self.index_number_mismatch(), "the documents' index numbers don't match: "))
         return list(dict.fromkeys(out + self.problems() + self.output_problems(outputs)))
 
     def to_check(self, outputs) -> bool:
@@ -913,33 +1166,116 @@ class Job:
         return bool((self.error or not (self.saved or self.invoiced)) and self.issues(outputs))
 
     def makeable(self, outputs) -> list[str]:
-        """The outputs this job can have: all of them, less the run sheet when there is no transcript and the
-        invoice when there are no pages to bill (no transcript and no pages typed, or the Pages field says 0).
-        An invoice held until Whose pages... says whose pages to bill is kept: it is held, with the reason (see
-        invoice_hold). No run sheet either for a case one reporter wrote, when the window ticked the box for
-        others (runsheet_unneeded)."""
-        return [o for o in outputs if not (o == "runsheet" and (not self.transcript_pages() or self.runsheet_unneeded))
-                and not (o == "invoice" and not self.invoice_pages() and not self.ownership_problem())]
+        """The outputs this job can have: those whose policy finds nothing missing (output_policy: left_out).
+        The run sheet needs a transcript, and the invoice pages to bill (no transcript and no pages typed, or the
+        Pages field says 0). An invoice held until Whose pages... says whose pages to bill is kept: it is held,
+        with the reason (see invoice_hold). No run sheet either for a case one reporter wrote, when the window
+        ticked the box for others (runsheet_unneeded)."""
+        return [o for o in outputs if not output_policy(o).left_out(self)]
 
     def unneeded(self, output: str) -> bool:
-        """makeable() leaves this output out by choice, not for want of anything: the run sheet of a case one
-        reporter wrote (runsheet_unneeded). Nothing to tell the user about."""
-        return output == "runsheet" and self.runsheet_unneeded and bool(self.transcript_pages())
+        """makeable() leaves this output out by choice, not for want of anything (its policy's unneeded): the
+        run sheet of a case one reporter wrote (runsheet_unneeded). Nothing to tell the user about."""
+        return output_policy(output).unneeded(self)
 
     def left_out_reason(self, output: str = "invoice") -> str:
-        """Why makeable() left an output out: the run sheet, no transcript; the invoice, no pages to bill (the
-        Pages field says 0, or there is no transcript and no pages were typed)."""
-        if output == "runsheet" and not self.transcript_pages():
-            return "no transcript PDF among the inputs"
-        if self.transcript_pages() or self.pages_typed():
+        """Why makeable() left an output out (its policy's left_out): the run sheet, no transcript; the invoice,
+        no pages to bill (the Pages field says 0, or there is no transcript and no pages were typed). "" when it
+        isn't left out."""
+        return output_policy(output).left_out(self)
+
+    def file_count(self, outputs) -> int:
+        """How many files generate() makes for this job of the outputs each day has its own of (group "form" or
+        "doc": the agreements, one per attorney that ordered pages, form_count, and the MOFR, one, as
+        OutputSpec.per says). output_counts counts the invoices and run sheets, which the days of a case share,
+        and the forms made once for several days (case_forms)."""
+        n = 0
+        for o in outputs:
+            spec = courthouses.output(o)
+            if spec is not None and spec.group in ("form", "doc"):
+                n += self.form_count() if spec.per == "attorney" else 1
+        return n
+
+
+class OutputPolicy:
+    """What an output asks of a job before Generate makes it (courthouses.OutputSpec.policy), for the batch and
+    the window: Job.makeable, unneeded, left_out_reason and output_problems ask it. These defaults suit an output
+    every job can have: nothing missing, nothing to check. (Those methods once asked `"invoice" in outputs` for
+    each rule; each output's rules now sit with it, so the batch handles an output it has never heard of.)"""
+
+    @staticmethod
+    def left_out(job: Job) -> str:
+        """Why the job can't have this output, in words for the batch's summary ("no transcript PDF among the
+        inputs"); "" when it can."""
+        return ""
+
+    @staticmethod
+    def unneeded(job: Job) -> bool:
+        """True when left_out is a choice, not a want of anything: nothing to tell the user about."""
+        return False
+
+    @staticmethod
+    def problems(job: Job) -> list[str]:
+        """What stops it, for the job list's ⚠ and the questions before Generate."""
+        return []
+
+
+class FormPolicy(OutputPolicy):
+    """The minute agreement and the MOFR: every job can have them, once the fields they need are filled in
+    (Job.problems) and the speed is chosen when a document names another (Job.speed_question)."""
+
+    @staticmethod
+    def problems(job: Job) -> list[str]:
+        out = list(job.problems())
+        if job.speed_question():  # (the speed they name)
+            out.append(f"{job.speed_question()}: choose the speed (Minute agreement form details)")
+        return out
+
+
+class InvoicePolicy(OutputPolicy):
+    """The invoice needs pages to bill (Job.invoice_pages: a transcript, or the pages typed in); one held until
+    Whose pages... says whose pages to bill is kept, with the reason (Job.invoice_hold), and so is one with
+    Excerpts... rows or speeds to check."""
+
+    @staticmethod
+    def left_out(job: Job) -> str:
+        if job.invoice_pages() or job.ownership_problem():
+            return ""
+        if job.transcript_pages() or job.pages_typed():
             return "the Pages field says 0"
         return "no transcript PDF, and no pages typed in Est. number of pages"
 
-    def file_count(self, outputs) -> int:
-        """How many agreements and MOFRs generate() makes for this job (output_counts counts the invoices and
-        run sheets, which the days of a case share, and the forms made once for several days: case_forms)."""
-        per = {"agreement": self.form_count(), "mofr": 1}
-        return sum(per.get(o, 0) for o in outputs)
+    @staticmethod
+    def problems(job: Job) -> list[str]:
+        if job.invoice_hold():
+            return [job.invoice_hold()]
+        return [] if job.invoice_pages() else [NO_INVOICE]
+
+
+class RunSheetPolicy(OutputPolicy):
+    """The run sheet needs a transcript (its pages and the reporters' initials); a case one reporter wrote gets
+    none when the window ticked the box for the others (Job.runsheet_unneeded): left out by choice."""
+
+    @staticmethod
+    def left_out(job: Job) -> str:
+        if not job.transcript_pages():
+            return "no transcript PDF among the inputs"
+        return "a case one reporter wrote" if job.runsheet_unneeded else ""
+
+    @staticmethod
+    def unneeded(job: Job) -> bool:
+        return job.runsheet_unneeded and bool(job.transcript_pages())
+
+    @staticmethod
+    def problems(job: Job) -> list[str]:
+        return [] if job.transcript_pages() else [NO_RUNSHEET]
+
+
+def output_policy(key: str) -> type[OutputPolicy]:
+    """What the output `key` asks of a job (its OutputSpec.policy); OutputPolicy's defaults for one without a
+    policy, or not the courthouse's."""
+    spec = courthouses.output(key)
+    return (spec.policy_impl() if spec is not None else None) or OutputPolicy
 
 
 @dataclass
@@ -983,9 +1319,24 @@ def _printed_span(printed: list, first: int, last: int) -> str:
     return f"p. {nums[0]}" if len(nums) == 1 else f"pp. {nums[0]}–{nums[-1]}"
 
 
+def portion_row(last, keys: list, speeds: dict | None = None) -> tuple:
+    """A Job.portions row: (last page, firms), with the run's own speeds third only when there are any."""
+    return (last, keys, dict(speeds)) if speeds else (last, keys)
+
+
+def _renamed(speeds: dict, old: str, new: str) -> dict:
+    """Speeds by firm key, with firm `old` now `new` (a firm already under `new` keeps its own; new "" drops it)."""
+    if old not in speeds:
+        return speeds
+    out = {k: v for k, v in speeds.items() if k != old}
+    if new and new not in out:
+        out[new] = speeds[old]
+    return out
+
+
 # The choices of a job's invoice that are kept with its records (job_origin) and put back (job_from_origin)
 _ORIGIN_CHOICES = ("parties", "invoice_email", "invoice_index", "index_on_typed", "invoice_show", "invoice_detail",
-                   "portions", "page_basis", "front_owner")
+                   "portions", "speeds", "page_basis", "front_owner")
 # Not put back when a job is opened again: they are worked out afresh (today's date, the delivery date from it)
 _ORIGIN_SKIP = ("agreement_date", "delivery_date")
 
@@ -993,7 +1344,7 @@ _ORIGIN_SKIP = ("agreement_date", "delivery_date")
 def job_origin(job: Job) -> dict:
     """Where a job came from, kept with the record of each file made from it (deliver.generate adds the case):
     the documents read (their paths; pasted text has none) and the invoice's own choices (Peripherals, Excerpts...,
-    Whose pages...)."""
+    the speed each firm ordered, Whose pages...)."""
     return {"sources": [d.path for d in job.docs if d.path],
             "job": {**{k: getattr(job, k) for k in _ORIGIN_CHOICES},
                     "proc_touched": job.proc_touched, "att_touched": job.att_touched}}
@@ -1039,10 +1390,17 @@ def job_from_origin(origin: dict, s: Settings) -> Job:
     if isinstance(choices.get("invoice_show"), list):
         job.invoice_show = [k for k in choices["invoice_show"] if isinstance(k, str)]
     job.invoice_detail = choices.get("invoice_detail") is True
+    def speeds(value) -> dict:
+        """Speeds by firm key as kept ({} when it isn't one)."""
+        return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str) and v} \
+            if isinstance(value, dict) else {}
+
     rows = choices.get("portions")
-    if isinstance(rows, list) and all(isinstance(r, list) and len(r) == 2 and isinstance(r[0], int)
+    if isinstance(rows, list) and all(isinstance(r, list) and len(r) in (2, 3) and isinstance(r[0], int)
                                       and isinstance(r[1], list) for r in rows):
-        job.portions = [(r[0], [k for k in r[1] if isinstance(k, str)]) for r in rows]
+        job.portions = [portion_row(r[0], [k for k in r[1] if isinstance(k, str)],
+                                    speeds(r[2]) if len(r) > 2 else None) for r in rows]
+    job.speeds = speeds(choices.get("speeds"))
     for name in ("page_basis", "front_owner"):
         value = choices.get(name)
         if isinstance(value, dict):  # (page_basis: a list of reporters too, see Job.basis_of)
@@ -1084,7 +1442,9 @@ def one_row_per_firm(job: Job) -> None:
         return next((home.key() for old, home in homes if k in old),
                     next((a.key() for a in rows if k in a.legacy_keys()), k))
 
-    job.portions = [(last, list(dict.fromkeys(now(k) for k in keys))) for last, keys in job.portions]
+    job.portions = [portion_row(last, list(dict.fromkeys(now(k) for k in keys)),
+                         {now(k): v for k, v in more[0].items()} if more and isinstance(more[0], dict) else None)
+                    for last, keys, *more in job.portions]
 
 
 def make_doc(ing: Ingested, regex: Extraction, s: Settings, path: str = "") -> Doc:
@@ -1182,6 +1542,15 @@ def remerge(job: Job, s: Settings) -> None:
         for home, k, _ in homes:
             if k not in current and home is not None and home.key() != k:
                 job.rename_in_portions(k, home.key())
+    else:
+        # the rows are the documents' again: a speed set for a firm (Who ordered what, Generate's question) follows
+        # it when a document renames it ("Dana Smith" of "Smith Law" now), else it is lost
+        current = {b.key() for b in new.attorneys}
+        for a in prev.attorneys:
+            k = a.key()
+            home = next((b for b in new.attorneys if same_entry(a, b)), None) if k not in current else None
+            if home is not None and home.key() != k:
+                job.rename_in_portions(k, home.key())
     if job.batch:
         _all_dates(new, job)
     job.own = tuple(sorted(my_initials(s.profile.name, s.profile.initials)))
@@ -1257,8 +1626,9 @@ def _all_pages(case: CaseInfo, job: Job) -> None:
     picked, it would be a number typed in, the day's count on every agreement. A number the user typed stays
     (it is then what the user's invoice bills, and the day's pages on the agreements: Job.pages_typed),
     unless it is the pages the invoice bills anyway (Job.own_pages) or the count itself: then it is the count
-    again (the user's own pages billed). Such a "typed" count came from a record of an older version opened again while one of its
-    documents had moved, from the suggestion then shown picked from the menu, or from the count typed again.
+    again (the user's own pages billed). Such a "typed" count came from a record of an older version opened
+    again while one of its documents had moved, from the suggestion then shown picked from the menu, or from the
+    count typed again.
     A transcript whose readings of its pages disagree lowers the confidence (takes.count_pages: 0.8 when the
     count came from another reading than the scan, 0.55 with a warning, marked for review), and with a warning
     the totals its other counts would give are offered in the ▾ list (the scan's count that the others put
@@ -1302,6 +1672,7 @@ def group(docs: list[Doc], s: Settings, jobs: list[Job] | None = None) -> list[J
                         setattr(job, name, getattr(other, name))
                 job.page_basis = {**other.page_basis, **job.page_basis}
                 job.front_owner = {**other.front_owner, **job.front_owner}
+                job.speeds = {**other.speeds, **job.speeds}
                 jobs.remove(other)
         else:
             job = Job()
@@ -1382,8 +1753,8 @@ def read_loaders(loaders: list[Callable[[], Ingested]], names: list[str], s: Set
     return docs, errors
 
 
-def out_dir_for(job: Job, s: Settings) -> Path:
-    """Where a job's files go: Settings.output_dir, else the folder of its first document, else
+def save_to_for(job: Job, s: Settings) -> Path:
+    """The job's Save to folder: Settings.output_dir, else the folder of its first document, else
     Documents/Minute Agreements."""
     if s.output_dir:
         return Path(s.output_dir)
@@ -1391,6 +1762,155 @@ def out_dir_for(job: Job, s: Settings) -> Path:
         if d.path:
             return Path(d.path).parent
     return Path.home() / "Documents" / "Minute Agreements"
+
+
+def out_dir_for(job: Job, s: Settings) -> Path:
+    """Where a job's files go: its case's own folder inside the Save to folder (save_to_for) when
+    Settings.case_folders is on and one was chosen (Job.folder: see case_folders), else Save to itself. (An
+    output with a folder of its own, and the run sheet, still go there: Settings.folder_for.) The folder is kept
+    by its name, so a preview made with Save to a temporary folder puts its files in one of that name there."""
+    base = save_to_for(job, s)
+    return base / job.folder if s.case_folders and job.folder else base
+
+
+@dataclass(eq=False)
+class CaseFolder:
+    """A case's own folder (Settings.case_folders), as Generate is about to use it: `name`
+    (pdfout.case_folder_name) inside `base` (the jobs' Save to folder), for these `jobs` (the days of the case
+    Generate makes now). files: how many files are in it already; 0 when it isn't there or is empty, which is
+    used without asking. named: the name the pattern gave, when a file of that name is in the way ("712345-2021",
+    a file): `name` is then the folder beside it ("712345-2021 (2)"), for every day of the case."""
+    base: Path
+    name: str
+    jobs: list
+    files: int = 0
+    named: str = ""
+
+    @property
+    def path(self) -> Path:
+        """The folder itself: `name` inside `base`."""
+        return self.base / self.name
+
+    def new_name(self) -> str:
+        """The name of a new folder beside it: "712345-2021 (2)" (the first free)."""
+        return free_folder(self.base / (self.named or self.name)).name
+
+    def use(self, new: bool = False) -> None:
+        """Its jobs' files go into it (Job.folder), or, with new and files in it, into a new one beside it
+        ("712345-2021 (2)"); into a new one too when a file of that name is in the way (no folder can be made
+        there)."""
+        blocked = self.path.exists() and not self.path.is_dir()
+        name = self.new_name() if (new and self.files) or blocked else self.name
+        for j in self.jobs:
+            j.folder, j.folder_named = name, self.named or self.name
+
+
+def case_folders(jobs: list[Job], s: Settings, outputs: list[str] | None = None) -> list[CaseFolder]:
+    """The case folders these jobs' files are to go into (Settings.case_folders, named by
+    Settings.case_folder_pattern), one for the jobs with the same name and Save to folder (the days of one case,
+    when the name doesn't say the date); [] with the setting off, or when none of `outputs` (default:
+    Settings.outputs) is saved in Save to (the run sheet alone, or outputs that each have a folder of their
+    own). A job that chose its folder at an earlier Generate keeps it without being listed, until the name
+    changes (another index number typed in). Nothing is chosen yet: CaseFolder.use does, once the user said
+    (Settings.case_folder_existing, or the window's question when it is "ask" and the folder has files in it)."""
+    wanted = s.outputs if outputs is None else outputs
+    if not s.case_folders or not any(not s.output_dirs.get(o) and o not in OUTPUT_FOLDERS for o in wanted):
+        return []
+    out: dict[Path, CaseFolder] = {}
+    for j in jobs:
+        name = case_folder_name(j.case, s.case_folder_pattern)
+        if j.folder and j.folder_named == name:
+            continue
+        base = save_to_for(j, s)
+        at = name
+        if (base / name).exists() and not (base / name).is_dir():
+            # a file of that name in the way: the first folder beside it ("712345-2021 (2)"), there or not yet,
+            # for every day of the case, Generated now or later (asked about, as Settings says, when it has files)
+            at = next((f"{name} ({i})" for i in range(2, 1000)
+                       if (base / f"{name} ({i})").is_dir() or not (base / f"{name} ({i})").exists()), name)
+        if base / at not in out:
+            out[base / at] = CaseFolder(base, at, [], _files_in(base / at), name if at != name else "")
+        out[base / at].jobs.append(j)
+    return list(out.values())
+
+
+def settle_case_folders(jobs: list[Job], s: Settings, outputs: list[str] | None = None) -> None:
+    """Chooses the case folders of jobs that have none yet without asking, as Settings.case_folder_existing
+    says ("ask": add to it, as nobody can be asked here): for fill_jobs."""
+    for f in case_folders(jobs, s, outputs):
+        f.use(new=s.case_folder_existing == "new")
+
+
+@dataclass
+class SpeedAsk:
+    """A firm whose speed Generate asks for on a day (speeds_to_ask): the day's job, the firm (Attorney.key() and
+    its name), who it ordered pages with ("Smith Law"; "" for a firm that ordered these pages alone, asked as its
+    other pages have a speed or are asked about), the speed the question starts from, and the firm's row (to find
+    it again should a document rename it while the question is on screen)."""
+    job: Job
+    key: str
+    name: str
+    shared_with: str
+    speed: str
+    attorney: Attorney | None = None
+
+
+def speeds_to_ask(jobs: list[Job], s: Settings) -> list[SpeedAsk]:
+    """The firms whose speed must be set before these jobs are billed, as the courthouse has firms of a split
+    order commit to one (courthouses.speed_upfront): on each day, the firms of a split order without a speed
+    (Job.speeds_needed), and those with a speed on some of their pages but not others, on that day or on another
+    day of the case billed with it (invoice_groups: an invoice can't be partly "choose one"). Only firms ticked
+    on the day. Each starts from the firm's speed on its other pages of the case, else the agreement form's
+    (invoice.default_speed). [] where firms needn't commit."""
+    if not courthouses.speed_upfront():
+        return []
+    out: list[SpeedAsk] = []
+    for group_ in invoice_groups(jobs, s):
+        known: dict[str, str] = {}  # (the speed each firm has on some day of the case)
+        for j in group_:
+            for _, keys, speeds in j.runs_ordered():
+                for k, sp in zip(keys, speeds):
+                    if sp:
+                        known.setdefault(k, sp)
+        # the firms that will have a speed on some day of the case: those set, and those asked about now (a firm
+        # alone on one day and sharing pages on another commits on both)
+        pending = set(known) | {k for j in group_ for k in j.speeds_needed(s)}
+        for j in group_:
+            need = set(j.speeds_needed(s))
+            together: dict[str, list[str]] = {}
+            for _, keys, speeds in j.runs_ordered():
+                for k, sp in zip(keys, speeds):
+                    if not sp and k in pending:
+                        need.add(k)
+                    together.setdefault(k, [])
+                    together[k] += [o for o in keys if o != k and o not in together[k]]
+            rows = {a.key(): a for a in j.case.attorneys}
+            names = {k: a.label() for k, a in rows.items()}
+            for k in [k for k in j.ticked_keys() if k in need]:
+                out.append(SpeedAsk(j, k, names.get(k, k), ", ".join(names.get(o, o) for o in together.get(k, [])),
+                                    known.get(k) or default_speed(j.case, s), rows.get(k)))
+    return out
+
+
+def settle_split_speeds(jobs: list[Job], s: Settings, outputs: list[str] | None = None) -> list[SpeedAsk]:
+    """Sets the speeds Generate would ask for (speeds_to_ask) without asking, each to the speed the question
+    starts from, for all the firm's pages of the day without one of their own (for fill_jobs and the command
+    line: the window asks before). Only when an output to be made asks it (courthouses.asks "speeds"). Returns
+    what was set, for the warnings."""
+    if not courthouses.asks(s.outputs if outputs is None else outputs, "speeds"):
+        return []
+    asked = speeds_to_ask(jobs, s)
+    for a in asked:
+        a.job.speeds.setdefault(a.key, a.speed)
+    return asked
+
+
+def _files_in(folder: Path) -> int:
+    """How many files and folders are in `folder` (0 when it isn't there or can't be read)."""
+    try:
+        return sum(1 for _ in folder.iterdir()) if folder.is_dir() else 0
+    except OSError:
+        return 0
 
 
 def input_folders(job: Job) -> list[Path]:
@@ -1548,28 +2068,40 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
     instead of stopping the batch. A job without a transcript gets no run sheet, nor an invoice unless its pages
     were typed in (noted in job.error).
     A job already invoiced (Job.invoiced) is not billed again, nor an attorney a stopped run invoiced already
-    (Job.invoiced_keys). A job whose invoice is held (Job.invoice_hold: Excerpts... rows to check, or whose
-    pages to bill) gets no invoice, nor the days of a case with a day nobody is ticked on (group_problem): their
-    errors say so. Each reporter Whose pages... bills gets their own invoices (joint_invoice_sets). `batch` is the
-    whole batch when only some of its jobs are filled: jobs for several days of one case get the date in their
-    file names. ledger: the records to number and enter the invoices in (default: the user's; the preview's
-    own copy, see Ledger.preview_copy); math: gets (FirmInvoice, number) of each invoice made (see generate).
+    (Job.invoiced_keys). A job whose invoice is held (Job.invoice_hold: Excerpts... rows to check, whose pages
+    to bill, or speeds to check) gets no invoice, nor the days of a case with a day nobody is ticked on
+    (group_problem): their errors say so. Each reporter Whose pages... bills gets their own invoices
+    (joint_invoice_sets). `batch` is the whole batch when only some of its jobs are filled: jobs for several days
+    of one case get the date in their file names. ledger: the records to number and enter the invoices in
+    (default: the user's; the preview's own copy, see Ledger.preview_copy); math: gets (FirmInvoice, number) of
+    each invoice made (see generate).
     The days of a case that share an invoice get their agreements and MOFR once for all of them (form_groups,
     case_forms; made after the days' own files, each listed under the days it covers): a day that is not among
     `jobs` is not on them.
     The days of a case are one piece of work (case_units): its run sheet is written first, with the takes of
     all its days in one go (never a run sheet with a day missing), and when a file of it can't be written (the
     run sheet open in Excel) nothing more is made for any of its days, whose errors say why (HELD): they are
-    done again together."""
+    done again together.
+    The outputs are the courthouse's (courthouses.OutputSpec): one of group "form" is made once for a trial as
+    the agreements are (trial_forms), and any other ("doc") with each day's own files, through generate. The
+    run sheet and the joint invoice have phases of their own here (named "runsheet" and "invoice"): another
+    output of group "sheet" or "billing" needs work in this function.
+    Each case's files go into its own folder (Settings.case_folders, out_dir_for); the trial forms and a joint
+    invoice into the first day's. A job without its folder chosen gets it here, without a question
+    (settle_case_folders: the window asks before), and so do the firms of a split order without a speed
+    (settle_split_speeds: the speed the question would start from)."""
     outputs = list(s.outputs if outputs is None else outputs)
     ledger = ledger or ledger_for(s)
+    settle_case_folders(jobs, s, outputs)
+    settle_split_speeds(jobs, s, outputs)
     names = [j.name_key() for j in batch or jobs]
     unchecked = {id(j) for j in jobs if j.invoice_hold()} if "invoice" in outputs else set()
     to_bill = [j for j in jobs if not j.invoiced and id(j) not in unchecked]
     joint = [g for g in invoice_groups(to_bill, s) if len(g) > 1] if "invoice" in outputs else []
     in_joint = {id(j) for g in joint for j in g}  # these days are billed together, after the loop
     # the days whose agreements and MOFR are made once for all of them (form_groups), after the loop too
-    trials = form_groups(jobs, s) if set(FORMS) & set(outputs) else []
+    forms = trial_forms()
+    trials = form_groups(jobs, s) if set(forms) & set(outputs) else []
     in_trial = {id(j) for g in trials for j in g}
     sheets = sheet_units(jobs, outputs, s)
     unit_of = case_units(jobs, sheets + trials + joint)
@@ -1615,7 +2147,7 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             if billed_elsewhere or unchecked_here:
                 want = [o for o in want if o != "invoice"]
             if id(job) in in_trial:  # its agreements and MOFR cover the other days of the case too
-                want = [o for o in want if o not in FORMS]
+                want = [o for o in want if o not in forms]
             job.refresh_copies(s)  # (the parties as they are now, whatever changed the ticks)
             ran_sheet = "runsheet" in want  # (written above, for its case)
             want = [o for o in want if o != "runsheet"]
@@ -1623,21 +2155,25 @@ def fill_jobs(jobs: list[Job], s: Settings, progress: Progress | None = None,
             job.saved = sheet_made + [
                 p for p in generate(job.case, s, out_dir_for(job, s), want, job.invoice_sets(), ledger,
                                     dated=names.count(job.name_key()) > 1, folders=input_folders(job),
-                                    invoiced=keys, origin=job_origin(job), math=math, ordered=job.ordered_pages())
+                                    invoiced=keys, origin=job_origin(job), math=math, ordered=job.ordered_pages(),
+                                    speeds=job.ordered_speeds())
                 if p not in sheet_made] if want else sheet_made
             job.invoiced |= "invoice" in want
             left_out = [o for o in outputs if o not in want and not job.unneeded(o)
                         and not (o == "runsheet" and ran_sheet)
                         and not (o == "invoice" and (billed_elsewhere or unchecked_here))
-                        and not (o in FORMS and id(job) in in_trial)]
+                        and not (o in forms and id(job) in in_trial)]
             why: dict[str, list[str]] = {}  # the outputs left out by reason ("no invoice or run sheet: ...")
             for o in left_out:
                 why.setdefault(job.left_out_reason(o), []).append(OUTPUTS[o].lower())
             problems = [f"no {' or '.join(kinds)}: {reason}" for reason, kinds in why.items()]
             if unchecked_here and job.portions_problem():
                 problems.append(f"{NOT_INVOICED} check Excerpts… for {job.case.get('dates') or job.title()}")
-            elif unchecked_here:
+            elif unchecked_here and job.ownership_problem():
                 problems.append(f"{NOT_INVOICED} choose under Whose pages… ({job.ownership_problem()})")
+            elif unchecked_here:  # (more speeds on the same pages than are billed for now: speed_problems)
+                held = job.invoice_hold()
+                problems.append(f"{NOT_INVOICED} {held[:1].lower()}{held[1:]}")
             job.error = "; ".join(problems)
             done += [p for p in job.saved if p not in done]  # one run sheet takes several days
         except Exception as e:
@@ -1830,13 +2366,16 @@ class IndexQuestion:
     the days asked about (their answer goes on them: Job.index_on_typed), the pages typed and their transcripts'
     own pages (40 typed, the transcript has 83) and how many transcripts those are, and why there is an index
     judged on the transcripts and none on the pages typed ("83 total pages, 50 or more", "40 total pages, under
-    50": invoice.index_reason). (Judged on fewer pages, a day never gets an index it wouldn't have.)"""
+    50": invoice.index_reason). (Judged on fewer pages, a day never gets an index it wouldn't have.) priced:
+    the rate sheet has an index price for a speed the invoice bills (one it offers, or one a firm committed to:
+    invoice.index_priced); without one no index is charged either way, so the window warns rather than asks."""
     jobs: list
     typed: int
     counted: int
     transcripts: int
     pdf_why: str
     typed_why: str
+    priced: bool = True
 
 
 def index_question(group: list[Job], s: Settings) -> IndexQuestion | None:
@@ -1849,12 +2388,12 @@ def index_question(group: list[Job], s: Settings) -> IndexQuestion | None:
     then on; under the rule "each" day on its own, the other days keep theirs. None when no day is typed so, the
     days are answered already, a Yes or No is chosen (Peripherals..., or indexes turned off in Settings), or both
     ways give the same answer. (The command line, --batch, has no typed counts: the transcript decides.)"""
-    from .invoice import index_mode, index_reason, indexed_days
+    from .invoice import index_mode, index_priced, index_reason, indexed_days
     typed = [j for j in typed_days(group) if j.index_on_typed is None]
     if not typed:
         return None
     mine = [j.billed_by("me") for j in group]  # (the job itself, when it bills nobody else)
-    opts = joint_invoice(mine)[1]
+    case, opts = joint_invoice(mine)
     if not opts.orders or index_mode(opts, s) != "auto":
         return None
     # the typed days judged on the number typed: their transcripts' own count taken out (DayOrder.total). The
@@ -1873,17 +2412,21 @@ def index_question(group: list[Job], s: Settings) -> IndexQuestion | None:
         return None
     return IndexQuestion(typed, sum(j.invoice_pages() for j in typed), sum(j.transcript_pages() for j in typed),
                          sum(len(j.transcripts()) for j in typed),
-                         index_reason(opts, s, places), index_reason(typed_opts, s, places))
+                         index_reason(opts, s, places), index_reason(typed_opts, s, places), index_priced(case, s, opts))
 
 
-FORMS = ("agreement", "mofr")  # the outputs form_groups makes once for several days
+def trial_forms() -> list[str]:
+    """The outputs form_groups makes once for several days: the courthouse's forms (group "form": the minute
+    agreement and the MOFR)."""
+    return courthouses.keys("form")
 
 
 def form_groups(jobs: list[Job], s: Settings) -> list[list[Job]]:
     """The days whose minute agreements and MOFR fill_jobs makes once for all of them (case_forms) instead of a
     set per day: with Settings.forms_per_case and the joint invoice (Settings.invoice_joint), the days of a case
     that share an invoice (invoice_groups: those with pages to bill), less a day whose invoice is held
-    (Excerpts... to check, or whose pages to bill: what its attorneys ordered isn't known yet) and a case with a
+    (Job.invoice_hold: Excerpts... to check, whose pages to bill or speeds to check; what its attorneys ordered,
+    or at what speed, isn't settled yet) and a case with a
     day nobody is ticked on (group_problem: it gets no joint invoice either). Days already invoiced count, as
     every run makes the forms of its days again. Each group has two days or more; the other days keep a set of
     forms of their own."""
@@ -1901,7 +2444,8 @@ def _latest(jobs: list[Job], key: str) -> FieldState | None:
 
 def case_forms(group: list[Job], s: Settings, outputs) -> list[tuple[CaseForm, list[Job]]]:
     """The minute agreements and the MOFR of a group of days (form_groups), with the days each covers (it is
-    listed under them, see fill_jobs), as `outputs` asks for them. One agreement per attorney ticked on any of
+    listed under them, see fill_jobs), as `outputs` asks for them: each output of group "form" (trial_forms),
+    one per attorney or one for the case as its OutputSpec.per says. One agreement per attorney ticked on any of
     the days who ordered pages (CaseInfo.invoice_orderers: the same attorney entered twice gets one; with nobody
     ticked on any day, one with a blank attorney block): it lists only the days that attorney ordered something
     on (with Excerpts..., a run of pages), earliest first, and its Est. number of pages is the pages it ordered
@@ -1910,9 +2454,11 @@ def case_forms(group: list[Job], s: Settings, outputs) -> list[tuple[CaseForm, l
     day, its pages those ordered by anyone on each day, added up. The rest is the first day's case, as on the
     joint invoice (court, part, judge, case name, index, speed, rate), with No. of copies on every one of these
     forms the ordering parties (the Parties number set on the earliest day that has one and isn't split under
-    Excerpts..., else every attorney ticked on any of the days; unless typed on the first day), the proceeding types of all the days covered
-    and the latest estimated delivery date among them (every day's transcript is promised by then)."""
-    want = [o for o in FORMS if o in outputs]
+    Excerpts..., else every attorney ticked on any of the days; unless typed on the first day), the proceeding
+    types of all the days covered and the latest estimated delivery date among them (every day's transcript is
+    promised by then). An agreement names the speed(s) its attorney ordered at, where set (Job.ordered_speeds,
+    fill.speeds_case); the MOFR every speed ordered (fill.case_speeds)."""
+    want = [o for o in trial_forms() if o in outputs]
     if not want:
         return []
     if len(group) > 1:
@@ -1956,49 +2502,67 @@ def case_forms(group: list[Job], s: Settings, outputs) -> list[tuple[CaseForm, l
         return sum(j.billed_by(who).invoice_pages() for j in jobs)
 
     out: list[tuple[CaseForm, list[Job]]] = []
-    if "agreement" in want:
-        orderers = base.invoice_orderers()
-        for atty in orderers:
-            k = "" if atty is None else atty.key()
-            picked = [i for i, (_, _, got) in enumerate(days) if got.get(k, 0) > 0]
-            if not picked:
-                continue  # ordered no pages on any of the days: no agreement (nor invoice)
-            pages = sum(days[i][2][k] for i in picked)
-            jobs = covering(picked)
-            form = CaseForm("agreement", form_case(jobs, dates_text(days[i][1] for i in picked), pages), atty,
-                            pages, mine(jobs), sum(j.transcript_pages() for j in jobs))
-            out.append((form, jobs))
-    if "mofr" in want:
-        pages = sum(got.get("", 0) for _, _, got in days)
-        case = form_case(group, dates_text(j.case.get("dates") for j in group), pages)
-        out.append((CaseForm("mofr", case, None, pages, mine(group), sum(j.transcript_pages() for j in group)),
-                    list(group)))
+    for kind in want:  # (as the outputs are listed: the agreements, then the MOFR)
+        if courthouses.output(kind).per == "attorney":  # (OutputSpec.per: one for each attorney, as agreements)
+            orderers = base.invoice_orderers()
+            for atty in orderers:
+                k = "" if atty is None else atty.key()
+                picked = [i for i, (_, _, got) in enumerate(days) if got.get(k, 0) > 0]
+                if not picked:
+                    continue  # ordered no pages on any of the days: no agreement (nor invoice)
+                pages = sum(days[i][2][k] for i in picked)
+                jobs = covering(picked)
+                case = form_case(jobs, dates_text(days[i][1] for i in picked), pages)
+                # (the speed(s) it ordered at over these days: two make one form naming both, see speeds_case)
+                case = speeds_case(case, [x for j in jobs for x in j.ordered_speeds().get(k, [])], s)
+                form = CaseForm(kind, case, atty, pages, mine(jobs), sum(j.transcript_pages() for j in jobs))
+                out.append((form, jobs))
+        else:  # one for the case, as the MOFR: every day, with the pages anyone ordered
+            pages = sum(got.get("", 0) for _, _, got in days)
+            case = form_case(group, dates_text(j.case.get("dates") for j in group), pages)
+            ordered: dict[str, int] = {}
+            speeds: dict[str, list] = {}
+            for j in group:
+                for k, n in j.ordered_pages().items():
+                    ordered[k] = ordered.get(k, 0) + n
+                for k, xs in j.ordered_speeds().items():
+                    speeds.setdefault(k, []).extend(xs)
+            case = speeds_case(case, case_speeds(case, ordered, speeds), s)  # (every speed ordered: ticked)
+            out.append((CaseForm(kind, case, None, pages, mine(group), sum(j.transcript_pages() for j in group)),
+                        list(group)))
     return out
 
 
 def output_counts(jobs: list[Job], outputs, s: Settings | None = None, again: bool = False) -> dict[str, int]:
     """How many files fill_jobs will make for these jobs, by output: {"agreement": 2, "mofr": 1, "invoice": 2,
-    "detailed": 0, "runsheet": 1}. The days of one case share a run sheet, and (as Settings.invoice_joint says)
-    the invoices, one for each attorney ticked on any of its days who ordered pages and was not invoiced yet (and
-    the set of each other reporter Whose pages... bills, see joint_invoice_sets). Days already invoiced
-    (Job.invoiced), and days whose invoice is held (Excerpts... rows to check, or Whose pages... to choose:
-    Job.invoice_hold), get none. again: a day already invoiced counts as one not invoiced yet, as Generate this
-    job bills it again (Job.billed_keys); Generate all doesn't. "detailed": with Settings.invoice_detailed_copy,
-    the detailed copy of each invoice without the granular detail. The days whose agreements and MOFR are made
-    once for all of them (form_groups) count those of case_forms. The window says them under each output
-    (MainWindow._show_counts)."""
+    "runsheet": 1, "detailed": 0, "math": 2}. The days of one case share a run sheet, and (as
+    Settings.invoice_joint says) the invoices, one for each attorney ticked on any of its days who ordered pages
+    and was not invoiced yet (and the set of each other reporter Whose pages... bills, see joint_invoice_sets).
+    Days already invoiced (Job.invoiced), and days whose invoice is held (Excerpts... rows to check, Whose
+    pages... to choose, or speeds to check: Job.invoice_hold), get none. again: a day already invoiced counts as
+    one not invoiced yet, as Generate this job bills it again (Job.billed_keys); Generate all doesn't. "detailed": with
+    Settings.invoice_detailed_copy, the detailed copy of each invoice without the granular detail. "math": the
+    PDFs of the math saved with the invoices (Settings.save_math, as invoice_math.save_math makes them: one per
+    invoice with "each" and "both", and one for all of a reporter's invoices of a group with "all", and with
+    "both" when there are two or more); counted in Generate all's number of files, not shown under an output,
+    as the user asked on 2026-10-09. The days whose agreements and MOFR are made once for all of them
+    (form_groups) count those of case_forms. Any other output each day has its own of (group "doc") counts as
+    Job.file_count says. The window says them under each output (MainWindow._show_counts)."""
     s = s or Settings()
-    out = dict.fromkeys(("agreement", "mofr", "invoice", "detailed", "runsheet"), 0)
-    trials = form_groups(jobs, s) if set(FORMS) & set(outputs) else []
+    out = {**dict.fromkeys(courthouses.keys(), 0), "detailed": 0, "math": 0}
+    forms = trial_forms()
+    own = forms + courthouses.keys("doc")  # (the outputs each day has its own of, unless made for the trial)
+    trials = form_groups(jobs, s) if set(forms) & set(outputs) else []
     in_trial = {id(j) for g in trials for j in g}
     for j in jobs:
         for o in outputs:
-            if o in FORMS and id(j) not in in_trial:
+            if o in own and not (o in forms and id(j) in in_trial):
                 out[o] += j.file_count([o])
     for g in trials:
         for form, _ in case_forms(g, s, outputs):
             out[form.kind] += 1
-    if "invoice" in outputs:
+    # the invoices and the run sheet: the days of a case share them (their own phases of fill_jobs)
+    if "invoice" in outputs and "invoice" in out:
         groups = invoice_groups([j for j in jobs if (again or not j.invoiced) and not j.invoice_hold()], s)
         for g in groups:
             if not group_problem(g):
@@ -2007,17 +2571,21 @@ def output_counts(jobs: list[Job], outputs, s: Settings | None = None, again: bo
                     out["invoice"] += n
                     if s.invoice_detailed_copy and not opts.detail:
                         out["detailed"] += n
-    cases: list[Ident] = []
-    for j in jobs:
-        if "runsheet" in j.makeable(outputs):
-            i = ident(j.case)
-            if not i or not any(same_case(i, k) for k in cases):
-                cases.append(i)
-    out["runsheet"] = len(cases)
+                    if n:  # (the math of a reporter's invoices of this group: invoice_math.save_math)
+                        out["math"] += (n if s.save_math in ("each", "both") else 0) + \
+                            (1 if s.save_math == "all" or (s.save_math == "both" and n > 1) else 0)
+    if "runsheet" in out:
+        cases: list[Ident] = []
+        for j in jobs:
+            if "runsheet" in j.makeable(outputs):
+                i = ident(j.case)
+                if not i or not any(same_case(i, k) for k in cases):
+                    cases.append(i)
+        out["runsheet"] = len(cases)
     return out
 
 
 def files_to_make(jobs: list[Job], outputs, s: Settings | None = None) -> int:
-    """How many files fill_jobs will make for these jobs: output_counts added up (an invoice's detailed copy is a
-    file too)."""
+    """How many files fill_jobs will make for these jobs: output_counts added up (an invoice's detailed copy, and
+    the math saved with the invoices, are files too)."""
     return sum(output_counts(jobs, outputs, s).values())

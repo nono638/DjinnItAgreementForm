@@ -1,13 +1,14 @@
-"""Drives the main window (off screen): several documents become a batch of jobs; outputs that need a
-transcript; the Outputs box (each output's options and how many files it makes, parties, Peripherals... and
-Customize..., the Speeds offered in the Invoice panel, the Generate button); the days of a case on one
-invoice, billed once by Generate all; Excerpts... (which firm ordered which pages) and the prices of each: its rows following a renamed firm (an attorney's name fixed is the same
-firm), kept to be checked when an attorney is unticked or the pages are typed again, and the days it shows (those
-of the invoice); a document added or an attorney ticked while Generate all runs, and Generate tried again after a
-problem; the granular detail box of each day; File -> Lock finished PDFs; the Invoice panel in a small window;
-the big yin-yang picture when the window first shows; the Records window (paid, amounts changed, only amounts
-taken); a preview whose records can't be opened; and background work that ends while the user is busy in the
-window."""
+"""Drives the main window (off screen): several documents become a batch of jobs, each a row of the job list
+(with a row per document under a job of two); outputs that need a transcript; the Outputs box (each output's
+options and how many files it makes, parties, Peripherals... and Customize..., the Speeds offered in the Invoice
+panel, the Generate button); the days of a case on one invoice, billed once by Generate all; Excerpts... (which
+firm ordered which pages) and the prices of each: its rows following a renamed firm (an attorney's name fixed is
+the same firm), kept to be checked when an attorney is unticked or the pages are typed again, and the days it
+shows (those of the invoice); a split order's prices before and after its firms' speeds are set; a document
+added or an attorney ticked while Generate all runs, and Generate tried again after a problem; the granular
+detail box of each day; File -> Lock finished PDFs; the Invoice panel in a small window; the big yin-yang picture
+when the window first shows; the Records window (paid, amounts changed, only amounts taken); a preview whose
+records can't be opened; and background work that ends while the user is busy in the window."""
 import os
 import time
 
@@ -26,6 +27,7 @@ def window(tmp_path, monkeypatch, make_window):
     s = pat_settings()
     s.use_ai = s.open_after = False
     s.output_dir = str(tmp_path / "out")
+    s.save_math = "off"  # (the files counted are the forms and invoices; test_show_the_math.py saves the math)
     return make_window(s)
 
 
@@ -54,15 +56,17 @@ def test_batch_of_documents(window, tmp_path):
     window.add_files([a, b, c, a])
     wait(window, lambda: len(window.jobs) == 2)
     assert [[d.ing.name for d in j.docs] for j in window.jobs] == [["a.txt", "c.txt"], ["b.txt"]]
-    assert not window.job_list.isHidden() and window.job_list.count() == 2
-    assert "2 documents" in window.job_list.item(0).text()
-    assert window.rows["index_no"].text() == "712222/2024" and window.input_list.count() == 2
+    assert not window.job_list.isHidden() and window.job_list.topLevelItemCount() == 2
+    first = window.job_list.topLevelItem(0)  # (a job of two documents: a row each under it)
+    assert [first.child(i).text(0) for i in range(first.childCount())] == ["a.txt", "c.txt"]
+    assert "2 documents:" in first.toolTip(0) and window.job_list.topLevelItem(1).childCount() == 0
+    assert window.rows["index_no"].text() == "712222/2024"
 
     # edits stay with their job when another one is selected
     window.rows["judge"].choose("Maria T. Lopez")
-    window.job_list.setCurrentRow(1)
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(1))
     assert window.rows["index_no"].text() == "700001/2025" and window.rows["judge"].text() == "Lopez"
-    window.job_list.setCurrentRow(0)
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(0))
     assert window.rows["judge"].text() == "Maria T. Lopez"
 
     # a document dropped later finds its job; one that is already loaded is skipped
@@ -73,9 +77,10 @@ def test_batch_of_documents(window, tmp_path):
 
     window.fill_all_jobs()
     wait(window, lambda: all(j.saved for j in window.jobs))
-    saved = sorted(p.name for p in (tmp_path / "out").iterdir())
-    assert len(saved) == 2 and "712222-2024" in saved[1] and "700001-2025" in saved[0]
-    assert window.job_list.item(0).text().startswith("✓")
+    saved = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*.pdf"))
+    assert len(saved) == 2 and saved[1].startswith("712222-2024/") and saved[0].startswith("700001-2025/")
+    assert "712222-2024" in saved[1].split("/")[1]  # (each case in its folder)
+    assert window.job_list.topLevelItem(0).text(0).startswith("✓")
     assert not any(j.include for j in window.jobs)  # nothing left for a second "Generate all"
 
 
@@ -84,7 +89,8 @@ def test_documents_about_one_case_stay_one_job(window, tmp_path):
     c = write(tmp_path, "c.txt", title="Smith v. Jones", index="712222/2024", date="5/22/2026")
     window.add_files([a, c])
     wait(window, lambda: len(window.cur.docs) == 2)
-    assert len(window.jobs) == 1 and window.job_list.isHidden() and window.fill_all_btn.isHidden()
+    assert len(window.jobs) == 1 and window.fill_all_btn.isHidden() and window.jobs_label.text() == "This job"
+    assert window.job_list.topLevelItemCount() == 1 and window.job_list.topLevelItem(0).childCount() == 2
     assert window.rows["index_no"].text() == "712222/2024"
     # one more document goes to the job on screen, as before
     window.add_files([write(tmp_path, "b.txt", title="Roe v Doe", index="700001-2025", date="6-1-2026")])
@@ -102,7 +108,7 @@ def test_folder_and_split(window, tmp_path):
     wait(window, lambda: len(window.cur.docs) == 2)
     assert len(window.jobs) == 1
     window.new_job()
-    assert window.cur.is_empty() and window.input_list.count() == 0 and window.rows["index_no"].text() == ""
+    assert window.cur.is_empty() and window.job_list.topLevelItemCount() == 0 and window.rows["index_no"].text() == ""
 
 
 def test_outputs_and_invoice_need_a_transcript(window, tmp_path):
@@ -207,7 +213,7 @@ def test_one_batch_at_a_time_and_edits_do_not_reach_it(window, tmp_path):
     # ... and what is typed now belongs to the next run, not to the files being written
     window.rows["judge"].choose("Changed Meanwhile")
     wait(window, lambda: not window.filling)
-    out = sorted((tmp_path / "out").iterdir())
+    out = sorted((tmp_path / "out").rglob("*.pdf"))  # (each case in its own folder)
     assert len(out) == 2 and len(window.jobs) == 2 and all(j.saved for j in window.jobs)
     for p in out:
         with pymupdf.open(p) as doc:
@@ -305,7 +311,7 @@ def two_days(window, tmp_path):
     window.add_files([str(transcript_pdf(tmp_path / "a.pdf", pages=30, date="June 3, 2026")),
                       str(transcript_pdf(tmp_path / "b.pdf", pages=60, date="June 4, 2026"))])
     wait(window, lambda: len(window.jobs) == 2 and all(j.docs for j in window.jobs))
-    window.job_list.setCurrentRow(0)
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(0))
     assert window.cur.invoice_pages() == 30
 
 
@@ -330,7 +336,7 @@ def test_generate_all_bills_each_day_once(window, tmp_path, monkeypatch):
     wait(window, lambda: not window.filling)
     assert len(ledger_for(window.s).invoices()) == 1
     assert not any(j.include for j in window.jobs)  # done, though nothing was left to make
-    assert all(window.job_list.item(i).text().startswith("✓") for i in range(2))
+    assert all(window.job_list.topLevelItem(i).text(0).startswith("✓") for i in range(2))
 
     for a in window.cur.case.attorneys:
         a.checked = "Counsel" in (a.firm or "")
@@ -438,6 +444,7 @@ def one_day_two_attorneys(window, tmp_path, pages=30):
     window._refresh_outputs()
 
 
+@pytest.mark.usefixtures("split_orders_choose")  # (each firm's price at each speed)
 def test_who_ordered_splits_the_day_and_the_prices_show_each_attorney(window, tmp_path, monkeypatch):
     one_day_two_attorneys(window, tmp_path)
     assert window.inv_who.isEnabled() and window.inv_parties.isEnabled()
@@ -461,6 +468,7 @@ def test_who_ordered_needs_pages_to_bill(window, tmp_path):
     assert not window.inv_who.isEnabled() and "no transcript pages" in window.inv_who.toolTip()
 
 
+@pytest.mark.usefixtures("split_orders_choose")  # (each firm's price at each speed)
 def test_the_days_of_a_case_bill_each_attorney_for_its_own_days(window, tmp_path):
     """Alex ordered both days, Dana only the second (60 pages, indexed): a price line for each."""
     window.output_boxes["invoice"].setChecked(True)
@@ -475,6 +483,31 @@ def test_the_days_of_a_case_bill_each_attorney_for_its_own_days(window, tmp_path
                                                    "Alex B. Counsel: Regular $588.00 · Expedite (form) $687.00",
                                                    "Dana Smith: Regular $339.00 · Expedite (form) $393.00"]
     assert window.inv_who.isEnabled()  # Excerpts… shows both days, whoever is ticked on the day shown
+
+
+def test_a_split_order_s_prices_say_its_speeds_are_asked(window, tmp_path):
+    """Queens: firms that order the same pages commit to a speed. Until it is set, each is priced at the agreement
+    form's speed with a question mark (Generate asks); set, its price at that speed alone. Alex's invoice covers
+    its day alone too: an invoice can't be partly "choose one"."""
+    window.output_boxes["invoice"].setChecked(True)
+    two_days(window, tmp_path)
+    window.jobs[0].case.attorneys = [counsel(), smith(checked=False)]
+    window.jobs[1].case.attorneys = [counsel(), smith()]
+    window._show_case()
+    window._refresh_outputs()
+    assert window.inv_info.text().splitlines() == ["Generate all: one invoice for 2 days (90 pp.)",
+                                                   "Alex B. Counsel: Expedite? $687.00", "Dana Smith: Expedite? $393.00"]
+    assert "Generate asks for it" in window.inv_info.toolTip()
+    window.jobs[0].set_speed(A, "Regular")
+    window.jobs[1].set_speed(A, "Regular")
+    window.jobs[1].set_speed(B, "Expedite")
+    window._refresh_outputs()
+    # Alex, the slower firm on 6/4, pays as if both had ordered Regular: 249.00 + 60 x (4.30 / 2 + 1.00 / 2) for the
+    # original and the judge's index, + 60 x 3 x 1.00 of its own = 588.00. Dana pays the rest of the original and the
+    # judge's index at Expedite: 60 x (5.40 - 2.15) + 60 x (1.10 - 0.50) + 60 x 3 x 1.10 = 195 + 36 + 198 = 429.00
+    assert window.inv_info.text().splitlines()[1:] == ["Alex B. Counsel: Regular $588.00",
+                                                       "Dana Smith: Expedite $429.00"]
+    assert "Generate asks" not in window.inv_info.toolTip()
 
 
 def test_records_window_changes_amounts(window, tmp_path, monkeypatch):
@@ -509,6 +542,7 @@ def test_records_window_changes_amounts(window, tmp_path, monkeypatch):
     win.close()
 
 
+@pytest.mark.usefixtures("split_orders_choose")  # (four speeds a firm: the most lines)
 def test_each_attorneys_prices_fit_in_a_small_window(window, tmp_path):
     """Four speeds, lines for each firm: the Invoice panel's text is not cut off at the smallest size."""
     if not os.environ.get("QT_QPA_FONTDIR"):
@@ -554,6 +588,7 @@ def answer(monkeypatch, button):
     return asked
 
 
+@pytest.mark.usefixtures("split_orders_choose")  # (each firm's price at each speed)
 def test_who_ordered_follows_a_rename_and_needs_checking_when_an_attorney_is_unticked(window, tmp_path, monkeypatch):
     from minute_filler.deliver import ledger_for
     one_day_two_attorneys(window, tmp_path)
@@ -583,6 +618,7 @@ def test_who_ordered_follows_a_rename_and_needs_checking_when_an_attorney_is_unt
     assert window.inv_info.text().startswith("30 pp. · Regular $189.00") and window.inv_parties.isEnabled()
 
 
+@pytest.mark.usefixtures("split_orders_choose")  # (each firm's price at each speed)
 def test_retyping_the_pages_keeps_who_ordered(window, tmp_path, monkeypatch):
     one_day_two_attorneys(window, tmp_path)
     rows = [(10, [A]), (30, [A, B])]
@@ -608,7 +644,7 @@ def test_who_ordered_shows_the_days_of_the_invoice_and_counts_the_files_again(wi
     split(window, monkeypatch, [(30, [A])])  # Dana ordered nothing of the first day
     assert window.fill_all_btn.text() == "Generate all  (2 files)"  # counted again straight away
     assert [r.day.job for r in window.excerpts.runs] == [window.jobs[0]]
-    window.job_list.setCurrentRow(1)
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(1))
     assert [r.day.job for r in window.excerpts.runs] == [window.jobs[1]]  # it follows the day shown
     window.excerpts.close()
 
@@ -645,12 +681,12 @@ def test_a_document_added_while_generate_all_runs_is_billed_next_time(window, tm
 
 
 def test_generate_this_job_after_a_problem_does_not_bill_an_attorney_twice(window, tmp_path, monkeypatch):
-    from minute_filler import deliver
+    from minute_filler import invoice
     from minute_filler.deliver import ledger_for
     from minute_filler.gui import main_window as mw
     one_day_two_attorneys(window, tmp_path)
     window.output_boxes["agreement"].setChecked(False)
-    real, calls = deliver.make_invoice, []
+    real, calls = invoice.make_invoice, []
 
     def flaky(case, atty, *a, **k):
         calls.append(atty.name)
@@ -658,7 +694,7 @@ def test_generate_this_job_after_a_problem_does_not_bill_an_attorney_twice(windo
             raise PermissionError("the PDF is open in another program")
         return real(case, atty, *a, **k)
 
-    monkeypatch.setattr(deliver, "make_invoice", flaky)
+    monkeypatch.setattr(invoice, "make_invoice", flaky)  # (called by invoice.Invoices)
     monkeypatch.setattr(mw, "show_save_error", lambda *a: None)
     window.fill()
     assert [i.bill_to for i in ledger_for(window.s).invoices()] == ["Alex B. Counsel"]
@@ -676,9 +712,9 @@ def test_the_detail_box_shows_the_jobs_own_choice(window, tmp_path):
     window._refresh_outputs()
     window.inv_detail.setChecked(True)  # the first day alone
     window.jobs[1].include = True
-    window.job_list.setCurrentRow(1)
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(1))
     assert not window.inv_detail.isChecked() and not window.jobs[1].invoice_opts().detail
-    window.job_list.setCurrentRow(0)
+    window.job_list.setCurrentItem(window.job_list.topLevelItem(0))
     assert window.inv_detail.isChecked()
 
 

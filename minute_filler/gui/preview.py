@@ -3,7 +3,7 @@
 PreviewDialog shows the files Generate is about to make as pictures of their pages; nothing is saved until the
 user says so (MainWindow.fill makes them in a temporary folder first, with a records database of its own, so
 no invoice number is taken). With invoices among the files, its first tab is "The math" (math_view): how each
-amount is reached, shown before anything is saved. Each kind of file has a colour of its own (KIND_COLORS, told
+amount is reached, shown before anything is saved. Each kind of file has a colour of its own (kind_look, told
 by file_kind from the mark in the PDF) on its tab (ColorTabBar); with many files the tabs scroll (arrows at the
 end of the bar), "Files ▾" lists every file to go to it, and Ctrl+Tab / Ctrl+Shift+Tab (Ctrl+PgDn / Ctrl+PgUp)
 go to the next one and back; "Side by side" shows every file at once, scrolled across with the bar along the
@@ -21,7 +21,8 @@ a glance and OK. It can also copy it or save it as a PDF, and its "Don't show th
 (Settings -> Options turns it back on). The main window's "Who pays what" and its Invoice panel open it too
 (live=True), on the invoices as they would be made now, with no numbers yet. Wherever the math is shown it is a
 MathView: tables in either layout, "By invoice" or "Firms side by side", with a switch between them that is
-remembered (Settings.math_layout).
+remembered (Settings.math_layout), and under it MathSaves: which of the math Generate saves as PDFs with the
+invoices (Settings.save_math), changed there at once.
 
 WelcomeDialog asks a new user the few things the forms can't do without.
 """
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
+from ..courthouses import by_mark
 from ..log import error as log_error
 from ..settings import Settings
 from .zoom import z
@@ -84,29 +86,36 @@ def print_rect(printer, width: float, height: float) -> QRect:
     return QRect(round((paper.width() - w) / 2), round((paper.height() - h) / 2), round(w), round(h))
 
 
-# Each kind of file has a colour of its own: its tab, and its heading side by side (the math first)
-KIND_COLORS = {"math": "#0d9488", "agreement": "#2563eb", "invoice": "#16a34a", "detailed": "#84cc16",
-               "MOFR": "#9333ea", "other": "#64748b"}
-KIND_NAMES = {"math": "The math", "agreement": "Minute agreement", "invoice": "Invoice",
-              "detailed": "Invoice (detailed copy)", "MOFR": "MOFR", "other": "File"}
+# Each kind of file has a colour of its own: its tab, and its heading side by side (the math first). An
+# output's PDFs have its own (courthouses.OutputSpec.color, told by their mark); these are the preview's others:
+# kind -> (name, colour)
+PREVIEW_KINDS = {"math": ("The math", "#0d9488"), "detailed": ("Invoice (detailed copy)", "#84cc16"),
+                 "other": ("File", "#64748b")}
 ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.35, 2.5, 1.15  # the preview's own zoom (Ctrl + / Ctrl - / Ctrl 0, Ctrl+wheel)
 SIDE_WIDTH = 300  # a page's width side by side at zoom 1 (px at 100 % app zoom): several files fit across
 
 
+def kind_look(kind: str) -> tuple[str, str]:
+    """(name, colour) of a kind of file (file_kind): an output's label and colour, else one of PREVIEW_KINDS."""
+    spec = by_mark(kind)
+    return (spec.label, spec.color) if spec and spec.color else PREVIEW_KINDS.get(kind, PREVIEW_KINDS["other"])
+
+
 def file_kind(path: Path | str) -> str:
-    """Which kind of file this app made (a key of KIND_COLORS): from the mark it puts in each PDF (fill.mark),
-    "detailed" for an invoice's detailed copy; "other" when it can't tell."""
+    """Which kind of file this app made: the mark it puts in each PDF (pdfout.mark: "agreement", "MOFR"), the
+    one of an output (courthouses.by_mark), or "math"; "detailed" for an invoice's detailed copy; "other"
+    when it can't tell."""
     try:
         import pymupdf
         with pymupdf.open(path) as doc:
             creator = (doc.metadata or {}).get("creator", "")
     except Exception:
         return "other"
-    from ..fill import MARK, OLD_MARKS
+    from ..pdfout import MARK, OLD_MARKS
     kind = next((creator.removeprefix(m) for m in (MARK, *OLD_MARKS) if creator.startswith(m)), "").strip()
     if kind == "invoice" and Path(path).stem.endswith("(detailed)"):
         return "detailed"
-    return kind if kind in KIND_COLORS else "other"
+    return kind if kind in PREVIEW_KINDS or by_mark(kind) else "other"
 
 
 class ColorTabBar(QTabBar):
@@ -135,7 +144,7 @@ class ColorTabBar(QTabBar):
 
 class PreviewDialog(QDialog):
     """The files about to be saved, a tab each, their pages as pictures; each kind of file (agreement, invoice,
-    MOFR, the math) has a colour of its own (KIND_COLORS). "Files ▾" and Ctrl+Tab go from file to file (go_to).
+    MOFR, the math) has a colour of its own (kind_look). "Files ▾" and Ctrl+Tab go from file to file (go_to).
     "Side by side" shows every file at once, next to each other and smaller; Ctrl + / Ctrl - / Ctrl 0 (or Ctrl
     and the mouse wheel) zoom either view. accept() = save them. Clicking "Don't show previews anymore" sets
     Settings.preview_before_saving off at once (and saves the settings); the box stays open for the answer about
@@ -274,16 +283,17 @@ class PreviewDialog(QDialog):
         self.resize(w, h)
 
     def _add_tab(self, widget: QWidget, text: str, kind: str, tip: str, line: str = "") -> None:
-        """A tab in the colour of its kind of file (KIND_COLORS), its kind said in its tooltip; and its line in
+        """A tab in the colour of its kind of file (kind_look), its kind said in its tooltip; and its line in
         the Files menu (line: the whole file name; default the tab's text), with a square of that colour."""
         i = self.tabs.addTab(widget, text)
-        self.tabs.tabBar().setTabData(i, KIND_COLORS[kind])
-        self.tabs.setTabToolTip(i, f"{KIND_NAMES[kind]}: {tip}")
+        name, color = kind_look(kind)
+        self.tabs.tabBar().setTabData(i, color)
+        self.tabs.setTabToolTip(i, f"{name}: {tip}")
         self._zoom_with_wheel(widget)
         swatch = QPixmap(z(12), z(12))
-        swatch.fill(QColor(KIND_COLORS[kind]))
+        swatch.fill(QColor(color))
         action = self.files_menu.addAction(QIcon(swatch), line.replace("&", "&&") or text)  # (&&: a lone &)
-        action.setToolTip(f"{KIND_NAMES[kind]}: {tip}")
+        action.setToolTip(f"{name}: {tip}")
         action.triggered.connect(lambda _=False, n=i: self.go_to(n))
 
     def go_to(self, i: int) -> None:
@@ -313,8 +323,9 @@ class PreviewDialog(QDialog):
             col = QVBoxLayout()
             col.setAlignment(Qt.AlignTop)
             title = QLabel(name if len(name) <= 40 else name[:39].rstrip() + "…")
-            title.setToolTip(f"{KIND_NAMES[kind]}: {tip}")
-            title.setStyleSheet(f"color: white; background: {KIND_COLORS[kind]}; border-radius: 4px; "
+            label, color = kind_look(kind)
+            title.setToolTip(f"{label}: {tip}")
+            title.setStyleSheet(f"color: white; background: {color}; border-radius: 4px; "
                                 "padding: 3px 8px; font-weight: 600;")
             col.addWidget(title)
             self.side_titles.append(title)
@@ -415,6 +426,49 @@ class PreviewDialog(QDialog):
 
 
 COPY_TIP = "Put all of it on the clipboard as text, a line for each charge, to paste into an e-mail"
+SAVES_TIP = ("Generate saves the math as PDFs next to the invoices, so it is there when someone asks later:\n"
+             "each invoice's (to send that firm) and one for all of them (to look back at the job).\n"
+             "Also in Settings → Invoice.")
+
+
+class MathSaves(QWidget):
+    """The row that says which of the math Generate saves with the invoices (Settings.save_math), with a list
+    to change it; a change is saved at once, as the layout switch is. Shown with the math wherever it appears,
+    so the reporter sees it is kept and can say otherwise there; the main window counts its files again once the
+    math's window closes (MainWindow._math_saves_kept)."""
+
+    def __init__(self, s: Settings, parent=None):
+        from ..settings import MATH_SAVES
+        super().__init__(parent)
+        self.s = s
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("Save the math with the invoices:")
+        label.setObjectName("muted")
+        label.setToolTip(SAVES_TIP)
+        self.choice = QComboBox()
+        for key, text in MATH_SAVES.items():
+            self.choice.addItem(text, key)
+        self.choice.setCurrentIndex(max(0, self.choice.findData(s.save_math)))
+        self.choice.setToolTip(SAVES_TIP)
+        self.choice.currentIndexChanged.connect(self._chosen)
+        row.addWidget(label)
+        row.addWidget(self.choice)
+
+    def _chosen(self, _=None) -> None:
+        """Another choice: Settings.save_math, saved now (a file that can't be written is logged, not shown)."""
+        self.s.save_math = self.choice.currentData()
+        try:
+            self.s.save()
+        except OSError as e:
+            log_error("could not save the settings", e)
+
+
+def _saved_math_text(saved: list) -> str:
+    """What MathDialog says Generate saved of the math this time: "This time: 3 PDFs next to the invoices."."""
+    if not saved:
+        return "This time: not saved."
+    return f"This time: {'1 PDF' if len(saved) == 1 else f'{len(saved)} PDFs'} next to the invoices."
 
 
 class MathView(QWidget):
@@ -494,14 +548,18 @@ class MathView(QWidget):
 
 
 def math_view(made: list, heading: str, s: Settings | None = None) -> QWidget:
-    """The math of invoices as the preview's "The math" tab shows it: a MathView under a heading, and Copy all.
-    made: (FirmInvoice, invoice number) for each invoice. The widget returned keeps the MathView as .view, its
-    text box as .text (PreviewDialog zooms it) and the plain text as .plain."""
+    """The math of invoices as the preview's "The math" tab shows it: a MathView under a heading, which of it
+    Save keeps (MathSaves), and Copy all. made: (FirmInvoice, invoice number) for each invoice. The widget
+    returned keeps the MathView as .view, its text box as .text (PreviewDialog zooms it), the plain text as
+    .plain and the MathSaves as .saves (None without settings)."""
     w = QWidget()
     col = QVBoxLayout(w)
     view = MathView(made, s, heading)
     col.addWidget(view, 1)
     row = QHBoxLayout()
+    w.saves = MathSaves(s) if s is not None else None
+    if w.saves is not None:
+        row.addWidget(w.saves)
     note = QLabel("")
     note.setObjectName("muted")
     row.addWidget(note)
@@ -520,13 +578,15 @@ class MathDialog(QDialog):
     """How the amounts of the invoices just made were reached, charge by charge, in tables (a MathView: by
     invoice, or the firms side by side). OK closes it; Copy all puts it on the clipboard; Save as PDF... saves
     the layout shown (starting in `folder`, the invoices' folder); "Don't show this anymore" sets
-    Settings.show_math off at once (and saves the settings). `live`: the invoices not made yet, as the main
-    window's Who pays what card and the Invoice panel's link show them (no numbers yet, and nothing to turn
-    off)."""
+    Settings.show_math off at once (and saves the settings). Under the math, which of it Generate saves with the
+    invoices (MathSaves) and, after a Generate, what it saved this time (`saved`, the PDFs). `live`: the
+    invoices not made yet, as the main window's Who pays what card and the Invoice panel's link show them (no
+    numbers yet, and nothing to turn off)."""
 
-    def __init__(self, made: list, s: Settings, parent=None, folder: Path | None = None, live: bool = False):
+    def __init__(self, made: list, s: Settings, parent=None, folder: Path | None = None, live: bool = False,
+                 saved: list | None = None):
         """made: (FirmInvoice, invoice number) for each invoice made (deliver.generate's `math`; the number ""
-        when `live`)."""
+        when `live`); saved: the math PDFs Generate saved this time (their names in the note's tooltip)."""
         super().__init__(parent)
         self.s, self.made, self.folder = s, made, folder
         self.setWindowTitle("The math")
@@ -544,6 +604,15 @@ class MathDialog(QDialog):
         self.view = MathView(made, s)
         self.text = self.view.text
         lay.addWidget(self.view, 1)
+        saves = QHBoxLayout()
+        self.saves = MathSaves(s)
+        saves.addWidget(self.saves)
+        self.saved_note = QLabel("" if live else _saved_math_text(saved or []))
+        self.saved_note.setObjectName("muted")
+        self.saved_note.setToolTip("\n".join(Path(p).name for p in saved or []))
+        saves.addWidget(self.saved_note)
+        saves.addStretch(1)
+        lay.addLayout(saves)
 
         row = QHBoxLayout()
         self.off = QPushButton("Don't show this anymore")
@@ -599,7 +668,7 @@ class MathDialog(QDialog):
     def _save(self) -> None:
         """Save as PDF...: asks where, then saves it there."""
         from ..invoice_math import to_pdf
-        from ..fill import safe_filename
+        from ..pdfout import safe_filename
         folder = self.folder or self.s.records_folder()
         p, _ = QFileDialog.getSaveFileName(self, "Save the math", str(Path(folder) / safe_filename(self.default_name())),
                                            "PDF (*.pdf)")
@@ -733,7 +802,7 @@ class WelcomeDialog(QDialog):
         self.sheet.setToolTip("Your prices per page. Sheets are small files you can edit in Excel:\n"
                               "File → Open rate sheets folder.")
         self.folder = QLineEdit(s.output_dir)
-        self.folder.setPlaceholderText("blank = next to the document you dropped")
+        self.folder.setPlaceholderText("blank = in a folder for the case, next to the document you dropped")
         pick = QPushButton("Browse…")
         pick.setAutoDefault(False)
         pick.clicked.connect(self._pick)

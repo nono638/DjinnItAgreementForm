@@ -5,7 +5,7 @@ parties, an index for each party (one, split, when Setup's IndexEach is FALSE, a
 "split" does), a copy and an e-mailed copy for each, and each party's share rounded up to the cent. Whether there
 is an index is decided on the whole transcript (Job: the whole transcript's pages, every reporter's), and it is
 charged on the Pages billed, as in the app. (Pages ordered by some of the parties only - the app's Excerpts... -
-are not in it.) All its data is fictional.
+and parties ordering the same pages at different speeds are not in it.) All its data is fictional.
 
     .venv/Scripts/python.exe tools/make_invoice_template.py
 

@@ -117,14 +117,16 @@ QLabel#badge[src="records"] { color: {records}; }
 QLabel#badge[src="you"] { color: {you}; }
 QLabel#badge[src=""] { color: transparent; border: 1px solid transparent; }
 
-QListWidget, QTableWidget, QTableView {
+QListWidget, QTableWidget, QTableView, QTreeView {
   background: {card}; border: 1px solid {border}; border-radius: 8px; gridline-color: {border};
   alternate-background-color: {bg};
 }
 QListWidget::item { padding: 5px; }
-QListWidget::indicator, QTableView::indicator { width: 15px; height: 15px; border: 1px solid {input_border}; border-radius: 4px; background: {input}; }
-QListWidget::indicator:checked, QTableView::indicator:checked { background: {accent}; border: 1px solid {accent}; image: url(CHECK_ICON); }
-QListWidget::item:selected, QTableWidget::item:selected { background: {sel}; color: {text}; }
+QTreeView { show-decoration-selected: 1; }
+QTreeView::item { padding: 3px 2px; }
+QListWidget::indicator, QTableView::indicator, QTreeView::indicator { width: 15px; height: 15px; border: 1px solid {input_border}; border-radius: 4px; background: {input}; }
+QListWidget::indicator:checked, QTableView::indicator:checked, QTreeView::indicator:checked { background: {accent}; border: 1px solid {accent}; image: url(CHECK_ICON); }
+QListWidget::item:selected, QTableWidget::item:selected, QTreeView::item:selected { background: {sel}; color: {text}; }
 QHeaderView::section { background: {header_bg}; border: none; border-bottom: 1px solid {border}; padding: 5px; color: {muted}; font-weight: 600; }
 QTabWidget::pane { border: 1px solid {border}; border-radius: 8px; background: {card}; top: -1px; }
 QTabBar::tab { padding: 7px 16px; border: none; color: {muted}; }

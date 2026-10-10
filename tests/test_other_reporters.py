@@ -1,8 +1,8 @@
 """Invoices for the other reporters of a transcript (2.0.0): Whose pages... ticks whose pages are billed - the
 user's, any of the other reporters', or the whole transcript - and each reporter ticked gets invoices of their
 own pages in their name: their details at the top and their payment text (Settings.reporters), numbers counted
-apart from the user's ("DS-2026-0001"), file names that say whose they are, and records that keep them out of
-the user's sums. All names are made up."""
+apart from the user's ("DS-2026-0001"), file names that say whose they are, the math of all of them saved apart
+for each reporter, and records that keep them out of the user's sums. All names are made up."""
 import json
 from datetime import date
 from decimal import Decimal
@@ -38,6 +38,7 @@ def s(tmp_path):
     s.invoice_speeds = ["Regular"]
     s.reporters = {DS: ReporterProfile(name="Dana", full_name="Dana Smith", address1="9 Sample Lane",
                                        email="dsmith@example.com", payment="Zelle: (555) 010-0199")}
+    s.save_math = "off"  # (the files counted are the invoices; test_each_reporter_s_math_is_apart saves it)
     return s
 
 
@@ -56,6 +57,21 @@ def text_of(path) -> str:
     """The first page's text, its spaces and line breaks made single spaces."""
     with pymupdf.open(path) as doc:
         return " ".join(doc[0].get_text().split())
+
+
+def test_each_reporter_s_math_is_apart(tmp_path, s):
+    """The math saved with the invoices (Settings.save_math "both"): each invoice's, and the math of all of them
+    once for the user's invoices and once for Dana Smith's, not one file that mixes them."""
+    from minute_filler.invoice_math import is_math_file
+    s.save_math = "both"
+    job = shared_job(tmp_path, s, ["me", DS])
+    fill_jobs([job], s, outputs=["invoice"])
+    maths = sorted(p.name for p in job.saved if is_math_file(p))
+    overall = [n for n in maths if n.startswith("Invoices ")]
+    assert len(maths) == 6 and overall == [
+        f"Invoices {YEAR}-0001 to {YEAR}-0002 - Jane Roe v. X.Y. Holding Corporation - the math.pdf",
+        f"Invoices DS-{YEAR}-0001 to DS-{YEAR}-0002 - Jane Roe v. X.Y. Holding Corporation - the math.pdf"]
+    assert len(ledger_for(s).invoices()) == 4  # (the math is recorded nowhere)
 
 
 def test_my_invoices_and_dana_smiths_are_made_apart(tmp_path, s):

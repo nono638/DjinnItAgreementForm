@@ -1,8 +1,8 @@
-"""Generating the chosen outputs: agreements, MOFR and invoices (transcripts only), and their records; a folder
-of its own for each output (Settings -> Options -> Folders, also for an output added later; the command line's
-folder takes them all); also settings files from versions 3, 4 and 7 brought up to date (the invoice speeds,
-the old "offer every speed" box, invoice_choice, now decided by the speeds ticked alone, and the old run sheets
-folder)."""
+"""Generating the chosen outputs: agreements, MOFR and invoices (transcripts only; their math saved beside them),
+and their records; a folder of its own for each output (Settings -> Options -> Folders, also for an output added
+later; the others in the case's own folder; the command line's folder takes them all); also settings files from
+versions 3, 4 and 7 brought up to date (the invoice speeds, the old "offer every speed" box, invoice_choice, now
+decided by the speeds ticked alone, and the old run sheets folder)."""
 from pathlib import Path
 
 import pytest
@@ -55,7 +55,8 @@ def test_batch_makes_every_output_and_records_it(folder, s, tmp_path):
         a.checked = "Counsel" in (a.firm or "")
     fill_jobs([roe, smith], s, outputs=["agreement", "mofr", "invoice"])
     made = [p.name.split(" - ")[0] for p in roe.saved]
-    assert made[:2] == ["Minute Agreement", "MOFR"] and made[2].startswith("Invoice ") and len(made) == 3
+    assert made[:2] == ["Minute Agreement", "MOFR"] and made[2].startswith("Invoice ") and len(made) == 4
+    assert roe.saved[3].name == roe.saved[2].stem + " - the math.pdf"  # (its math, saved with it)
     assert not roe.error
     # the e-mail job gets its forms but no invoice, and says why
     assert [p.name.split(" - ")[0] for p in smith.saved] == ["Minute Agreement", "MOFR"]
@@ -117,7 +118,9 @@ def test_each_output_can_have_a_folder_of_its_own(folder, s, tmp_path):
     s.output_dirs = {"invoice": str(tmp_path / "Invoices"), "mofr": str(tmp_path / "MOFRs")}
     fill_jobs([roe], s, outputs=["agreement", "mofr", "invoice"])
     where = {p.name.split(" - ")[0].split(" ")[0]: p.parent for p in roe.saved}
-    assert where == {"Minute": tmp_path / "out", "MOFR": tmp_path / "MOFRs", "Invoice": tmp_path / "Invoices"}
+    # (the agreement in the case's own folder inside Save to; the outputs with folders of their own there, flat)
+    assert where == {"Minute": tmp_path / "out" / "712345-2021", "MOFR": tmp_path / "MOFRs",
+                     "Invoice": tmp_path / "Invoices"}
     assert Path(ledger_for(s).invoices()[0].file_path).parent == tmp_path / "Invoices"
 
 
